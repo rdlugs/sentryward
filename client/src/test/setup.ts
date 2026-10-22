@@ -9,6 +9,7 @@ configure({ asyncUtilTimeout: 3000 })
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   // The selected workspace is remembered there; each test starts fresh.
   localStorage.clear()
 })

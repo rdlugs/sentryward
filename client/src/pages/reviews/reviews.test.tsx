@@ -7,6 +7,9 @@ import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 import { mockApi } from "@/test/apiRoutes"
 import { detail, listItem } from "@/test/fixtures"
 
+const originalCreateObjectURL = URL.createObjectURL
+const originalRevokeObjectURL = URL.revokeObjectURL
+
 describe("Reviews page", () => {
   it("lists reviews with their status, verdict and finding counts", async () => {
     mockApi({ "GET /api/reviews?view=changes&page=1&limit=10": { reviews: [listItem], total: 1, page: 1, limit: 10 } })
@@ -612,11 +615,13 @@ describe("Review detail page", () => {
   // jsdom has no object URLs and would try to navigate on an anchor click.
   function stubDownload() {
     const blobs: Blob[] = []
-    URL.createObjectURL = vi.fn((blob: Blob) => {
-      blobs.push(blob)
-      return "blob:review"
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn((blob: Blob) => {
+        blobs.push(blob)
+        return "blob:review"
+      })
+      static revokeObjectURL = vi.fn()
     })
-    URL.revokeObjectURL = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
     return { blobs, click }
   }
@@ -635,7 +640,7 @@ describe("Review detail page", () => {
     await waitFor(() => expect(click).toHaveBeenCalledOnce())
     expect((click.mock.contexts[0] as HTMLAnchorElement).download).toBe(`sentryward-review-${detail.id}.md`)
     expect(await blobs[0].text()).toBe(markdown)
-    expect(screen.getByRole("button", { name: "Copy markdown" })).toBeEnabled()
+    await waitFor(() => expect(screen.getByRole("button", { name: "Download markdown" })).toBeEnabled())
   })
 
   it("offers no markdown download without a result", async () => {
@@ -660,6 +665,11 @@ describe("Review detail page", () => {
     expect(await screen.findByText("Could not download the markdown")).toBeInTheDocument()
     expect(click).not.toHaveBeenCalled()
     expect(screen.getByRole("button", { name: "Download markdown" })).toBeEnabled()
+  })
+
+  it("restores the object URL methods after download tests", () => {
+    expect(URL.createObjectURL).toBe(originalCreateObjectURL)
+    expect(URL.revokeObjectURL).toBe(originalRevokeObjectURL)
   })
 
   it.each([
