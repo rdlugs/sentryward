@@ -39,18 +39,30 @@ const globalConfig = (review: string) => ({
 
 const apiKey = { provider: "anthropic", stored: true, last4: "abcd", undecryptable: false, baseUrl: null, updatedAt: null, serverDefault: false }
 
+const serverKey = { ...apiKey, stored: false, last4: null, serverDefault: true }
+
 // Defaults to a fully set up account with automatic reviews on.
 function stubHome({
   connections = [connection],
   repos = [repo(true)],
   trigger = "published",
   reviews = [listItem],
-}: { connections?: unknown[]; repos?: unknown[]; trigger?: string; reviews?: unknown[] } = {}) {
+  keys = [apiKey],
+  keyStatus = "active",
+}: {
+  connections?: unknown[]
+  repos?: unknown[]
+  trigger?: string
+  reviews?: unknown[]
+  keys?: unknown[]
+  keyStatus?: string
+} = {}) {
   mockApi({
     "GET /api/connections": { connections, availableApps: ["github"] },
     "GET /api/repos": { repos },
     "GET /api/config/global": globalConfig(trigger),
-    "GET /api/settings/api-keys": { keys: [apiKey] },
+    "GET /api/settings/api-keys": { keys },
+    "GET /api/settings/api-keys/anthropic/status": { status: keyStatus },
     "GET /api/reviews?limit=5": { reviews, total: reviews.length, page: 1, limit: 5 },
   })
   renderWithProviders(<App />, { route: "/home" })
@@ -59,13 +71,17 @@ function stubHome({
 describe("Home page", () => {
   it.each([
     { name: "no connection", setup: { connections: [] }, title: "Connect a Git provider", button: "Connect a provider", href: "/repositories?tab=installation" },
+    { name: "no LLM connection", setup: { keys: [] }, title: "Connect an LLM provider", button: "Add an LLM connection", href: "/llm-connections" },
+    { name: "a revoked LLM key", setup: { keyStatus: "revoked" }, title: "Connect an LLM provider", button: "Add an LLM connection", href: "/llm-connections" },
+    { name: "an LLM key blocked by policy", setup: { keyStatus: "blocked" }, title: "Connect an LLM provider", button: "Add an LLM connection", href: "/llm-connections" },
+    { name: "a server LLM key", setup: { keys: [serverKey] }, title: "Reviews are on", button: "View repositories", href: "/repositories" },
     { name: "no enabled repository", setup: { repos: [repo(false)] }, title: "Reviews are off", button: "Add repositories", href: "/repositories" },
     { name: "manual-only triggers", setup: { trigger: "manual" }, title: "Automatic reviews are off", button: "Configure reviews", href: "/configuration" },
     { name: "everything set up", setup: {}, title: "Reviews are on", button: "View repositories", href: "/repositories" },
   ])("shows the hero for $name", async ({ setup, title, button, href }) => {
     stubHome(setup)
 
-    const hero = (await screen.findByText(title)).closest("[data-slot=card]") as HTMLElement
+    const hero = (await screen.findByRole("heading", { name: title })).closest("[data-slot=card]") as HTMLElement
     expect(within(hero).getByRole("link", { name: button })).toHaveAttribute("href", href)
   })
 

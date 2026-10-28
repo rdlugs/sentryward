@@ -283,6 +283,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- The home page no longer says "Reviews are on" when no LLM connection can
+  run a review. After connecting a Git provider, the status card now asks for
+  an LLM connection (linking to LLM connections) until a stored key checks as
+  active or the server provides an env key; revoked, unreachable, unreadable
+  and policy-blocked keys count as missing. Closes #152.
+
 - An open finding in a file the change later deletes is now resolved (as
   invalidated) instead of staying open forever: a deleted file is never
   reviewed, so the run never got to say the finding was gone.
