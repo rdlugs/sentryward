@@ -232,6 +232,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- Home replaces the status hero with a setup checklist built from live
+  data: connect GitHub or GitLab, enable a repository, connect an LLM
+  provider (with the same usability checks the hero had, including the
+  "Can't reach your LLM provider" state) and run a first review. Finished
+  steps are ticked, the next one gets the primary button, and the checklist
+  disappears once every step is done. Suggested actions no longer list
+  setup steps: "Review a change" appears after the first review, and "Turn
+  on automatic reviews" once setup is done but only requested reviews run.
+  Closes #153.
+
 - `GET /api/settings/api-keys` reports `blocked` per provider: whether the
   privacy policy refuses that provider or its host, whichever key is used.
 

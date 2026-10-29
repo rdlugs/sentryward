@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react"
 import { Link } from "react-router"
-import { BookOpen, FolderGit2, GitPullRequest, KeyRound, SlidersHorizontal, type LucideIcon } from "lucide-react"
+import { BookOpen, FolderGit2, GitPullRequest, SlidersHorizontal, Zap, type LucideIcon } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { PageShell } from "@/components/PageShell"
 import { Card, CardContent } from "@/components/ui/card"
@@ -9,7 +9,8 @@ import { useConnections, useRepos } from "@/features/forge/api"
 import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
 import { ConnectionsPanel } from "./ConnectionsPanel"
 import { RecentReviewsTimeline } from "./RecentReviewsTimeline"
-import { StatusHero } from "./StatusHero"
+import { SetupChecklist } from "./SetupChecklist"
+import { useSetupProgress } from "./useSetupProgress"
 
 const DOCS_URL = "https://github.com/rdlugs/sentryward#readme"
 
@@ -67,19 +68,24 @@ export function HomePage() {
   const connections = useConnections().data?.connections ?? []
   const repos = useRepos().data?.repos ?? []
   const config = useGlobalConfig().data?.config
+  const setup = useSetupProgress()
 
   const enabledRepos = repos.filter((r) => r.enabled).length
   const blockOn = config?.review.blockOn
   const configText = config
     ? `${capitalize(config.profile)} profile, blocks on ${blockOn === "critical" ? "critical" : `${blockOn} or worse`} findings.`
     : "Choose what reviews look for and when they block."
+  // Setup steps live in the checklist, so these are only what applies once
+  // each is done: reviewing again, and turning on automatic reviews.
+  const showReview = !setup.isPending && setup.hasReviews
+  const showAutomatic = !setup.isPending && setup.complete && setup.manualOnly
 
   return (
     <PageShell variant="wide">
       <PageHeader title="Overview" description="Your review setup at a glance, and what to do next." />
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem] compact:gap-8 spacious:gap-12">
         <div className="flex flex-col gap-8 compact:gap-6 spacious:gap-10">
-          <StatusHero />
+          <SetupChecklist steps={setup.steps} isPending={setup.isPending} onReview={() => setReviewOpen(true)} />
 
           <section className="flex flex-col gap-4 compact:gap-3 spacious:gap-5">
             <SectionLabel>From your codebase</SectionLabel>
@@ -103,17 +109,26 @@ export function HomePage() {
             </div>
           </section>
 
-          <section className="flex flex-col gap-3 compact:gap-2 spacious:gap-4">
-            <SectionLabel>Suggested actions</SectionLabel>
-            <button type="button" className={actionRow} onClick={() => setReviewOpen(true)}>
-              <IconTile icon={GitPullRequest} />
-              <ActionText title="Review a change" text="Pick an open pull request or paste a link to review it now." />
-            </button>
-            <Link to="/llm-connections" className={actionRow}>
-              <IconTile icon={KeyRound} />
-              <ActionText title="Connect an LLM provider" text="Add an Anthropic, OpenAI, Google or Ollama key for reviews." />
-            </Link>
-          </section>
+          {(showReview || showAutomatic) && (
+            <section className="flex flex-col gap-3 compact:gap-2 spacious:gap-4">
+              <SectionLabel>Suggested actions</SectionLabel>
+              {showReview && (
+                <button type="button" className={actionRow} onClick={() => setReviewOpen(true)}>
+                  <IconTile icon={GitPullRequest} />
+                  <ActionText title="Review a change" text="Pick an open pull request or paste a link to review it now." />
+                </button>
+              )}
+              {showAutomatic && (
+                <Link to="/configuration" className={actionRow}>
+                  <IconTile icon={Zap} />
+                  <ActionText
+                    title="Turn on automatic reviews"
+                    text="Only reviews you request run now. Review pull requests as they're opened or updated."
+                  />
+                </Link>
+              )}
+            </section>
+          )}
         </div>
 
         <aside className="flex flex-col gap-5">

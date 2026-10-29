@@ -70,46 +70,81 @@ function stubHome({
   renderWithProviders(<App />, { route: "/home" })
 }
 
+// The checklist step that holds the primary button.
+async function nextStep() {
+  const list = await screen.findByRole("list", { name: "Setup steps" })
+  return list.querySelector("[aria-current=step]") as HTMLElement
+}
+
 describe("Home page", () => {
   it.each([
-    { name: "no connection", setup: { connections: [] }, title: "Connect a Git provider", button: "Connect a provider", href: "/repositories?tab=installation" },
-    { name: "no enabled repository", setup: { repos: [repo(false)] }, title: "Reviews are off", button: "Add repositories", href: "/repositories" },
-    { name: "manual-only triggers", setup: { trigger: "manual" }, title: "Automatic reviews are off", button: "Configure reviews", href: "/configuration" },
-    { name: "everything set up", setup: {}, title: "Reviews are on", button: "View repositories", href: "/repositories" },
-  ])("shows the hero for $name", async ({ setup, title, button, href }) => {
+    { name: "no connection", setup: { connections: [] }, title: "Connect GitHub or GitLab", button: "Connect a provider", href: "/repositories?tab=installation" },
+    { name: "no enabled repository", setup: { repos: [repo(false)] }, title: "Enable a repository", button: "Add repositories", href: "/repositories" },
+    { name: "no LLM connection", setup: { keys: [], keyStatuses: {} }, title: "Connect an LLM provider", button: "Add an LLM connection", href: "/llm-connections" },
+  ])("puts the primary button on the next step for $name", async ({ setup, title, button, href }) => {
     stubHome(setup)
 
-    const hero = (await screen.findByText(title)).closest("[data-slot=card]") as HTMLElement
-    expect(within(hero).getByRole("link", { name: button })).toHaveAttribute("href", href)
+    const step = await nextStep()
+    expect(within(step).getByRole("heading", { name: title })).toBeInTheDocument()
+    expect(within(step).getByRole("link", { name: button })).toHaveAttribute("href", href)
   })
 
-  it("asks for an LLM connection when none is usable", async () => {
-    stubHome({ keys: [], keyStatuses: {} })
+  it("ticks finished steps and asks for a first review last", async () => {
+    stubHome({ reviews: [] })
 
-    const hero = (await screen.findByRole("heading", { name: "Connect an LLM provider" })).closest("[data-slot=card]") as HTMLElement
-    expect(within(hero).getByRole("link", { name: "Add an LLM connection" })).toHaveAttribute("href", "/llm-connections")
+    const step = await nextStep()
+    expect(within(step).getByRole("heading", { name: "Run a first review" })).toBeInTheDocument()
+    expect(screen.getByText("3 of 4 steps done")).toBeInTheDocument()
+    for (const done of ["Connect GitHub or GitLab", "Enable a repository", "Connect an LLM provider"])
+      expect(screen.getByRole("heading", { name: `${done} (done)` })).toBeInTheDocument()
+  })
+
+  it("ticks steps finished out of order", async () => {
+    stubHome({ connections: [], reviews: [] })
+
+    await nextStep()
+    expect(screen.getByRole("heading", { name: "Enable a repository (done)" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "Connect an LLM provider (done)" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "Run a first review" })).toBeInTheDocument()
+  })
+
+  it("opens the manual review sheet from the first review step", async () => {
+    stubHome({ reviews: [] })
+
+    await userEvent.click(within(await nextStep()).getByRole("button", { name: "Review a change" }))
+
+    expect(await screen.findByRole("dialog", { name: "Manual review" })).toBeInTheDocument()
+  })
+
+  it("hides the checklist once setup is complete", async () => {
+    stubHome()
+
+    expect(await screen.findByRole("button", { name: /Review a change/ })).toBeInTheDocument()
+    expect(screen.queryByRole("list", { name: "Setup steps" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: /Turn on automatic reviews/ })).not.toBeInTheDocument()
   })
 
   it("counts a server-provided LLM key as usable", async () => {
     stubHome({
       keys: [{ ...apiKey, stored: false, last4: null, serverDefault: true }],
       keyStatuses: {},
+      reviews: [],
     })
 
-    expect(await screen.findByText("Reviews are on")).toBeInTheDocument()
+    expect(await screen.findByRole("heading", { name: "Connect an LLM provider (done)" })).toBeInTheDocument()
   })
 
   it("treats a revoked LLM connection as missing", async () => {
     stubHome({ keyStatuses: { anthropic: "revoked" } })
 
-    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+    expect(within(await nextStep()).getByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
   })
 
   it("judges a stored key on its own even when the server has a key", async () => {
     // Reviews use the stored key over the server's, so the revoked one decides.
     stubHome({ keys: [{ ...apiKey, serverDefault: true }], keyStatuses: { anthropic: "revoked" } })
 
-    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+    expect(within(await nextStep()).getByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
   })
 
   it("treats a server key the privacy policy blocks as missing", async () => {
@@ -118,27 +153,42 @@ describe("Home page", () => {
       keyStatuses: {},
     })
 
-    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+    expect(within(await nextStep()).getByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
   })
 
   it("says the provider can't be reached instead of asking for a connection", async () => {
     stubHome({ keyStatuses: { anthropic: "unreachable" } })
 
-    const hero = (await screen.findByRole("heading", { name: "Can't reach your LLM provider" })).closest("[data-slot=card]") as HTMLElement
-    expect(within(hero).getByRole("link", { name: "Check LLM connections" })).toHaveAttribute("href", "/llm-connections")
+    const step = await nextStep()
+    expect(within(step).getByRole("heading", { name: "Can't reach your LLM provider" })).toBeInTheDocument()
+    expect(within(step).getByRole("link", { name: "Check LLM connections" })).toHaveAttribute("href", "/llm-connections")
   })
 
   it("does not check an undecryptable key and treats it as missing", async () => {
     // No status route is stubbed: a request would 404 and read as unreachable.
     stubHome({ keys: [{ ...apiKey, last4: null, undecryptable: true }], keyStatuses: {} })
 
-    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+    expect(within(await nextStep()).getByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
   })
 
-  it("skips the LLM step when the key list fails to load", async () => {
-    stubHome({ keysFail: true, keyStatuses: {} })
+  it("counts the LLM step as done when the key list fails to load", async () => {
+    stubHome({ keysFail: true, keyStatuses: {}, reviews: [] })
 
-    expect(await screen.findByText("Reviews are on")).toBeInTheDocument()
+    expect(await screen.findByRole("heading", { name: "Connect an LLM provider (done)" })).toBeInTheDocument()
+  })
+
+  it("never suggests a setup step as an action", async () => {
+    stubHome({ keys: [], keyStatuses: {}, reviews: [] })
+
+    await nextStep()
+    expect(screen.queryByText("Suggested actions")).not.toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: /Connect an LLM provider/ })).not.toBeInTheDocument()
+  })
+
+  it("suggests automatic reviews when only requested reviews run", async () => {
+    stubHome({ trigger: "manual" })
+
+    expect(await screen.findByRole("link", { name: /Turn on automatic reviews/ })).toHaveAttribute("href", "/configuration")
   })
 
   it("summarises repositories and the review configuration", async () => {
