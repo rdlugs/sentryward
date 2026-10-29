@@ -2,7 +2,6 @@ import { Link } from "react-router"
 import { Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 import type { SetupStep } from "./useSetupProgress"
 
@@ -23,7 +22,8 @@ function StepAction({ step, primary, onReview }: { step: SetupStep; primary: boo
 }
 
 // Every setup step with the finished ones ticked; only the next one gets the
-// primary button. Gone once everything is done.
+// primary button. Gone once everything is done. Nothing renders while loading:
+// most visits are from finished setups, where a placeholder would only collapse.
 export function SetupChecklist({
   steps,
   isPending,
@@ -33,7 +33,7 @@ export function SetupChecklist({
   isPending: boolean
   onReview: () => void
 }) {
-  if (isPending) return <Skeleton className="h-64 w-full rounded-xl" />
+  if (isPending) return null
 
   const next = steps.find((step) => !step.done)
   if (!next) return null
@@ -69,9 +69,13 @@ export function SetupChecklist({
                 {!step.done && (
                   <>
                     <p className="text-sm text-muted-foreground">{step.text}</p>
-                    <div className="mt-1">
-                      <StepAction step={step} primary={step === next} onReview={onReview} />
-                    </div>
+                    {step.blocked ? (
+                      <p className="text-sm text-muted-foreground">{step.blocked}</p>
+                    ) : (
+                      <div className="mt-1">
+                        <StepAction step={step} primary={step === next} onReview={onReview} />
+                      </div>
+                    )}
                   </>
                 )}
               </div>

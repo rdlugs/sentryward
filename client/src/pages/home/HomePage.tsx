@@ -1,11 +1,11 @@
 import { useState, type ReactNode } from "react"
 import { Link } from "react-router"
-import { BookOpen, FolderGit2, GitPullRequest, SlidersHorizontal, Zap, type LucideIcon } from "lucide-react"
+import { BookOpen, FolderGit2, GitPullRequest, KeyRound, SlidersHorizontal, Zap, type LucideIcon } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { PageShell } from "@/components/PageShell"
 import { Card, CardContent } from "@/components/ui/card"
 import { useGlobalConfig } from "@/features/config/api"
-import { useConnections, useRepos } from "@/features/forge/api"
+import { useConnections } from "@/features/forge/api"
 import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
 import { ConnectionsPanel } from "./ConnectionsPanel"
 import { RecentReviewsTimeline } from "./RecentReviewsTimeline"
@@ -66,17 +66,18 @@ function capitalize(text: string) {
 export function HomePage() {
   const [reviewOpen, setReviewOpen] = useState(false)
   const connections = useConnections().data?.connections ?? []
-  const repos = useRepos().data?.repos ?? []
   const config = useGlobalConfig().data?.config
   const setup = useSetupProgress()
 
-  const enabledRepos = repos.filter((r) => r.enabled).length
+  const { enabledRepos } = setup
   const blockOn = config?.review.blockOn
   const configText = config
     ? `${capitalize(config.profile)} profile, blocks on ${blockOn === "critical" ? "critical" : `${blockOn} or worse`} findings.`
     : "Choose what reviews look for and when they block."
   // Setup steps live in the checklist, so these are only what applies once
-  // each is done: reviewing again, and turning on automatic reviews.
+  // each is done: a provider outage, reviewing again, and turning on
+  // automatic reviews.
+  const showUnreachable = !setup.isPending && setup.llmUnreachable
   const showReview = !setup.isPending && setup.hasReviews
   const showAutomatic = !setup.isPending && setup.complete && setup.manualOnly
 
@@ -109,9 +110,18 @@ export function HomePage() {
             </div>
           </section>
 
-          {(showReview || showAutomatic) && (
+          {(showUnreachable || showReview || showAutomatic) && (
             <section className="flex flex-col gap-3 compact:gap-2 spacious:gap-4">
               <SectionLabel>Suggested actions</SectionLabel>
+              {showUnreachable && (
+                <Link to="/llm-connections" className={actionRow}>
+                  <IconTile icon={KeyRound} />
+                  <ActionText
+                    title="Can't reach your LLM provider"
+                    text="The provider didn't answer its status check, so reviews may fail until it's reachable again."
+                  />
+                </Link>
+              )}
               {showReview && (
                 <button type="button" className={actionRow} onClick={() => setReviewOpen(true)}>
                   <IconTile icon={GitPullRequest} />

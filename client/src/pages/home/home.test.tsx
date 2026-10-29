@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
@@ -48,6 +48,7 @@ function stubHome({
   keys = [apiKey],
   keyStatuses = { anthropic: "active" },
   keysFail = false,
+  connectionsFail = false,
 }: {
   connections?: unknown[]
   repos?: unknown[]
@@ -56,9 +57,13 @@ function stubHome({
   keys?: unknown[]
   keyStatuses?: Record<string, string>
   keysFail?: boolean
+  connectionsFail?: boolean
 } = {}) {
+  const completed = (reviews as { status?: string }[]).filter((r) => r.status === "completed")
   mockApi({
-    "GET /api/connections": { connections, availableApps: ["github"] },
+    "GET /api/connections": connectionsFail
+      ? () => jsonResponse(500, { message: "Internal Server Error" })
+      : { connections, availableApps: ["github"] },
     "GET /api/repos": { repos },
     "GET /api/config/global": globalConfig(trigger),
     "GET /api/settings/api-keys": keysFail ? () => jsonResponse(500, { message: "Internal Server Error" }) : { keys },
@@ -66,6 +71,7 @@ function stubHome({
       Object.entries(keyStatuses).map(([provider, status]) => [`GET /api/settings/api-keys/${provider}/status`, { status }]),
     ),
     "GET /api/reviews?limit=5": { reviews, total: reviews.length, page: 1, limit: 5 },
+    "GET /api/reviews?status=completed&limit=1": { reviews: completed.slice(0, 1), total: completed.length, page: 1, limit: 1 },
   })
   renderWithProviders(<App />, { route: "/home" })
 }
@@ -73,7 +79,12 @@ function stubHome({
 // The checklist step that holds the primary button.
 async function nextStep() {
   const list = await screen.findByRole("list", { name: "Setup steps" })
-  return list.querySelector("[aria-current=step]") as HTMLElement
+  let step: HTMLElement | null = null
+  await waitFor(() => {
+    step = list.querySelector<HTMLElement>("[aria-current=step]")
+    expect(step).not.toBeNull()
+  })
+  return step!
 }
 
 describe("Home page", () => {
@@ -106,6 +117,34 @@ describe("Home page", () => {
     expect(screen.getByRole("heading", { name: "Enable a repository (done)" })).toBeInTheDocument()
     expect(screen.getByRole("heading", { name: "Connect an LLM provider (done)" })).toBeInTheDocument()
     expect(screen.getByRole("heading", { name: "Run a first review" })).toBeInTheDocument()
+  })
+
+  it("holds back the review action until the steps before it are done", async () => {
+    stubHome({ connections: [], reviews: [] })
+
+    await nextStep()
+    expect(screen.getByText("Available once the steps above are done.")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Review a change" })).not.toBeInTheDocument()
+  })
+
+  it("does not count a review that never finished as the first one", async () => {
+    stubHome({ reviews: [{ ...listItem, status: "failed" }, { ...listItem, id: "skipped", status: "skipped" }] })
+
+    expect(within(await nextStep()).getByRole("heading", { name: "Run a first review" })).toBeInTheDocument()
+  })
+
+  it("counts a partial review as the first one", async () => {
+    stubHome({ reviews: [{ ...listItem, status: "partial" }] })
+
+    expect(await screen.findByRole("button", { name: /Review a change/ })).toBeInTheDocument()
+    expect(screen.queryByRole("list", { name: "Setup steps" })).not.toBeInTheDocument()
+  })
+
+  it("counts the Git provider step as done when connections fail to load", async () => {
+    stubHome({ connectionsFail: true, reviews: [] })
+
+    expect(await screen.findByRole("heading", { name: "Connect GitHub or GitLab (done)" })).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: "Connect a provider" })).not.toBeInTheDocument()
   })
 
   it("opens the manual review sheet from the first review step", async () => {
@@ -156,12 +195,11 @@ describe("Home page", () => {
     expect(within(await nextStep()).getByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
   })
 
-  it("says the provider can't be reached instead of asking for a connection", async () => {
+  it("flags an unreachable provider without reopening setup", async () => {
     stubHome({ keyStatuses: { anthropic: "unreachable" } })
 
-    const step = await nextStep()
-    expect(within(step).getByRole("heading", { name: "Can't reach your LLM provider" })).toBeInTheDocument()
-    expect(within(step).getByRole("link", { name: "Check LLM connections" })).toHaveAttribute("href", "/llm-connections")
+    expect(await screen.findByRole("link", { name: /Can't reach your LLM provider/ })).toHaveAttribute("href", "/llm-connections")
+    expect(screen.queryByRole("list", { name: "Setup steps" })).not.toBeInTheDocument()
   })
 
   it("does not check an undecryptable key and treats it as missing", async () => {
