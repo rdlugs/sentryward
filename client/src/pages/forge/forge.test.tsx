@@ -883,7 +883,9 @@ describe("Repositories page", () => {
     await waitFor(() => expect(screen.getAllByText("Inactive")).toHaveLength(1))
     await chooseFilter("Connection status", "Inactive")
     expect(paths()).toEqual(["old/legacy"])
-  })
+    // Every keystroke and filter click re-renders the table; on CI runners that
+    // has crept past the 5s default.
+  }, 15_000)
 
   describe("pagination", () => {
     const manyRepos = Array.from({ length: 12 }, (_, i) => addedRepo(`r${i + 1}`, `team/repo-${String(i + 1).padStart(2, "0")}`))
