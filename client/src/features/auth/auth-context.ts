@@ -39,4 +39,7 @@ export type AuthContextValue = {
   switchWorkspace: (id: string) => void
 }
 
+// Null once signed out, so code running after a logout can tell.
+export const ME_QUERY_KEY = ["auth", "me"] as const
+
 export const AuthContext = createContext<AuthContextValue | null>(null)

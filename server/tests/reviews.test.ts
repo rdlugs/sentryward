@@ -9,7 +9,7 @@ import { toMarkdown } from "../src/review/render/markdown.ts";
 import { claimNext, recordTitle } from "../src/worker/queue.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { sampleResult } from "./helpers/result.ts";
-import { createUser } from "./helpers/users.ts";
+import { createTeam, createUser, inWorkspace } from "./helpers/users.ts";
 
 let cookie: string;
 let repoId: string;
@@ -357,6 +357,76 @@ describe("GET /api/reviews/stats", () => {
 
     const other = await createUser("other@example.com");
     expect((await request(app).get("/api/reviews/stats").set("Cookie", other.cookie)).body.runs).toBe(0);
+  });
+});
+
+describe("GET /api/reviews/attention", () => {
+  const ago = (ms: number) => new Date(Date.now() - ms);
+  const failedRun = (number: number, finishedAt: Date, status: "failed" | "completed" = "failed") => ({
+    repositoryId: repoId,
+    number,
+    headSha: "h",
+    trigger: "manual" as const,
+    status,
+    verdict: status === "failed" ? ("error" as const) : ("pass" as const),
+    finishedAt,
+  });
+
+  it("counts failed runs from the last day until the list is first viewed", async () => {
+    await prisma.reviewJob.createMany({
+      data: [
+        failedRun(1, ago(3_600_000)),
+        // Older than a day, or not failed: not flagged.
+        failedRun(2, ago(2 * 86_400_000)),
+        failedRun(3, ago(60_000), "completed"),
+      ],
+    });
+
+    const res = await request(app).get("/api/reviews/attention").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.failed).toBe(1);
+
+    const other = await createUser("other@example.com");
+    expect((await request(app).get("/api/reviews/attention").set("Cookie", other.cookie)).body.failed).toBe(0);
+  });
+
+  it("only counts runs that failed after the last visit, per workspace", async () => {
+    await prisma.reviewJob.create({ data: failedRun(1, ago(60_000)) });
+    const user = await prisma.user.findFirstOrThrow({ where: { email: "dev@example.com" } });
+    const team = await createTeam(user.id);
+
+    expect((await request(app).post("/api/reviews/viewed").set("Cookie", cookie)).status).toBe(204);
+    expect((await request(app).get("/api/reviews/attention").set("Cookie", cookie)).body.failed).toBe(0);
+
+    // Queued before the visit, failed after it.
+    await prisma.reviewJob.create({ data: failedRun(2, new Date(Date.now() + 1000)) });
+    expect((await request(app).get("/api/reviews/attention").set("Cookie", cookie)).body.failed).toBe(1);
+
+    // Viewing the personal workspace leaves the team's visit unrecorded.
+    const membership = await prisma.membership.findUniqueOrThrow({
+      where: { userId_workspaceId: { userId: user.id, workspaceId: team.id } },
+    });
+    expect(membership.reviewsViewedAt).toBeNull();
+    const teamRes = await request(app)
+      .get("/api/reviews/attention")
+      .set("Cookie", cookie)
+      .set(...inWorkspace(team.id));
+    expect(teamRes.body.failed).toBe(0);
+  });
+
+  it("drops a failure once a newer run of the change replaces it, as the list does", async () => {
+    await prisma.reviewJob.createMany({
+      data: [
+        { ...failedRun(1, ago(120_000)), createdAt: ago(180_000) },
+        { ...failedRun(1, ago(60_000), "completed"), createdAt: ago(90_000) },
+        // A superseded run hides nothing: the list skips it too.
+        { ...failedRun(2, ago(120_000)), createdAt: ago(180_000) },
+        { ...failedRun(2, ago(60_000)), status: "superseded" as const, createdAt: ago(90_000) },
+      ],
+    });
+
+    const res = await request(app).get("/api/reviews/attention").set("Cookie", cookie);
+    expect(res.body.failed).toBe(1);
   });
 });
 

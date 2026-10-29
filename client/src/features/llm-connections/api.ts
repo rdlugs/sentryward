@@ -45,10 +45,15 @@ function apiKeyStatusQuery(provider: LlmProvider) {
 }
 
 // Each provider is checked independently so one slow host does not delay the
-// other badges. Undefined means its request is still in progress.
-export function useApiKeyStatuses(keys: ApiKey[]): Partial<Record<LlmProvider, LlmConnectionStatus | undefined>> {
+// other badges. Undefined means its request is still in progress. With live
+// off, only a check some page already ran is read, since each one calls the
+// provider.
+export function useApiKeyStatuses(
+  keys: ApiKey[],
+  { live = true }: { live?: boolean } = {},
+): Partial<Record<LlmProvider, LlmConnectionStatus | undefined>> {
   return useQueries({
-    queries: keys.map((key) => apiKeyStatusQuery(key.provider)),
+    queries: keys.map((key) => ({ ...apiKeyStatusQuery(key.provider), enabled: live })),
     combine: (results) =>
       Object.fromEntries(
         results.map((result, index) => [

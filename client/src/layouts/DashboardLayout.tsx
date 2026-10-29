@@ -41,6 +41,7 @@ import {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -49,6 +50,7 @@ import {
 import { FullPageSpinner } from "@/features/auth/FullPageSpinner"
 import { useAuth } from "@/features/auth/useAuth"
 import { WorkspaceSwitcher } from "@/features/workspaces/WorkspaceSwitcher"
+import { useNavAttention, type NavAttention } from "./useNavAttention"
 
 type NavItem = { to: string; label: string; icon: typeof House }
 type NavGroup = { label?: string; adminOnly?: boolean; items: NavItem[] }
@@ -107,19 +109,57 @@ function breadcrumb(pathname: string): { label: string; to?: string }[] {
   return [{ label: "Home" }]
 }
 
-function NavItems({ items, pathname }: { items: NavItem[]; pathname: string }) {
+function NavItems({
+  items,
+  pathname,
+  attention,
+}: {
+  items: NavItem[]
+  pathname: string
+  attention: Record<string, NavAttention | undefined>
+}) {
   return (
     <SidebarMenu>
-      {items.map((item) => (
-        <SidebarMenuItem key={item.to}>
-          <SidebarMenuButton asChild isActive={pathname.startsWith(item.to)} tooltip={item.label}>
-            <NavLink to={item.to}>
-              <item.icon />
-              <span>{item.label}</span>
-            </NavLink>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      ))}
+      {items.map((item) => {
+        const flag = attention[item.to]
+        return (
+          <SidebarMenuItem key={item.to}>
+            <SidebarMenuButton
+              asChild
+              isActive={pathname.startsWith(item.to)}
+              tooltip={flag ? `${item.label}: ${flag.label}` : item.label}
+              // Room for the badge, as the button keeps for a menu action.
+              className={flag ? "pr-8" : undefined}
+            >
+              <NavLink to={item.to}>
+                {/* The badge hides with the labels, so a collapsed sidebar
+                    keeps a dot on the icon. */}
+                <span className="relative flex shrink-0">
+                  <item.icon className="size-4" />
+                  {flag && (
+                    <span
+                      className="absolute -top-1 -right-1 hidden size-2 rounded-full bg-destructive group-data-[collapsible=icon]:block"
+                      aria-hidden
+                    />
+                  )}
+                </span>
+                {/* The flag's text is part of the link's name, so it is read
+                    with the item; nested so the label stays the last span the
+                    button truncates. */}
+                <span>
+                  {item.label}
+                  {flag && <span className="sr-only">, {flag.label}</span>}
+                </span>
+              </NavLink>
+            </SidebarMenuButton>
+            {flag && (
+              <SidebarMenuBadge aria-hidden className="text-destructive">
+                {flag.count ?? <span className="size-2 rounded-full bg-destructive" />}
+              </SidebarMenuBadge>
+            )}
+          </SidebarMenuItem>
+        )
+      })}
     </SidebarMenu>
   )
 }
@@ -128,6 +168,7 @@ export function DashboardLayout() {
   const { user, workspace, logout } = useAuth()
   const navigate = useNavigate()
   const { pathname } = useLocation()
+  const attention = useNavAttention(pathname)
 
   async function handleLogout() {
     try {
@@ -155,7 +196,7 @@ export function DashboardLayout() {
           {groups.map((group) => (
             <SidebarGroup key={group.label ?? "main"}>
               {group.label && <SidebarGroupLabel>{group.label}</SidebarGroupLabel>}
-              <NavItems items={group.items} pathname={pathname} />
+              <NavItems items={group.items} pathname={pathname} attention={attention} />
             </SidebarGroup>
           ))}
         </SidebarContent>

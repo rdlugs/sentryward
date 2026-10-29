@@ -265,6 +265,60 @@ export async function getReviewStats(req: Request, res: Response) {
   });
 }
 
+// With no visit recorded, the last day counts as unseen.
+const UNSEEN_WINDOW_MS = 86_400_000;
+
+// The membership can go between requireWorkspace and here (a teammate removed
+// mid-request), so it reads as the same 404 the middleware gives.
+function membershipKey(req: Request) {
+  return { userId: req.userId!, workspaceId: req.workspaceId! };
+}
+
+// Failed runs the caller has not seen on the Reviews list, for the sidebar.
+// Counted by when they failed, so a run queued before the last visit that
+// fails after it still counts. Only a change's latest run counts, as on the
+// list's default view: a failure already followed by a rerun is not news. Must
+// stay in step with listChanges, or the badge names failures the list hides.
+export async function getReviewAttention(req: Request, res: Response) {
+  const membership = await prisma.membership.findUnique({
+    where: { userId_workspaceId: membershipKey(req) },
+    select: { reviewsViewedAt: true },
+  });
+  if (!membership) {
+    throw new HttpError(404, "Workspace not found");
+  }
+  const since = membership.reviewsViewedAt ?? new Date(Date.now() - UNSEEN_WINDOW_MS);
+  const [{ failed }] = await prisma.$queryRaw<{ failed: number }[]>`
+    SELECT count(*)::int AS failed
+    FROM review_jobs j
+    JOIN repositories r ON r.id = j.repository_id
+    JOIN forge_connections c ON c.id = r.connection_id
+    WHERE c.workspace_id = ${req.workspaceId!}::uuid
+      AND j.status = 'failed'
+      AND j.finished_at > ${since}
+      AND NOT EXISTS (
+        SELECT 1 FROM review_jobs n
+        WHERE n.repository_id = j.repository_id
+          AND n.number = j.number
+          AND n.created_at > j.created_at
+          AND n.status <> 'superseded'
+      )
+  `;
+  res.json({ failed, since: since.toISOString() });
+}
+
+// Per member and workspace, so each teammate clears their own badge.
+export async function markReviewsViewed(req: Request, res: Response) {
+  const { count } = await prisma.membership.updateMany({
+    where: membershipKey(req),
+    data: { reviewsViewedAt: new Date() },
+  });
+  if (count === 0) {
+    throw new HttpError(404, "Workspace not found");
+  }
+  res.status(204).end();
+}
+
 async function loadOwnedReview(workspaceId: string, id: string) {
   const review = await prisma.reviewJob.findFirst({
     where: { id, ...ownedBy(workspaceId) },

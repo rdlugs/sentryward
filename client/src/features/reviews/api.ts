@@ -57,6 +57,35 @@ export function useReviewStats() {
   })
 }
 
+export interface ReviewAttention {
+  // Failed runs since the caller last opened the Reviews list (or the last day).
+  failed: number
+  since: string
+}
+
+// For the sidebar badge. Under the "reviews" key so queueing or rerunning
+// refreshes it, and polled slowly so failures show up without a reload.
+export function useReviewAttention() {
+  return useQuery({
+    queryKey: ["reviews", "attention"],
+    queryFn: () => api<ReviewAttention>("/reviews/attention"),
+    refetchInterval: 60_000,
+  })
+}
+
+// The visit is stored on the server, so the badge clears on every device. The
+// workspace is passed in, not read from the selection: leaving the list on a
+// switch must mark the workspace that was open. Refetched rather than zeroed,
+// so a poll already in flight cannot restore the old count.
+export function useMarkReviewsViewed() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (workspaceId: string) =>
+      api<void>("/reviews/viewed", { method: "POST", headers: workspaceHeaders(workspaceId) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reviews", "attention"], exact: true }),
+  })
+}
+
 export function useReview(id: string) {
   return useQuery({
     queryKey: ["review", id],
