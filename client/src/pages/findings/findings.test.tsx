@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
@@ -339,6 +339,29 @@ describe("Findings page", () => {
     expect(await screen.findByRole("button", { name: "Old bug" })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Remove State filter/i })).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "SQL built from input" })).toBeNull()
+  })
+
+  it("reads each tab's filters and sort from the URL", async () => {
+    const resolved = { ...finding, id: "f-2", state: "resolved" as const, title: "Old bug" }
+    const fpRequest = vi.fn(() => jsonResponse(200, page([])))
+    mockApi({
+      "GET /api/findings/stats": stats,
+      "GET /api/findings?state=resolved&sort=severity&dir=desc&page=1&limit=10": page([resolved]),
+      [`${FP}&severity=critical&page=1&limit=10`]: fpRequest,
+    })
+    renderWithProviders(<App />, {
+      route: "/findings?state=resolved&sort=severity&dir=desc&fpSeverity=critical&kind=bogus",
+    })
+
+    expect(await screen.findByRole("button", { name: "Old bug" })).toBeInTheDocument()
+    expect(screen.getByRole("columnheader", { name: "Severity" })).toHaveAttribute("aria-sort", "descending")
+    expect(screen.getByRole("button", { name: /Remove State filter/i })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /Remove Type filter/i })).toBeNull()
+
+    await userEvent.click(screen.getByRole("tab", { name: "False positives" }))
+    await waitFor(() => expect(fpRequest).toHaveBeenCalled())
+    await userEvent.click(screen.getByRole("tab", { name: "Findings" }))
+    expect(await screen.findByRole("button", { name: "Old bug" })).toBeInTheDocument()
   })
 
   it("shows an empty state on the false positives tab when there are no findings", async () => {

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react"
-import { Link } from "react-router"
+import { Link, useLocation } from "react-router"
 import { ChevronRight, Copy, ExternalLink, MoreHorizontal, OctagonX, RotateCw } from "lucide-react"
 import { toast } from "sonner"
 import { NoMatchesRow } from "@/components/TableFilters"
@@ -24,6 +24,17 @@ import { isActive, SEVERITIES, type ReviewListItem } from "./types"
 import { useReviewMarkdown } from "./useReviewMarkdown"
 
 // Ticks only while something is running, so idle tables never re-render.
+// Remembers the list it was opened from, so the review's back link returns to
+// it with the same filters and page (see BackToReviews).
+function ReviewLink(props: { id: string; className?: string; children: ReactNode }) {
+  const location = useLocation()
+  return (
+    <Link to={`/reviews/${props.id}`} state={{ from: location.pathname + location.search }} className={props.className}>
+      {props.children}
+    </Link>
+  )
+}
+
 function useNow(enabled: boolean) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -168,9 +179,9 @@ function RunHistory({ review, colSpan }: { review: ReviewListItem; colSpan: numb
                 <StatusBadge status={run.status} reason={run.error} />
                 <VerdictBadge verdict={run.verdict} />
                 <TriggerIcon trigger={run.trigger} />
-                <Link to={`/reviews/${run.id}`} className="hover:underline">
+                <ReviewLink id={run.id} className="hover:underline">
                   <code>{run.headSha.slice(0, 7)}</code>
-                </Link>
+                </ReviewLink>
                 <span className="text-muted-foreground">{timeAgo(run.createdAt)}</span>
               </li>
             ))}
@@ -231,9 +242,9 @@ export function ReviewsTable({
               <TableRow>
                 <TableCell className="max-w-md">
                   <div className="flex items-center gap-1.5">
-                    <Link to={`/reviews/${review.id}`} className="truncate font-medium hover:underline">
+                    <ReviewLink id={review.id} className="truncate font-medium hover:underline">
                       {changeTitle(review)}
-                    </Link>
+                    </ReviewLink>
                     {webUrl && (
                       <a
                         href={webUrl}

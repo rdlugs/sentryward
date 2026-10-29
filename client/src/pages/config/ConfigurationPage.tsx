@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router"
 import { AlertTriangle, Globe, Plus } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
+import { UnsavedChangesDialog } from "@/components/UnsavedChangesDialog"
 import { useGlobalConfig } from "@/features/config/api"
 import { DEFAULT_CONFIG_TAB, isConfigTab, type ConfigTab } from "@/features/config/tabs"
 import { GlobalConfigForm } from "@/features/config/GlobalConfigForm"
@@ -63,10 +64,27 @@ export function ConfigurationPage() {
 
   const onTabChange = (value: ConfigTab) => update({ tab: value })
 
+  // A scope switch stays on this path, so the forms' route blocker lets it
+  // through; it remounts the form, which would drop the edits, so ask here.
+  const [dirty, setDirty] = useState(false)
+  const [pendingScope, setPendingScope] = useState<string | null>(null)
+  function selectScope(value: string) {
+    if (value === (selected?.id ?? GLOBAL)) return
+    if (dirty) setPendingScope(value)
+    else switchScope(value)
+  }
+  function switchScope(value: string) {
+    setDirty(false)
+    update({ repo: value === GLOBAL ? null : value })
+  }
+
   let body
   // Wait for the repository list before falling back, so a ?repo= link does not flash the global config.
   if (params.has("repo") && repos.isPending) body = <Skeleton className="h-96 w-full" />
-  else if (selected) body = <RepoConfigForm key={selected.id} repo={selected} tab={tab} onTabChange={onTabChange} />
+  else if (selected)
+    body = (
+      <RepoConfigForm key={selected.id} repo={selected} tab={tab} onTabChange={onTabChange} onDirtyChange={setDirty} />
+    )
   else if (global.isPending) body = <Skeleton className="h-96 w-full" />
   else if (global.isError)
     body = (
@@ -75,7 +93,7 @@ export function ConfigurationPage() {
         <AlertTitle>{global.error.message}</AlertTitle>
       </Alert>
     )
-  else body = <GlobalConfigForm global={global.data} tab={tab} onTabChange={onTabChange} />
+  else body = <GlobalConfigForm global={global.data} tab={tab} onTabChange={onTabChange} onDirtyChange={setDirty} />
 
   return (
     <PageShell className="@container">
@@ -87,7 +105,7 @@ export function ConfigurationPage() {
             id="config-scope"
             className="max-w-sm"
             value={selected?.id ?? GLOBAL}
-            onValueChange={(value) => update({ repo: value === GLOBAL ? null : value })}
+            onValueChange={selectScope}
             searchPlaceholder="Search repositories..."
             emptyText="No matching repositories."
             options={scopeOptions}
@@ -124,6 +142,14 @@ export function ConfigurationPage() {
           )}
         </p>
       </div>
+      <UnsavedChangesDialog
+        open={pendingScope !== null}
+        onKeep={() => setPendingScope(null)}
+        onDiscard={() => {
+          if (pendingScope !== null) switchScope(pendingScope)
+          setPendingScope(null)
+        }}
+      />
       {/* The Display tab splits the full width between its settings and the preview. */}
       <div className={cn("flex flex-col", tab !== "display" && "max-w-5xl")}>{body}</div>
     </PageShell>

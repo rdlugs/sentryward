@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Link, useNavigate, useParams } from "react-router"
+import { Link, useLocation, useNavigate, useParams } from "react-router"
 import { AlertTriangle, ArrowLeft, Bot, Copy, Download, ExternalLink, History, Loader2, OctagonX, RotateCw } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
@@ -13,6 +13,7 @@ import { useCancelReview, useRerunReview, useReview } from "@/features/reviews/a
 import { StatusBadge, VerdictBadge } from "@/features/reviews/badges"
 import { CancelReviewDialog } from "@/features/reviews/CancelReviewDialog"
 import { FindingsSection } from "@/features/reviews/detail/FindingsSection"
+import { ReviewProblemActions } from "@/features/reviews/detail/ReviewProblem"
 import { ReviewSidebar } from "@/features/reviews/detail/ReviewSidebar"
 import { WalkthroughCard } from "@/features/reviews/detail/WalkthroughCard"
 import { PROVIDERS } from "@/features/forge/providers"
@@ -21,10 +22,14 @@ import { copyToClipboard } from "@/lib/clipboard"
 import { isActive, type ReviewResult } from "@/features/reviews/types"
 import { useReviewMarkdown } from "@/features/reviews/useReviewMarkdown"
 
+// Back to the list this review was opened from, filters and page included,
+// when that was the reviews list; otherwise to the list unfiltered.
 function BackToReviews() {
+  const from: unknown = useLocation().state?.from
+  const to = typeof from === "string" && from.split("?")[0] === "/reviews" ? from : "/reviews"
   return (
     <Button asChild variant="ghost" size="sm" className="-ml-2.5 self-start text-muted-foreground">
-      <Link to="/reviews">
+      <Link to={to}>
         <ArrowLeft />
         Back to reviews
       </Link>
@@ -84,6 +89,12 @@ export function ReviewDetailPage() {
         <Alert variant="destructive">
           <AlertTriangle />
           <AlertTitle>Review not found.</AlertTitle>
+          <AlertDescription>
+            <p>The link may be wrong, or the review belongs to another workspace.</p>
+            <Button size="sm" variant="outline" asChild className="mt-1">
+              <Link to="/reviews">View all reviews</Link>
+            </Button>
+          </AlertDescription>
         </Alert>
       </PageShell>
     )
@@ -191,10 +202,11 @@ export function ReviewDetailPage() {
                   {review.status === "failed" ? "." : ", and its findings are still listed on the Findings page."}
                 </p>
                 {review.error && <p>{review.error}</p>}
+                <ReviewProblemActions review={review} onRerun={runAgain} rerunning={rerun.isPending} />
               </AlertDescription>
             </Alert>
           ) : (
-            <Alert variant="destructive">
+            <Alert variant={review.status === "failed" ? "destructive" : "default"}>
               <AlertTriangle />
               <AlertTitle>
                 {review.status === "superseded"
@@ -205,7 +217,10 @@ export function ReviewDetailPage() {
                       ? "Cancelled"
                       : "The review did not run"}
               </AlertTitle>
-              {review.error && <AlertDescription>{review.error}</AlertDescription>}
+              <AlertDescription>
+                {review.error && <p className="whitespace-pre-line">{review.error}</p>}
+                <ReviewProblemActions review={review} onRerun={runAgain} rerunning={rerun.isPending} />
+              </AlertDescription>
             </Alert>
           )}
         </div>

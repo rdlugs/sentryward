@@ -1,7 +1,7 @@
 import { vi } from "vitest"
 import type { ReactElement } from "react"
 import { render } from "@testing-library/react"
-import { MemoryRouter } from "react-router"
+import { createMemoryRouter, RouterProvider } from "react-router"
 import { QueryClientProvider } from "@tanstack/react-query"
 import { ThemeProvider } from "next-themes"
 import { AuthProvider } from "@/features/auth/AuthProvider"
@@ -12,18 +12,28 @@ import { createQueryClient } from "@/lib/queryClient"
 
 export function renderWithProviders(ui: ReactElement, { route = "/" } = {}) {
   const queryClient = createQueryClient({ defaultOptions: { queries: { retry: false } } })
+  // A data router like main.tsx's, so pages that block navigation work in tests.
+  const router = createMemoryRouter(
+    [
+      {
+        path: "*",
+        element: (
+          <AuthProvider>
+            <TooltipProvider>
+              {ui}
+              <Toaster />
+            </TooltipProvider>
+          </AuthProvider>
+        ),
+      },
+    ],
+    { initialEntries: [route] },
+  )
   return render(
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <DensityProvider>
         <QueryClientProvider client={queryClient}>
-          <MemoryRouter initialEntries={[route]}>
-            <AuthProvider>
-              <TooltipProvider>
-                {ui}
-                <Toaster />
-              </TooltipProvider>
-            </AuthProvider>
-          </MemoryRouter>
+          <RouterProvider router={router} />
         </QueryClientProvider>
       </DensityProvider>
     </ThemeProvider>,

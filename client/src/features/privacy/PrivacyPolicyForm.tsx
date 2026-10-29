@@ -7,6 +7,7 @@ import { z } from "zod"
 import { cn } from "cn"
 import { MultiSelect } from "@/components/MultiSelect"
 import { TagInput } from "@/components/TagInput"
+import { UnsavedChangesDialog } from "@/components/UnsavedChangesDialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -24,6 +25,7 @@ import {
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group"
 import { Switch } from "@/components/ui/switch"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
+import { useUnsavedChanges } from "@/hooks/use-unsaved-changes"
 import { LLM_PROVIDERS } from "@/features/llm-connections/providers"
 import { PROVIDER_OPTIONS, type InstanceSettings, type PolicyLayer } from "./api"
 
@@ -190,9 +192,11 @@ export function PrivacyPolicyForm(props: {
         : "Empty keeps review data forever."
 
   const dirty = form.formState.isDirty
+  const leaving = useUnsavedChanges(dirty && !readOnly)
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="flex flex-col gap-6">
+      <UnsavedChangesDialog open={leaving.blocked} onKeep={leaving.keep} onDiscard={leaving.discard} />
       <FieldGroup>
         <FieldSet>
           <FieldLegend>Where code can be sent</FieldLegend>
@@ -329,7 +333,8 @@ export function PrivacyPolicyForm(props: {
         </FieldSet>
       </FieldGroup>
       {!readOnly && (
-        <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+        // Pinned while dirty, so Save is reachable from the top of the form.
+        <div className={`flex flex-wrap items-center gap-2 border-t pt-4 ${dirty ? "sticky bottom-0 z-10 bg-background pb-4" : ""}`}>
           <Button type="submit" disabled={form.formState.isSubmitting || !dirty}>
             {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
             Save privacy settings

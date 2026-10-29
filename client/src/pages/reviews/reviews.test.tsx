@@ -268,6 +268,35 @@ describe("Reviews page rows, filters and stats", () => {
     expect(await screen.findByRole("link", { name: "Found it" })).toBeInTheDocument()
   })
 
+  it("reads filters, search and view from the URL, ignoring values it does not know", async () => {
+    mockApi({
+      "GET /api/reviews?status=failed&q=fix&view=runs&includeSuperseded=true&page=1&limit=10": firstPage([listItem]),
+    })
+    renderWithProviders(<App />, { route: "/reviews?status=failed&verdict=bogus&view=runs&superseded=true&q=fix" })
+
+    expect(await screen.findByRole("link", { name: "Add b and c" })).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "All runs", selected: true })).toBeInTheDocument()
+    expect(screen.getByLabelText("Search reviews")).toHaveValue("fix")
+    expect(screen.getByText("Status:")).toBeInTheDocument()
+    expect(screen.queryByText("Verdict:")).not.toBeInTheDocument()
+  })
+
+  it("goes back from a review to the list as it was filtered", async () => {
+    mockApi({
+      "GET /api/reviews?status=failed&view=changes&page=1&limit=10": firstPage([listItem]),
+      [`GET /api/reviews/${listItem.id}`]: { review: detail },
+    })
+    renderWithProviders(<App />, { route: "/reviews?status=failed" })
+
+    await userEvent.click(await screen.findByRole("link", { name: "Add b and c" }))
+    const back = await screen.findByRole("link", { name: "Back to reviews" })
+    expect(back).toHaveAttribute("href", "/reviews?status=failed")
+
+    await userEvent.click(back)
+    expect(await screen.findByRole("link", { name: "Add b and c" })).toBeInTheDocument()
+    expect(screen.getByText("Status:")).toBeInTheDocument()
+  })
+
   it("expands a change to show its earlier runs", async () => {
     const earlier = { ...listItem, id: "earlier", headSha: "0123456789", status: "superseded", verdict: null }
     mockApi({
@@ -815,6 +844,105 @@ describe("Review detail page", () => {
 
     expect(await screen.findByText("The review did not run")).toBeInTheDocument()
     expect(screen.getByText("No API key for anthropic")).toBeInTheDocument()
+  })
+
+  it("offers a re-run and the page that fixes a failure", async () => {
+    const rerun = vi.fn(() => jsonResponse(202, { review: { ...listItem, id: "new", status: "queued" } }))
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          status: "failed",
+          verdict: "error",
+          result: null,
+          error: "No API key for anthropic",
+          errorKind: "llm_connection",
+        },
+      },
+      [`POST /api/reviews/${detail.id}/rerun`]: rerun,
+      "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null } },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const alert = await screen.findByRole("alert")
+    expect(within(alert).getByRole("link", { name: "Check LLM connections" })).toHaveAttribute("href", "/llm-connections")
+
+    await userEvent.click(within(alert).getByRole("button", { name: "Re-run" }))
+    await waitFor(() => expect(rerun).toHaveBeenCalledOnce())
+    expect(await screen.findByText("Waiting for a worker...")).toBeInTheDocument()
+  })
+
+  it("links a skipped run to the repository's trigger settings", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          status: "skipped",
+          verdict: null,
+          result: null,
+          error: "Draft changes are not reviewed automatically",
+          errorKind: "trigger",
+          resolvedConfig: { sources: { "triggers.review": "global" }, repoFile: null },
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const alert = await screen.findByRole("alert")
+    expect(within(alert).getByText(/A trigger setting kept this run from starting/)).toBeInTheDocument()
+    expect(within(alert).getByRole("link", { name: "Change trigger settings" })).toHaveAttribute(
+      "href",
+      `/configuration?repo=${detail.repository.id}&tab=triggers`,
+    )
+    expect(within(alert).getByRole("button", { name: "Re-run" })).toBeInTheDocument()
+  })
+
+  it("says when the repository file set the trigger that skipped a run", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          status: "skipped",
+          verdict: null,
+          result: null,
+          error: "Draft changes are not reviewed automatically",
+          errorKind: "trigger",
+          resolvedConfig: { sources: { "triggers.review": "repoFile" }, repoFile: ".sentryward.yaml" },
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText(/\.sentryward\.yaml sets some of its trigger settings/)).toBeInTheDocument()
+  })
+
+  it("offers no re-run while the repository's reviews are turned off", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          status: "skipped",
+          verdict: null,
+          result: null,
+          error: "Reviews were turned off for this repository",
+          errorKind: "repo_disabled",
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const alert = await screen.findByRole("alert")
+    expect(within(alert).getByRole("link", { name: "Turn reviews back on" })).toHaveAttribute("href", "/repositories")
+    expect(within(alert).queryByRole("button", { name: "Re-run" })).not.toBeInTheDocument()
+  })
+
+  it("links back to every review when one is not found", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: () => jsonResponse(404, { message: "Review not found" }) })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const alert = await screen.findByRole("alert")
+    expect(within(alert).getByText("Review not found.")).toBeInTheDocument()
+    expect(within(alert).getByRole("link", { name: "View all reviews" })).toHaveAttribute("href", "/reviews")
   })
 
   it("cancels a queued review from the header", async () => {

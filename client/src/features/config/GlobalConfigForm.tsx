@@ -1,11 +1,14 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { UnsavedChangesDialog } from "@/components/UnsavedChangesDialog"
+import { useUnsavedChanges } from "@/hooks/use-unsaved-changes"
 import { useApiKeys } from "@/features/llm-connections/api"
 import { useConfigSchema, useRulePatternErrors, useSaveGlobalConfig, type ConfigOverride, type GlobalConfig } from "./api"
 import { ConfigFields } from "./ConfigFields"
+import { SaveBar } from "./SaveBar"
 import type { ConfigTab } from "./tabs"
 import {
   INHERIT,
@@ -23,6 +26,8 @@ export function GlobalConfigForm(props: {
   global: GlobalConfig
   tab: ConfigTab
   onTabChange: (tab: ConfigTab) => void
+  // Lets the page ask before a scope switch drops the edits.
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const { global } = props
   const save = useSaveGlobalConfig()
@@ -33,6 +38,9 @@ export function GlobalConfigForm(props: {
   const inherited = schema.data && baseConfig(schema.data, form.profile === INHERIT ? undefined : form.profile)
   const finish = (settings: ConfigOverride) => (schema.data ? withoutDefaults(settings, schema.data) : settings)
   const dirty = isDirty(global.settings, form, finish)
+  const leaving = useUnsavedChanges(dirty)
+  const { onDirtyChange } = props
+  useEffect(() => onDirtyChange?.(dirty), [onDirtyChange, dirty])
   const patternErrors = useRulePatternErrors(form.rules.map((rule) => rule.pattern)).data
   const errors = validateForm(
     form,
@@ -58,47 +66,49 @@ export function GlobalConfigForm(props: {
   }
 
   return (
-    <ConfigFields
-      mode="global"
-      form={form}
-      onChange={setForm}
-      tab={props.tab}
-      onTabChange={props.onTabChange}
-      config={global.config}
-      sources={global.sources}
-      inherited={inherited}
-      errors={errors}
-      rulePatternErrors={patternErrors}
-      notices={
-        global.warnings.length > 0 && (
-          <Alert>
-            <AlertDescription>
-              {global.warnings.map((warning) => (
-                <p key={warning}>{warning}</p>
-              ))}
-            </AlertDescription>
-          </Alert>
-        )
-      }
-      footer={
-        <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-          <Button
-            onClick={() => submit(finish(toSettings(global.settings, form)), "Global config saved")}
-            disabled={save.isPending || !dirty || !valid}
-          >
-            {save.isPending && <Loader2 className="animate-spin" />}
-            Save global config
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => submit(resetSettings, "Global config reset")}
-            disabled={save.isPending || form.connection === INHERIT || !canReset}
-          >
-            Reset to defaults
-          </Button>
-          {dirty && <span className="text-sm text-muted-foreground">Unsaved changes</span>}
-        </div>
-      }
-    />
+    <>
+      <UnsavedChangesDialog open={leaving.blocked} onKeep={leaving.keep} onDiscard={leaving.discard} />
+      <ConfigFields
+        mode="global"
+        form={form}
+        onChange={setForm}
+        tab={props.tab}
+        onTabChange={props.onTabChange}
+        config={global.config}
+        sources={global.sources}
+        inherited={inherited}
+        errors={errors}
+        rulePatternErrors={patternErrors}
+        notices={
+          global.warnings.length > 0 && (
+            <Alert>
+              <AlertDescription>
+                {global.warnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </AlertDescription>
+            </Alert>
+          )
+        }
+        footer={
+          <SaveBar dirty={dirty} onDiscard={() => setForm(toForm(global.settings))} disabled={save.isPending}>
+            <Button
+              onClick={() => submit(finish(toSettings(global.settings, form)), "Global config saved")}
+              disabled={save.isPending || !dirty || !valid}
+            >
+              {save.isPending && <Loader2 className="animate-spin" />}
+              Save global config
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => submit(resetSettings, "Global config reset")}
+              disabled={save.isPending || form.connection === INHERIT || !canReset}
+            >
+              Reset to defaults
+            </Button>
+          </SaveBar>
+        }
+      />
+    </>
   )
 }

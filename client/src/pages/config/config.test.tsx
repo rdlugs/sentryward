@@ -260,7 +260,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     )
     renderWithProviders(<App />, { route: "/configuration" })
 
-    expect(await screen.findByText("Effective: anthropic/claude-sonnet-5-5 (from default)")).toBeInTheDocument()
+    expect(await screen.findByText("Effective: anthropic/claude-sonnet-5-5")).toBeInTheDocument()
     await selectOpenAiConnection()
     await userEvent.type(screen.getByLabelText("Model"), "openai/gpt-5")
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
@@ -766,6 +766,62 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     expect(screen.getByRole("tab", { name: "Files", selected: true })).toBeInTheDocument()
   })
 
+  it("discards unsaved edits from the save bar", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration?tab=files" })
+
+    await userEvent.type(await screen.findByLabelText("Max chunks"), "20")
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }))
+
+    expect(screen.getByLabelText("Max chunks")).toHaveDisplayValue("")
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument()
+  })
+
+  it("asks before leaving the page with unsaved edits", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration?tab=files" })
+
+    await userEvent.type(await screen.findByLabelText("Max chunks"), "20")
+    await userEvent.click(screen.getByRole("link", { name: "Home" }))
+
+    const dialog = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+    await userEvent.click(within(dialog).getByRole("button", { name: "Keep editing" }))
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    expect(screen.getByLabelText("Max chunks")).toHaveDisplayValue("20")
+
+    await userEvent.click(screen.getByRole("link", { name: "Home" }))
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Discard" }))
+    expect(screen.queryByLabelText("Max chunks")).not.toBeInTheDocument()
+  })
+
+  it("asks before switching scope with unsaved edits, but not between tabs", async () => {
+    mockApi(
+      globalRoutes({
+        "GET /api/repos": { repos: [repo("r1", "team/web")] },
+        "GET /api/repos/r1/config": { ref: "main", repoFile: null, warnings: [], config: effective, sources: {} },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?tab=files" })
+
+    await userEvent.type(await screen.findByLabelText("Max chunks"), "20")
+    await openTab("Display")
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    await openTab("Files")
+
+    await chooseScope(/team\/web/)
+    const dialog = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+    await userEvent.click(within(dialog).getByRole("button", { name: "Keep editing" }))
+    expect(screen.getByText(GLOBAL_SCOPE)).toBeInTheDocument()
+    expect(screen.getByLabelText("Max chunks")).toHaveDisplayValue("20")
+
+    await chooseScope(/team\/web/)
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Discard" }))
+    expect(await screen.findByRole("switch", { name: "Follow global config for team/web" })).toBeInTheDocument()
+  })
+
   it("searches the scope list once there are many repositories", async () => {
     const names = ["api", "cli", "docs", "infra", "mobile", "web", "worker"]
     mockApi(
@@ -836,7 +892,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
 
     await chooseScope(/team\/web/)
     await openTab("Finding Types")
-    expect(await screen.findByText("Effective: critical (from global config)")).toBeInTheDocument()
+    expect((await screen.findByText("Effective: critical")).parentElement).toHaveTextContent("global")
     await openTab("LLM Config")
     expect(screen.getByLabelText("Model")).toBeDisabled()
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled()
@@ -881,6 +937,40 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     // Back to what the global config gives, not the saved override.
     expect(walkthrough).toBeChecked()
     expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled()
+  })
+
+  it("tags each effective value with where it comes from, naming the profile", async () => {
+    mockApi(
+      globalRoutes({
+        "GET /api/config/global": globalConfig({}, { "review.blockOn": "profile", "review.severityFloor": "global" }),
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?tab=findings" })
+
+    expect((await screen.findByText("Effective: critical")).parentElement).toHaveTextContent("profile: balanced")
+    expect(screen.getByText("Effective: minor").parentElement).toHaveTextContent("global")
+  })
+
+  it("locks a field the repository file sets, saying the file wins", async () => {
+    mockApi(
+      globalRoutes({
+        "GET /api/repos": { repos: [repo("r1", "team/web", { followGlobal: false })] },
+        "GET /api/repos/r1/config": {
+          ref: "main",
+          repoFile: ".sentryward.yml",
+          warnings: [],
+          config: effective,
+          sources: { "review.blockOn": "repoFile", "review.severityFloor": "global" },
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?repo=r1&tab=findings" })
+
+    const blockOn = await screen.findByRole("combobox", { name: "Block at or above" })
+    await waitFor(() => expect(blockOn).toBeDisabled())
+    expect(screen.getByRole("combobox", { name: "Report findings at or above" })).toBeEnabled()
+    const tag = screen.getByLabelText("Set in .sentryward.yml, which wins over these settings")
+    expect(tag).toHaveTextContent(".sentryward.yml")
   })
 })
 
@@ -990,7 +1080,7 @@ describe("Model pickers", () => {
     )
     renderWithProviders(<App />, { route: "/configuration" })
 
-    await screen.findByText("Effective: anthropic/claude-sonnet-5-5 (from default)")
+    await screen.findByText("Effective: anthropic/claude-sonnet-5-5")
     // No connection yet, so there is nothing to list.
     expect(screen.queryByRole("button", { name: "Choose model from the connection" })).not.toBeInTheDocument()
     await selectOpenAiConnection()
@@ -1020,7 +1110,7 @@ describe("Model pickers", () => {
     )
     renderWithProviders(<App />, { route: "/configuration" })
 
-    await screen.findByText("Effective: anthropic/claude-sonnet-5-5 (from default)")
+    await screen.findByText("Effective: anthropic/claude-sonnet-5-5")
     await selectOpenAiConnection()
     await userEvent.click(screen.getByRole("button", { name: "Choose model from the connection" }))
     expect(await screen.findByText(/Could not load models from this connection/)).toBeInTheDocument()
@@ -1034,7 +1124,7 @@ describe("Model pickers", () => {
     mockApi(globalRoutes(openAiModels))
     renderWithProviders(<App />, { route: "/configuration" })
 
-    await screen.findByText("Effective: anthropic/claude-sonnet-5-5 (from default)")
+    await screen.findByText("Effective: anthropic/claude-sonnet-5-5")
     await selectOpenAiConnection()
     await userEvent.type(screen.getByLabelText("Model"), "anthropic/claude-sonnet-5-5")
 
