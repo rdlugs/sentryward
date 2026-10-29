@@ -46,6 +46,21 @@ describe("Settings page", () => {
     expect(screen.getAllByText("Ada King").length).toBeGreaterThan(0)
   })
 
+  it("asks before a tab switch drops unsaved profile edits", async () => {
+    mockApi({})
+    renderWithProviders(<App />, { route: "/settings" })
+
+    const name = await screen.findByLabelText("Name")
+    await userEvent.clear(name)
+    await userEvent.type(name, "Ada King")
+    await userEvent.click(screen.getByRole("tab", { name: "Password" }))
+
+    const dialog = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+    await userEvent.click(within(dialog).getByRole("button", { name: "Keep editing" }))
+    expect(screen.getByRole("tab", { name: "Profile" })).toHaveAttribute("aria-selected", "true")
+    expect(screen.getByLabelText("Name")).toHaveDisplayValue("Ada King")
+  })
+
   it("shows server field errors on the profile form", async () => {
     mockApi({
       "PATCH /api/settings/profile": () =>

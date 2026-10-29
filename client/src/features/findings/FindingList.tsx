@@ -34,7 +34,7 @@ export function FindingList({
   emptyMessage,
   onOpen,
 }: FindingListProps) {
-  const { values, setters, pagination, filterBy } = filters
+  const { values, setters, pagination } = filters
   const { data, isPending, isError } = useFindings({ ...filters.params, ...scope })
   // A page past the end (e.g. after ignoring the last row) falls back to the last real page.
   const lastPage = data ? Math.max(1, Math.ceil(data.total / pagination.size)) : 1
@@ -54,7 +54,7 @@ export function FindingList({
                 label="State"
                 allLabel="All states"
                 value={values.state}
-                onValueChange={filterBy(setters.setState)}
+                onValueChange={setters.setState}
                 options={STATE_OPTIONS}
               />
               {/* Against the change's latest review: tells a fix from a refactor. */}
@@ -63,7 +63,7 @@ export function FindingList({
                 label="Last review"
                 allLabel="Any outcome"
                 value={values.lifecycle}
-                onValueChange={filterBy(setters.setLifecycle)}
+                onValueChange={setters.setLifecycle}
                 options={LIFECYCLE_OPTIONS}
               />
             </>
@@ -73,7 +73,7 @@ export function FindingList({
             label="Severity"
             allLabel="All severities"
             value={values.severity}
-            onValueChange={filterBy(setters.setSeverity)}
+            onValueChange={setters.setSeverity}
             options={SEVERITY_OPTIONS}
           />
           <FilterSelect
@@ -81,7 +81,7 @@ export function FindingList({
             label="Category"
             allLabel="All categories"
             value={values.category}
-            onValueChange={filterBy(setters.setCategory)}
+            onValueChange={setters.setCategory}
             options={CATEGORY_OPTIONS}
           />
           <FilterSelect
@@ -89,7 +89,7 @@ export function FindingList({
             label="Type"
             allLabel="All types"
             value={values.kind}
-            onValueChange={filterBy(setters.setKind)}
+            onValueChange={setters.setKind}
             options={KIND_OPTIONS}
           />
           {repoOptions.length > 1 && (
@@ -98,12 +98,12 @@ export function FindingList({
               label="Repository"
               allLabel="All repositories"
               value={values.repo}
-              onValueChange={filterBy(setters.setRepo)}
+              onValueChange={setters.setRepo}
               options={repoOptions}
             />
           )}
         </FilterPopover>
-        <SearchInput label={searchLabel} value={values.query} onChange={filterBy(setters.setQuery)} />
+        <SearchInput label={searchLabel} value={values.query} onChange={setters.setQuery} />
       </FilterToolbar>
       {isPending ? (
         <Skeleton className="h-40 w-full" />
@@ -118,7 +118,7 @@ export function FindingList({
             <FindingsTable
               findings={data.findings}
               sort={filters.sort}
-              onSort={filterBy(filters.onSort)}
+              onSort={filters.onSort}
               onOpen={onOpen}
               emptyMessage={filters.narrowed ? emptyMessage.noMatch : emptyMessage.none}
             />

@@ -49,7 +49,15 @@ import { prepareCapabilities, type Probe } from "./capabilities.ts";
 import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
 import { incrementFor } from "./incremental.ts";
-import { ACCESS_LOST_REASON, claimState, CLOSED_REASON, complete, DISABLED_REASON, recordTitle } from "./queue.ts";
+import {
+  ACCESS_LOST_REASON,
+  claimState,
+  CLOSED_REASON,
+  complete,
+  DISABLED_REASON,
+  NO_REPOSITORY_REASON,
+  recordTitle,
+} from "./queue.ts";
 import { findingLifecycle, findingTransitions, KNOWN_FINDING, syncFindings, threadOperations, type ThreadOutcome } from "./syncFindings.ts";
 
 // How many recent dismissals to feed into the review prompt; bounded so a noisy
@@ -179,7 +187,7 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     include: { connection: { include: { workspace: { select: { reviewSettings: true, name: true } } } } },
   });
   if (!repo) {
-    throw new Error("The repository is no longer connected");
+    throw new Error(NO_REPOSITORY_REASON);
   }
   // Turning a repository off cancels its jobs, but one claimed just before the
   // cancel still lands here. Checked here rather than in claimNext, which would

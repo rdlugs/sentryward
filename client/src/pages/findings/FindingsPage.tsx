@@ -48,7 +48,20 @@ export function FindingsPage() {
       {/* The cards sit above the tabs, so both share them. Each tab has its own
           filters, held here rather than in the tabs so they survive switching. */}
       <FindingStatsStrip />
-      <Tabs value={tab} onValueChange={(value) => setSearchParams({ tab: value }, { replace: true })}>
+      {/* Keeps the other params: each tab's filters live there too. */}
+      <Tabs
+        value={tab}
+        onValueChange={(value) =>
+          setSearchParams(
+            (current) => {
+              const updated = new URLSearchParams(current)
+              updated.set("tab", value)
+              return updated
+            },
+            { replace: true },
+          )
+        }
+      >
         <TabsList>
           <TabsTrigger value="findings">Findings</TabsTrigger>
           <TabsTrigger value="false-positives">False positives</TabsTrigger>

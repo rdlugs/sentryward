@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react"
-import { Link } from "react-router"
+import { Link, useLocation } from "react-router"
 import { ChevronRight, Copy, ExternalLink, MoreHorizontal, OctagonX, RotateCw } from "lucide-react"
 import { toast } from "sonner"
 import { NoMatchesRow } from "@/components/TableFilters"
@@ -22,6 +22,17 @@ import { changeLabel, changeTitle } from "./links"
 import { RerunReviewDialog } from "./RerunReviewDialog"
 import { isActive, SEVERITIES, type ReviewListItem } from "./types"
 import { useReviewMarkdown } from "./useReviewMarkdown"
+
+// Remembers the list it was opened from (`from`, read once by the table), so
+// the review's back link returns to it with the same filters and page (see
+// BackToReviews).
+function ReviewLink(props: { id: string; from: string; className?: string; children: ReactNode }) {
+  return (
+    <Link to={`/reviews/${props.id}`} state={{ from: props.from }} className={props.className}>
+      {props.children}
+    </Link>
+  )
+}
 
 // Ticks only while something is running, so idle tables never re-render.
 function useNow(enabled: boolean) {
@@ -142,7 +153,7 @@ function ReviewActions({ review }: { review: ReviewListItem }) {
 }
 
 // Earlier runs of one change, loaded when its row is expanded.
-function RunHistory({ review, colSpan }: { review: ReviewListItem; colSpan: number }) {
+function RunHistory({ review, colSpan, from }: { review: ReviewListItem; colSpan: number; from: string }) {
   const { data, isPending, isError } = useReviews({
     repoId: review.repository.id,
     number: review.number,
@@ -168,9 +179,9 @@ function RunHistory({ review, colSpan }: { review: ReviewListItem; colSpan: numb
                 <StatusBadge status={run.status} reason={run.error} />
                 <VerdictBadge verdict={run.verdict} />
                 <TriggerIcon trigger={run.trigger} />
-                <Link to={`/reviews/${run.id}`} className="hover:underline">
+                <ReviewLink id={run.id} from={from} className="hover:underline">
                   <code>{run.headSha.slice(0, 7)}</code>
-                </Link>
+                </ReviewLink>
                 <span className="text-muted-foreground">{timeAgo(run.createdAt)}</span>
               </li>
             ))}
@@ -196,6 +207,8 @@ export function ReviewsTable({
   emptyMessage: ReactNode
 }) {
   const now = useNow(reviews.some((review) => review.status === "running"))
+  const location = useLocation()
+  const from = location.pathname + location.search
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const colSpan = 5 + Number(actions)
 
@@ -231,9 +244,9 @@ export function ReviewsTable({
               <TableRow>
                 <TableCell className="max-w-md">
                   <div className="flex items-center gap-1.5">
-                    <Link to={`/reviews/${review.id}`} className="truncate font-medium hover:underline">
+                    <ReviewLink id={review.id} from={from} className="truncate font-medium hover:underline">
                       {changeTitle(review)}
-                    </Link>
+                    </ReviewLink>
                     {webUrl && (
                       <a
                         href={webUrl}
@@ -285,7 +298,7 @@ export function ReviewsTable({
                   </TableCell>
                 )}
               </TableRow>
-              {grouped && open && <RunHistory review={review} colSpan={colSpan} />}
+              {grouped && open && <RunHistory review={review} colSpan={colSpan} from={from} />}
             </Fragment>
           )
         })}

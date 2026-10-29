@@ -20,7 +20,8 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDebounced } from "@/hooks/use-debounced"
 import { usePagination } from "@/hooks/use-pagination"
-import { ALL, selectedLabel } from "@/lib/filters"
+import { useUrlFilters } from "@/hooks/use-url-filters"
+import { ALL, choices, only, selectedLabel } from "@/lib/filters"
 import { useRepos } from "@/features/forge/api"
 import { useReviews, type ReviewQuery } from "@/features/reviews/api"
 import { STATUS_OPTIONS, TRIGGER_OPTIONS, VERDICT_OPTIONS } from "@/features/reviews/options"
@@ -30,17 +31,24 @@ import { ReviewsTable } from "@/features/reviews/ReviewsTable"
 
 type View = "changes" | "runs"
 
-const only = <T extends string>(value: string) => (value === ALL ? undefined : (value as T))
+const DEFAULTS = { view: "changes", status: ALL, verdict: ALL, trigger: ALL, repo: ALL, superseded: "", q: "" }
+
+// Repository ids are not checked: a stale one just matches nothing.
+const ALLOWED = {
+  view: ["changes", "runs"],
+  status: choices(STATUS_OPTIONS),
+  verdict: choices(VERDICT_OPTIONS),
+  trigger: choices(TRIGGER_OPTIONS),
+  superseded: ["", "true"],
+}
 
 export function ReviewsPage() {
   const pagination = usePagination()
-  const [view, setView] = useState<View>("changes")
-  const [status, setStatus] = useState(ALL)
-  const [verdict, setVerdict] = useState(ALL)
-  const [trigger, setTrigger] = useState(ALL)
-  const [repo, setRepo] = useState(ALL)
-  const [includeSuperseded, setIncludeSuperseded] = useState(false)
-  const [query, setQuery] = useState("")
+  // In the URL, so Back from a review restores the list and a link shares it.
+  const { values, set } = useUrlFilters(DEFAULTS, { allowed: ALLOWED })
+  const { status, verdict, trigger, repo, q: query } = values
+  const view = values.view as View
+  const includeSuperseded = values.superseded === "true"
   const [manualOpen, setManualOpen] = useState(false)
   const q = useDebounced(query.trim())
 
@@ -77,32 +85,26 @@ export function ReviewsPage() {
     ? "No reviews match your filters."
     : "No reviews yet. Start a manual review to run the first one."
 
-  // A new filter, search or view starts over at the first page.
-  function filterBy<T>(set: (value: T) => void) {
-    return (value: T) => {
-      set(value)
-      pagination.setPage(1)
-    }
-  }
+  // A new filter, search or view starts over at the first page (useUrlFilters does that).
+  const setStatus = (value: string) => set({ status: value })
+  const setVerdict = (value: string) => set({ verdict: value })
+  const setTrigger = (value: string) => set({ trigger: value })
+  const setRepo = (value: string) => set({ repo: value })
+  const setIncludeSuperseded = (value: boolean) => set({ superseded: value ? "true" : "" })
 
   function clearFilters() {
-    setStatus(ALL)
-    setVerdict(ALL)
-    setTrigger(ALL)
-    setRepo(ALL)
-    setIncludeSuperseded(false)
-    pagination.setPage(1)
+    set({ status: ALL, verdict: ALL, trigger: ALL, repo: ALL, superseded: "" })
   }
 
   const activeFilters = [
-    { label: "Status", value: selectedLabel(status, STATUS_OPTIONS), onRemove: () => filterBy(setStatus)(ALL) },
-    { label: "Verdict", value: selectedLabel(verdict, VERDICT_OPTIONS), onRemove: () => filterBy(setVerdict)(ALL) },
-    { label: "Trigger", value: selectedLabel(trigger, TRIGGER_OPTIONS), onRemove: () => filterBy(setTrigger)(ALL) },
-    { label: "Repository", value: selectedLabel(repo, repoOptions), onRemove: () => filterBy(setRepo)(ALL) },
+    { label: "Status", value: selectedLabel(status, STATUS_OPTIONS), onRemove: () => setStatus(ALL) },
+    { label: "Verdict", value: selectedLabel(verdict, VERDICT_OPTIONS), onRemove: () => setVerdict(ALL) },
+    { label: "Trigger", value: selectedLabel(trigger, TRIGGER_OPTIONS), onRemove: () => setTrigger(ALL) },
+    { label: "Repository", value: selectedLabel(repo, repoOptions), onRemove: () => setRepo(ALL) },
     {
       label: "Superseded",
       value: includeSuperseded ? "Shown" : null,
-      onRemove: () => filterBy(setIncludeSuperseded)(false),
+      onRemove: () => setIncludeSuperseded(false),
     },
   ].filter((filter): filter is ActiveFilter => filter.value !== null)
 
@@ -114,7 +116,7 @@ export function ReviewsPage() {
       />
       <ReviewStatsStrip />
       <FilterToolbar>
-        <Tabs value={view} onValueChange={(value) => filterBy(setView)(value as View)} className="mr-auto">
+        <Tabs value={view} onValueChange={(value) => set({ view: value })} className="mr-auto">
           <TabsList>
             <TabsTrigger value="changes">By change</TabsTrigger>
             <TabsTrigger value="runs">All runs</TabsTrigger>
@@ -131,7 +133,7 @@ export function ReviewsPage() {
             label="Status"
             allLabel="All statuses"
             value={status}
-            onValueChange={filterBy(setStatus)}
+            onValueChange={setStatus}
             options={STATUS_OPTIONS}
           />
           <FilterSelect
@@ -139,7 +141,7 @@ export function ReviewsPage() {
             label="Verdict"
             allLabel="All verdicts"
             value={verdict}
-            onValueChange={filterBy(setVerdict)}
+            onValueChange={setVerdict}
             options={VERDICT_OPTIONS}
           />
           <FilterSelect
@@ -147,7 +149,7 @@ export function ReviewsPage() {
             label="Trigger"
             allLabel="All triggers"
             value={trigger}
-            onValueChange={filterBy(setTrigger)}
+            onValueChange={setTrigger}
             options={TRIGGER_OPTIONS}
           />
           {repoOptions.length > 1 && (
@@ -156,7 +158,7 @@ export function ReviewsPage() {
               label="Repository"
               allLabel="All repositories"
               value={repo}
-              onValueChange={filterBy(setRepo)}
+              onValueChange={setRepo}
               options={repoOptions}
             />
           )}
@@ -167,11 +169,11 @@ export function ReviewsPage() {
             <Switch
               id="review-superseded"
               checked={includeSuperseded}
-              onCheckedChange={filterBy(setIncludeSuperseded)}
+              onCheckedChange={setIncludeSuperseded}
             />
           </div>
         </FilterPopover>
-        <SearchInput label="Search reviews" value={query} onChange={filterBy(setQuery)} />
+        <SearchInput label="Search reviews" value={query} onChange={(value) => set({ q: value })} />
       </FilterToolbar>
       {isPending ? (
         <Skeleton className="h-40 w-full" />

@@ -63,10 +63,20 @@ export function ConfigurationPage() {
 
   const onTabChange = (value: ConfigTab) => update({ tab: value })
 
+  // The forms' unsaved-changes guard watches ?repo=, so a scope switch from
+  // here or from any link asks before it drops their edits.
+  function selectScope(value: string) {
+    if (value === (selected?.id ?? GLOBAL)) return
+    update({ repo: value === GLOBAL ? null : value })
+  }
+
   let body
   // Wait for the repository list before falling back, so a ?repo= link does not flash the global config.
   if (params.has("repo") && repos.isPending) body = <Skeleton className="h-96 w-full" />
-  else if (selected) body = <RepoConfigForm key={selected.id} repo={selected} tab={tab} onTabChange={onTabChange} />
+  else if (selected)
+    body = (
+      <RepoConfigForm key={selected.id} repo={selected} tab={tab} onTabChange={onTabChange} />
+    )
   else if (global.isPending) body = <Skeleton className="h-96 w-full" />
   else if (global.isError)
     body = (
@@ -87,7 +97,7 @@ export function ConfigurationPage() {
             id="config-scope"
             className="max-w-sm"
             value={selected?.id ?? GLOBAL}
-            onValueChange={(value) => update({ repo: value === GLOBAL ? null : value })}
+            onValueChange={selectScope}
             searchPlaceholder="Search repositories..."
             emptyText="No matching repositories."
             options={scopeOptions}

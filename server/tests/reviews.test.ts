@@ -510,6 +510,25 @@ describe("GET /api/reviews/:id and /markdown", () => {
     const other = await createUser("other@example.com");
     expect((await request(app).get(`/api/reviews/${job.id}`).set("Cookie", other.cookie)).status).toBe(404);
   });
+
+  it("says what a stored error is about, so the page can link to its fix", async () => {
+    const completed = await completedJob();
+    const skipped = await prisma.reviewJob.create({
+      data: {
+        repositoryId: repoId,
+        number: 8,
+        headSha: "head",
+        trigger: "webhook",
+        status: "skipped",
+        error: "Draft changes are not reviewed automatically",
+      },
+    });
+
+    const get = (id: string) => request(app).get(`/api/reviews/${id}`).set("Cookie", cookie);
+
+    expect((await get(completed.id)).body.review.errorKind).toBeNull();
+    expect((await get(skipped.id)).body.review.errorKind).toBe("trigger");
+  });
 });
 
 describe("POST /api/reviews/:id/rerun", () => {

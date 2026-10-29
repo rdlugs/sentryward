@@ -220,7 +220,23 @@ export interface ReviewDetail extends ReviewListItem {
   publication: Publication | null
   // Set once the server's retention setting cleared the full result.
   resultExpiredAt: string | null
+  // What `error` is about, so the page can link to the fix (null when unknown).
+  errorKind: ReviewErrorKind | null
+  // The config the run used, with the layer each field came from. Cleared by
+  // retention like the result.
+  resolvedConfig: { sources?: Record<string, string>; repoFile?: string | null } | null
+  // `enabled` is the repository's current state: a re-run is refused while it is off.
+  repository: ReviewListItem["repository"] & { enabled: boolean }
 }
+
+export type ReviewErrorKind =
+  | "llm_connection"
+  | "llm_config"
+  | "forge_credentials"
+  | "forge_access"
+  | "repo_disabled"
+  | "privacy"
+  | "trigger"
 
 export interface ReviewStats {
   days: number

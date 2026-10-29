@@ -61,6 +61,14 @@ const SOURCE_LABEL: Record<string, string> = {
   trigger: "trigger",
 }
 
+// Shorter than SOURCE_LABEL, for the tag beside an effective value.
+const BADGE_LABEL: Record<string, string> = {
+  default: "default",
+  global: "global",
+  repoSettings: "repo override",
+  trigger: "trigger",
+}
+
 const FLAG_INFO: Record<FlagName, { label: string; description: ReactNode }> = {
   requireEvidence: {
     label: "Require evidence",
@@ -377,6 +385,35 @@ function describe(value: unknown, source: string | undefined) {
   return `${shown}${source ? ` (from ${SOURCE_LABEL[source] ?? source})` : ""}`
 }
 
+// The layer a field's effective value comes from, as a tag beside the value.
+// The repository file wins over everything set in the dashboard, so its tag
+// says so.
+function SourceBadge(props: { source: string; profile: string; repoFile?: string | null }) {
+  const file = props.repoFile ?? ".sentryward.yaml"
+  const label =
+    props.source === "profile"
+      ? `profile: ${props.profile}`
+      : props.source === "repoFile"
+        ? file
+        : (BADGE_LABEL[props.source] ?? props.source)
+  const badge = (
+    <Badge variant="outline" className="h-4 px-1.5 text-[0.65rem] font-normal">
+      {label}
+    </Badge>
+  )
+  if (props.source !== "repoFile") return badge
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} aria-label={`Set in ${file}, which wins over these settings`}>
+          {badge}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>Set in {file} in the repository, which wins over these settings. Change it there.</TooltipContent>
+    </Tooltip>
+  )
+}
+
 function ResetButton(props: { label: string; hint?: string; onClick: () => void; disabled?: boolean }) {
   return (
     <Tooltip>
@@ -412,7 +449,7 @@ function TextField(props: {
   min?: number
   max?: number
   step?: number
-  effective?: string
+  effective?: ReactNode
   error?: string
   disabled?: boolean
 }) {
@@ -455,7 +492,7 @@ function CategoriesField(props: {
   onChange: (value: string[] | undefined) => void
   resettable: boolean
   inheritedHint?: string
-  effective?: string
+  effective?: ReactNode
   error?: string
   disabled?: boolean
 }) {
@@ -518,7 +555,7 @@ function LanguageInstructionsField(props: {
   rows: FormState["languageInstructions"]
   onChange: (rows: FormState["languageInstructions"]) => void
   isRepo: boolean
-  effective?: string
+  effective?: ReactNode
   error?: string
   disabled?: boolean
 }) {
@@ -802,7 +839,7 @@ function FallbackModelsField(props: {
   rows: string[]
   onChange: (rows: string[]) => void
   emptyHint: string
-  effective?: string
+  effective?: ReactNode
   error?: string
   disabled?: boolean
   suggestions?: ModelSuggestions
@@ -869,7 +906,7 @@ function ChoiceField(props: {
   // Shown instead of "inherit" when there is no Inherit option.
   fallback?: string
   description?: ReactNode
-  effective?: string
+  effective?: ReactNode
   error?: string
   disabled?: boolean
 }) {
@@ -905,7 +942,7 @@ function ToggleField(props: {
   // Only a repository can go back to inheriting; the global config just holds a value.
   resettable: boolean
   inheritedHint?: string
-  effective?: string
+  effective?: ReactNode
   disabled?: boolean
 }) {
   const { label, description } = FLAG_INFO[props.name]
@@ -964,6 +1001,8 @@ export function ConfigFields(props: {
   sources?: Record<string, string>
   inherited?: EffectiveConfig
   inheritedSources?: Record<string, string>
+  // The repository file that applies, named in the tags of the fields it sets.
+  repoFile?: string | null
   errors?: FormErrors
   // The server's RE2 answers for rule patterns (useRulePatternErrors).
   rulePatternErrors?: Record<string, string | null>
@@ -1006,7 +1045,19 @@ export function ConfigFields(props: {
 
   function effective(path: string, value: unknown) {
     if (!config) return undefined
-    return `Effective: ${describe(value, sources?.[path])}`
+    const source = sources?.[path]
+    return (
+      <span className="inline-flex flex-wrap items-center gap-1.5">
+        <span>Effective: {describe(value, undefined)}</span>
+        {source && <SourceBadge source={source} profile={config.profile} repoFile={props.repoFile} />}
+      </span>
+    )
+  }
+
+  // A field the repository file sets cannot be changed from here: the file
+  // wins, so an override saved here would do nothing.
+  function locked(path: string) {
+    return disabled || (isRepo && sources?.[path] === "repoFile")
   }
 
   // What "Inherit" resolves to right now, e.g. "critical (from global config)".
@@ -1040,7 +1091,7 @@ export function ConfigFields(props: {
           resettable={isRepo}
           inheritedHint={inheritedHint(path, fallback)}
           effective={config && effective(path, (config[section] as Record<string, unknown>)[name])}
-          disabled={disabled || off}
+          disabled={locked(path) || off}
         />
       )
     })
@@ -1057,7 +1108,7 @@ export function ConfigFields(props: {
     const path = `llm.${name}`
     const shown = (llm: EffectiveConfig["llm"]) => llm[name] ?? `same as model (${llm.model})`
     return (
-      <Field data-disabled={disabled}>
+      <Field data-disabled={locked(path)}>
         <FieldLabel htmlFor={name}>{label}</FieldLabel>
         <ModelCombobox
           id={name}
@@ -1065,7 +1116,7 @@ export function ConfigFields(props: {
           value={form[name]}
           onChange={setField(name)}
           placeholder={inherited ? shown(inherited.llm) : config ? shown(config.llm) : "Same as model"}
-          disabled={disabled}
+          disabled={locked(path)}
           aria-invalid={errors[name] ? true : undefined}
           suggestions={modelSuggestions}
         />
@@ -1101,7 +1152,7 @@ export function ConfigFields(props: {
           : { fallback: fallback ?? undefined })}
         description={info.description}
         effective={config && effective(path, label(at(config, path)))}
-        disabled={disabled || off}
+        disabled={locked(path) || off}
       />
     )
   }
@@ -1115,14 +1166,14 @@ export function ConfigFields(props: {
     // Only worth a hint when leaving it empty actually inherits something.
     const hint = isRepo && fallback?.length ? ` ${emptyHint(path, fallback)}` : ""
     return (
-      <Field data-disabled={disabled} data-invalid={error ? true : undefined}>
+      <Field data-disabled={locked(path)} data-invalid={error ? true : undefined}>
         <FieldLabel htmlFor={id}>{info.label}</FieldLabel>
         <TagInput
           id={id}
           value={form.lists[name]}
           onChange={(value) => props.onChange({ ...form, lists: { ...form.lists, [name]: value } })}
           placeholder={fallback?.length ? fallback.join(", ") : `e.g. ${info.placeholder}, then Enter`}
-          disabled={disabled}
+          disabled={locked(path)}
           aria-invalid={error ? true : undefined}
         />
         <FieldDescription>
@@ -1157,7 +1208,7 @@ export function ConfigFields(props: {
         step={spec.nullable ? undefined : spec.step}
         effective={config && effective(path, at(config, path))}
         error={errors[name]}
-        disabled={disabled}
+        disabled={locked(path)}
       />
     )
   }
@@ -1218,7 +1269,7 @@ export function ConfigFields(props: {
               {...choice("profile", inherited?.profile)}
               description="A preset that fills in values on every tab; anything set here wins over it."
               effective={config && effective("profile", config.profile)}
-              disabled={disabled}
+              disabled={locked("profile")}
             />
             <div className="flex flex-col gap-2">
               <ChoiceField
@@ -1240,7 +1291,7 @@ export function ConfigFields(props: {
                 }
                 effective={config && effective("llm.connection", configuredConnectionLabel(config.llm))}
                 error={errors.connection}
-                disabled={disabled || apiKeys.isPending}
+                disabled={locked("llm.connection") || apiKeys.isPending}
               />
               {apiKeys.isSuccess && storedConnections.length === 0 && (
                 <p className="text-sm text-muted-foreground">
@@ -1261,14 +1312,14 @@ export function ConfigFields(props: {
           description="The model that reviews the change, the ones tried when it fails, and optional models for the walkthrough and verification."
         >
           <div className="grid gap-4 @md/field-group:grid-cols-2">
-            <Field data-disabled={disabled}>
+            <Field data-disabled={locked("llm.model")}>
               <FieldLabel htmlFor="model">Model</FieldLabel>
               <ModelCombobox
                 id="model"
                 value={form.model}
                 onChange={setField("model")}
                 placeholder={inherited?.llm.model ?? config?.llm.model ?? "anthropic/claude-sonnet-5-5"}
-                disabled={disabled}
+                disabled={locked("llm.model")}
                 aria-invalid={errors.model ? true : undefined}
                 suggestions={modelSuggestions}
               />
@@ -1288,7 +1339,7 @@ export function ConfigFields(props: {
               emptyHint={emptyHint("llm.fallbackModels", inherited?.llm.fallbackModels)}
               effective={config && effective("llm.fallbackModels", config.llm.fallbackModels)}
               error={errors.fallbackModels}
-              disabled={disabled}
+              disabled={locked("llm.fallbackModels")}
               suggestions={modelSuggestions}
               warning={!disabled && !form.fallbackModels.every(runsOn) ? mismatchHint : undefined}
             />
@@ -1332,7 +1383,7 @@ export function ConfigFields(props: {
               options={severities}
               {...choice("review.severityFloor", inherited?.review.severityFloor)}
               effective={config && effective("review.severityFloor", config.review.severityFloor)}
-              disabled={disabled}
+              disabled={locked("review.severityFloor")}
             />
             <ChoiceField
               id="block-on"
@@ -1342,7 +1393,7 @@ export function ConfigFields(props: {
               options={severities}
               {...choice("review.blockOn", inherited?.review.blockOn)}
               effective={config && effective("review.blockOn", config.review.blockOn)}
-              disabled={disabled}
+              disabled={locked("review.blockOn")}
             />
           </div>
         </Section>
@@ -1360,7 +1411,7 @@ export function ConfigFields(props: {
             inheritedHint={inheritedHint("review.categories", inherited?.review.categories)}
             effective={config && effective("review.categories", config.review.categories)}
             error={errors.categories}
-            disabled={disabled}
+            disabled={locked("review.categories")}
           />
           <div className="grid gap-4 @md/field-group:grid-cols-2">
             {numberField("maxFindings")}
@@ -1401,7 +1452,7 @@ export function ConfigFields(props: {
           multiline
           effective={config && effective("ignorePaths", config.ignorePaths)}
           error={errors.ignorePaths}
-          disabled={disabled}
+          disabled={locked("ignorePaths")}
         />
         {numberField("maxChunks")}
         <ToggleList>{toggles(["disableCache"])}</ToggleList>
@@ -1458,7 +1509,7 @@ export function ConfigFields(props: {
               effective("output.highLevelSummaryInstructions", config.output.highLevelSummaryInstructions || "release notes")
             }
             error={errors.summaryInstructions}
-            disabled={disabled || !highLevelSummaryOn}
+            disabled={locked("output.highLevelSummaryInstructions") || !highLevelSummaryOn}
           />
         </Section>
       </>
@@ -1514,7 +1565,7 @@ export function ConfigFields(props: {
           isRepo={isRepo}
           effective={config && effective("languageInstructions", config.languageInstructions)}
           error={errors.languageInstructions}
-          disabled={disabled}
+          disabled={locked("languageInstructions")}
         />
         <RulesField
           rows={form.rules}

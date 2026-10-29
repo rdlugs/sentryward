@@ -10,6 +10,7 @@ import { parseChangeUrl } from "../review/forge/url.ts";
 import { toJson } from "../review/render/json.ts";
 import { toMarkdown, walkthroughOptions } from "../review/render/markdown.ts";
 import { adapterForConnection, toHttpError } from "../services/forge.ts";
+import { errorKind } from "../services/reviewErrors.ts";
 import { digestTotals } from "../services/usage.ts";
 import { cancelJob, enqueue } from "../worker/queue.ts";
 import {
@@ -269,6 +270,9 @@ async function loadOwnedReview(workspaceId: string, id: string) {
     where: { id, ...ownedBy(workspaceId) },
     select: {
       ...listFields,
+      // Whether a re-run would be accepted (see queueManual) follows the
+      // repository's current state, not the stored error.
+      repository: { select: { ...listFields.repository.select, enabled: true } },
       baseSha: true,
       attempts: true,
       result: true,
@@ -294,7 +298,9 @@ export async function getReview(req: Request, res: Response) {
   const { id } = reviewIdParamSchema.parse(req.params);
   const { result: raw, ...review } = await loadOwnedReview(req.workspaceId!, id);
   const result = raw === null ? null : parseResult(raw);
-  res.json({ review: { ...review, result: result ? toJson(result) : raw } });
+  res.json({
+    review: { ...review, errorKind: errorKind(review.status, review.error), result: result ? toJson(result) : raw },
+  });
 }
 
 export async function getReviewMarkdown(req: Request, res: Response) {

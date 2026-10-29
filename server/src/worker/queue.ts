@@ -190,6 +190,7 @@ export async function fail(id: string, error: string): Promise<void> {
 export const CLOSED_REASON = "The pull or merge request was closed or merged";
 export const DISABLED_REASON = "Reviews were turned off for this repository";
 export const ACCESS_LOST_REASON = "Sentryward lost access to this repository";
+export const NO_REPOSITORY_REASON = "The repository is no longer connected";
 // Reasons that mean the repository is off, not that the review was unwanted.
 const OFF_REASONS = [DISABLED_REASON, ACCESS_LOST_REASON];
 

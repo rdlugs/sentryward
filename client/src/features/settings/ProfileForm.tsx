@@ -3,10 +3,12 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
+import { UnsavedChangesDialog } from "@/components/UnsavedChangesDialog"
 import { Button } from "@/components/ui/button"
 import { Field, FieldGroup } from "@/components/ui/field"
 import { TextField } from "@/features/auth/TextField"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
+import { useUnsavedChanges } from "@/hooks/use-unsaved-changes"
 import type { User } from "@/features/auth/auth-context"
 import { useUpdateProfile, type ProfileInput } from "./api"
 
@@ -21,6 +23,7 @@ export function ProfileForm({ user }: { user: User }) {
     resolver: zodResolver(profileSchema),
     defaultValues: { name: user.name, email: user.email },
   })
+  const leaving = useUnsavedChanges(form.formState.isDirty, ["tab"])
 
   async function onSubmit(values: ProfileInput) {
     try {
@@ -34,6 +37,7 @@ export function ProfileForm({ user }: { user: User }) {
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+      <UnsavedChangesDialog open={leaving.blocked} onKeep={leaving.keep} onDiscard={leaving.discard} />
       <FieldGroup>
         <TextField control={form.control} name="name" label="Name" autoComplete="name" placeholder="Jane Doe" />
         <TextField control={form.control} name="email" label="Email" type="email" autoComplete="email" placeholder="you@example.com" />

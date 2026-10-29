@@ -229,9 +229,42 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   filters by status, paused targets still accept test deliveries, and members
   see the switch but cannot change it. Existing targets stay active (migration: an `active` column on
   `notification_targets`, default true). Closes #130.
+- Actionable states for reviews that did not succeed (#158). A failed,
+  cancelled or skipped review offers Re-run in its alert (not while the
+  repository's reviews are off, by hand or after lost access, since the server
+  refuses it), plus a link to
+  the page that fixes the cause: LLM Connections for a missing, removed or
+  mismatched key, the review settings when no connection is selected, the
+  Installation tab for refused forge credentials or lost access, Repositories
+  for reviews turned off, Privacy for a blocked model, and the repository's
+  Triggers tab for a skip (noting when `.sentryward.yaml` sets the trigger).
+  `GET /api/reviews/:id` now returns `errorKind`, derived from the stored
+  error when read (including errors recorded as a failed review pass), so
+  older reviews get one too and no migration is needed, and
+  `repository.enabled`, which decides whether Re-run is offered.
+  "Review not found." links to the reviews list.
+- Unsaved-changes guard on the Review settings, Privacy and Profile forms
+  (#163). Leaving a form with unsaved edits (a link, Back, switching the
+  Review settings scope from the picker or any link, or a Settings or
+  Instance settings tab that hides the form) asks to keep editing or discard,
+  and reloading or closing the tab shows the browser's prompt. Switching the
+  Review settings tabs never asks. While there are edits, the Review settings and Privacy save bars
+  pin to the bottom of the page, and Review settings gains a Discard button.
+- Each Review settings field tags its effective value with where it comes
+  from: `default`, `profile: <name>`, `global`, `repo override` or the
+  repository file (#164). In a repository's scope, a field the repository
+  file sets is locked, with a tooltip saying the file wins over the dashboard.
 
 ### Changed
 
+- The Reviews and Findings lists keep their filters, search, view and sort in
+  the URL (#159), so Back from a review restores the list and a copied link
+  reproduces it. Values the page does not know fall back to defaults. Each
+  Findings tab keeps its own (`?fpSeverity=` and so on for false positives),
+  switching tabs keeps both, and a review's "Back to reviews" link returns to
+  the filtered list it was opened from, also after a re-run from the review.
+- The client uses a data router (`createBrowserRouter`) so forms can block
+  navigation; routes still live in `App.tsx`.
 - Home replaces the status hero with a setup checklist built from live
   data: connect GitHub or GitLab, enable a repository, connect an LLM
   provider (with the same usability checks the hero had) and run a first
