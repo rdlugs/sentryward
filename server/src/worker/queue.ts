@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma.ts";
 import type { Prisma, Repository, ReviewJob, ReviewTrigger } from "../generated/prisma/client.ts";
 import { loadDashboardConfig } from "../review/config/load.ts";
 import type { ResultSummary } from "../review/render/json.ts";
+import type { ReviewProgress } from "../review/core/models.ts";
 
 export interface EnqueueInput {
   repositoryId: string;
@@ -115,7 +116,7 @@ export async function enqueueFromWebhook(input: EnqueueInput): Promise<WebhookEn
 export async function claimNext(workspaceConcurrency = Number.MAX_SAFE_INTEGER): Promise<ReviewJob | null> {
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE review_jobs
-    SET status = 'running', locked_at = now(), started_at = now(), attempts = attempts + 1
+    SET status = 'running', locked_at = now(), started_at = now(), attempts = attempts + 1, progress = NULL
     WHERE id = (
       SELECT j.id FROM review_jobs j
       JOIN repositories r ON r.id = j.repository_id
@@ -178,6 +179,15 @@ export async function complete(
 // writing it after a cancel changes nothing that run reports.
 export async function recordTitle(id: string, title: string): Promise<void> {
   await prisma.reviewJob.updateMany({ where: { id }, data: { title } });
+}
+
+// Only by the attempt that holds the job (see claimState): a run that lost its
+// claim must not write over the progress of the one that took it over.
+export async function recordProgress(id: string, attempts: number, progress: ReviewProgress): Promise<void> {
+  await prisma.reviewJob.updateMany({
+    where: { id, status: "running", attempts },
+    data: { progress: progress as object },
+  });
 }
 
 export async function fail(id: string, error: string): Promise<void> {

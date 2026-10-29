@@ -433,6 +433,58 @@ describe("Reviews page rows, filters and stats", () => {
 })
 
 describe("Review detail page", () => {
+  it("shows a running review's current step, pass count and elapsed time", async () => {
+    const startedAt = new Date(Date.now() - 65_000).toISOString()
+    const running = {
+      ...detail,
+      status: "running",
+      verdict: null,
+      result: null,
+      startedAt,
+      progress: { stage: "reviewing", steps: ["fetching", "preparing", "reviewing", "publishing"], passes: { done: 2, total: 5 } },
+    }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: running } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const steps = await screen.findByRole("list", { name: "Review progress" })
+    const items = within(steps).getAllByRole("listitem")
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Fetching the change",
+      "Preparing the review",
+      "Reviewing· 2 of 5 passes",
+      "Publishing",
+    ])
+    expect(items[2]).toHaveAttribute("aria-current", "step")
+    expect(within(items[0]!).getByLabelText("Done")).toBeInTheDocument()
+    // Verification was off for this run, so it is not listed.
+    expect(within(steps).queryByText("Checking findings")).not.toBeInTheDocument()
+    expect(screen.getByText(/Running for 1m 0[56]s/)).toBeInTheDocument()
+  })
+
+  it("names the reviewing step's detail, and falls back to a plain line before any progress", async () => {
+    const running = { ...detail, status: "running", verdict: null, result: null, startedAt: new Date().toISOString() }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "walkthrough" } } } })
+    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("· Finishing the walkthrough")).toBeInTheDocument()
+    unmount()
+
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: running } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("Reviewing the change...")).toBeInTheDocument()
+    expect(screen.getByText(/Running for \d+s/)).toBeInTheDocument()
+  })
+
+  it("shows how long a queued review has waited", async () => {
+    const queued = { ...detail, status: "queued", verdict: null, result: null, createdAt: new Date(Date.now() - 30_000).toISOString() }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: queued } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("Waiting for a worker...")).toBeInTheDocument()
+    expect(screen.getByText(/Queued for 3[01]s/)).toBeInTheDocument()
+  })
+
   it("shows the run's recorded cost, or a dash for a run from before costs were recorded", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })

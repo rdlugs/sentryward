@@ -333,6 +333,7 @@ async function loadOwnedReview(workspaceId: string, id: string) {
       publication: true,
       resolvedConfig: true,
       resultExpiredAt: true,
+      progress: true,
     },
   });
   if (!review) {

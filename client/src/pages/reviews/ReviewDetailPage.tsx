@@ -6,7 +6,6 @@ import { PageHeader } from "@/components/PageHeader"
 import { PageShell } from "@/components/PageShell"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { allFindingsPrompt } from "@/features/reviews/agentPrompt"
 import { useCancelReview, useRerunReview, useReview } from "@/features/reviews/api"
@@ -14,6 +13,7 @@ import { StatusBadge, VerdictBadge } from "@/features/reviews/badges"
 import { CancelReviewDialog } from "@/features/reviews/CancelReviewDialog"
 import { FindingsSection } from "@/features/reviews/detail/FindingsSection"
 import { ReviewProblemActions } from "@/features/reviews/detail/ReviewProblem"
+import { ReviewProgress } from "@/features/reviews/detail/ReviewProgress"
 import { ReviewSidebar } from "@/features/reviews/detail/ReviewSidebar"
 import { WalkthroughCard } from "@/features/reviews/detail/WalkthroughCard"
 import { PROVIDERS } from "@/features/forge/providers"
@@ -184,12 +184,7 @@ export function ReviewDetailPage() {
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="flex min-w-0 flex-col gap-6">
           {isActive(review.status) ? (
-            <Card>
-              <CardContent className="flex items-center gap-3 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-                {review.status === "queued" ? "Waiting for a worker..." : "Reviewing the change..."}
-              </CardContent>
-            </Card>
+            <ReviewProgress review={review} />
           ) : result ? (
             // Keyed so a re-run navigating here starts with fresh collapse state.
             <ResultView key={review.id} result={result} />

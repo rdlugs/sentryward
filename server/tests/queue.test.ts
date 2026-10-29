@@ -14,6 +14,7 @@ import {
   fail,
   DISABLED_REASON,
   heartbeat,
+  recordProgress,
   recordTitle,
   recoverStale,
 } from "../src/worker/queue.ts";
@@ -125,6 +126,40 @@ describe("claimNext", () => {
 
   it("returns null when nothing is queued", async () => {
     expect(await claimNext()).toBeNull();
+  });
+
+  it("clears the progress an earlier attempt recorded", async () => {
+    const queued = await job("aaa", 1);
+    await prisma.reviewJob.update({ where: { id: queued.id }, data: { progress: { stage: "reviewing" } } });
+
+    const claimed = await claimNext();
+
+    expect(claimed?.progress).toBeNull();
+  });
+});
+
+describe("recordProgress", () => {
+  it("writes for the attempt that holds the job, and for no other", async () => {
+    await job("aaa", 1);
+    const claimed = (await claimNext())!;
+
+    await recordProgress(claimed.id, claimed.attempts, { stage: "fetching" });
+    // An earlier attempt that lost its claim.
+    await recordProgress(claimed.id, claimed.attempts - 1, { stage: "publishing" });
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: claimed.id } });
+    expect(stored.progress).toEqual({ stage: "fetching" });
+  });
+
+  it("leaves a finished job alone", async () => {
+    await job("aaa", 1);
+    const claimed = (await claimNext())!;
+    await complete(claimed.id, { status: "completed", verdict: "pass" });
+
+    await recordProgress(claimed.id, claimed.attempts, { stage: "publishing" });
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: claimed.id } });
+    expect(stored.progress).toBeNull();
   });
 });
 

@@ -12,6 +12,7 @@ import {
   DISABLED_REASON,
   enqueue,
   fail,
+  recordProgress,
 } from "../src/worker/queue.ts";
 import { runJob, skipReason, walkthroughEnabled, type RunJobDeps } from "../src/worker/runJob.ts";
 import { DEFAULT_CONFIG } from "../src/review/config/schema.ts";
@@ -674,6 +675,59 @@ describe("runJob", () => {
     expect(published.labels).toEqual([["Small blast radius", "1-5 Minutes"]]);
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(stored.publication).toMatchObject({ labels: ["Small blast radius", "1-5 Minutes"], walkthroughLocation: "comment" });
+  });
+
+  it("records each stage on the job as it runs, ending with publishing", async () => {
+    const job = await claimedJob();
+    const { runDeps } = deps({}, { code_review: { findings: [] }, walkthrough: WALKTHROUGH });
+    // What the job row held after each write, as the dashboard would read it.
+    const seen: unknown[] = [];
+    runDeps.recordProgress = async (id, attempts, progress) => {
+      await recordProgress(id, attempts, progress);
+      seen.push((await prisma.reviewJob.findUniqueOrThrow({ where: { id } })).progress);
+    };
+
+    await runJob(job, runDeps);
+
+    const order = ["fetching", "preparing", "planning", "context", "walkthrough", "reviewing", "verifying", "publishing"];
+    const stages = (seen as { stage: string }[]).map((progress) => progress.stage);
+    // Updates made while a write is in flight are merged, so some stages may
+    // never reach the row, but those that do arrive in order.
+    expect(stages[0]).toBe("fetching");
+    expect(stages.at(-1)).toBe("publishing");
+    expect(stages.map((stage) => order.indexOf(stage))).toEqual([...stages.map((stage) => order.indexOf(stage))].sort((a, b) => a - b));
+    expect(seen.at(-1)).toEqual({ stage: "publishing", steps: ["fetching", "preparing", "reviewing", "verifying", "publishing"] });
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("completed");
+  });
+
+  it("leaves publishing and verifying out of the steps when they are off", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: {
+        settings: { review: { verify: "off" }, output: { postInline: false, postSummary: false, postCheck: false, walkthrough: false } },
+      },
+    });
+    const job = await claimedJob();
+    const { runDeps } = deps({}, { code_review: { findings: [] }, walkthrough: WALKTHROUGH });
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.progress).toMatchObject({ steps: ["fetching", "preparing", "reviewing"] });
+  });
+
+  it("finishes the review when progress cannot be recorded", async () => {
+    const job = await claimedJob();
+    const { runDeps } = deps({}, { code_review: { findings: [] }, walkthrough: WALKTHROUGH });
+    runDeps.recordProgress = async () => {
+      throw new Error("connection reset");
+    };
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("completed");
   });
 
   it("publishes nothing when every output is turned off", async () => {

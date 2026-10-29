@@ -550,6 +550,42 @@ describe("runReview", () => {
     }
   });
 
+  it("reports each stage and pass as the review moves on", async () => {
+    const { generate } = fakeModel({ code_review: { findings: [] }, walkthrough: WALKTHROUGH });
+    const stages: unknown[] = [];
+
+    await runReview(
+      { changeSet: twoPassChangeSet(), config: config({ llm: { contextBudget: 4000 } }) },
+      { generate, now, onProgress: (progress) => stages.push(progress) },
+    );
+
+    expect(stages).toEqual([
+      { stage: "planning" },
+      // The passes wait for the walkthrough's file summaries.
+      { stage: "walkthrough" },
+      { stage: "reviewing", passes: { done: 0, total: 2 } },
+      { stage: "reviewing", passes: { done: 1, total: 2 } },
+      { stage: "reviewing", passes: { done: 2, total: 2 } },
+      { stage: "verifying" },
+    ]);
+  });
+
+  it("counts a failed pass as done and skips the verifying stage when verify is off", async () => {
+    const { generate } = fakeModel({ code_review: new Error("rate limited") });
+    const stages: unknown[] = [];
+
+    await runReview(
+      { changeSet: makeChangeSet(), config: config({ output: { walkthrough: false }, review: { verify: "off" } }) },
+      { generate, now, onProgress: (progress) => stages.push(progress) },
+    );
+
+    expect(stages).toEqual([
+      { stage: "planning" },
+      { stage: "reviewing", passes: { done: 0, total: 1 } },
+      { stage: "reviewing", passes: { done: 1, total: 1 } },
+    ]);
+  });
+
   it("still lists the files to every pass when the walkthrough fails", async () => {
     const { generate, requests } = fakeModel({ code_review: { findings: [] }, walkthrough: new Error("nope") });
 

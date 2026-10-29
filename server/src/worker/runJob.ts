@@ -49,6 +49,7 @@ import { prepareCapabilities, type Probe } from "./capabilities.ts";
 import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
 import { incrementFor } from "./incremental.ts";
+import { progressRecorder, type WriteProgress } from "./progress.ts";
 import {
   ACCESS_LOST_REASON,
   claimState,
@@ -86,6 +87,8 @@ export interface RunJobDeps {
   // mode checks hosts with.
   policyFor?: (workspaceId: string) => Promise<EffectivePolicy>;
   resolveHost?: Resolve;
+  // Where the dashboard's progress is written; absent means the job row.
+  recordProgress?: WriteProgress;
 }
 
 const defaultDeps: RunJobDeps = {
@@ -206,6 +209,8 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     return;
   }
 
+  const progress = progressRecorder(job, deps.recordProgress);
+  progress.set({ stage: "fetching" });
   const forge = deps.adapterFor(repo.connection);
   const saved = {
     globalSettings: repo.connection.workspace.reviewSettings,
@@ -265,6 +270,14 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     return;
   }
 
+  progress.plan([
+    "fetching",
+    "preparing",
+    "reviewing",
+    ...(config.review.verify !== "off" ? (["verifying"] as const) : []),
+    ...(publishes(config) ? (["publishing"] as const) : []),
+  ]);
+  progress.set({ stage: "preparing" });
   const walkthrough = walkthroughEnabled(job.trigger, config, changeSet.isDraft);
   // Only the models this review will call are checked, so a walkthrough or
   // verify model left set while that pass is off does not fail the job.
@@ -483,6 +496,7 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
       {
         generate: abortableGenerate(generate, watch.signal),
         context,
+        onProgress: progress.set,
         ...(generateAgentic ? { generateAgentic: abortableGenerateAgentic(generateAgentic, watch.signal) } : {}),
       },
     );
@@ -520,6 +534,7 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     // The same transitions syncFindings writes after the job is stored, plus
     // thread updates an earlier run could not make.
     const threads = threadOperations(findings, findingTransitions(findings, result));
+    progress.set({ stage: "publishing" });
     publication = await publishReview({
       publisher: forge,
       changeSet,
@@ -560,6 +575,9 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
   // stands, and the job says what did not reach the forge.
   const errors = [...result.errors, ...(publication?.errors ?? [])];
   const status = result.status === "completed" && publication?.errors.length ? "partial" : result.status;
+  // Writes after this find the job finished and change nothing; waiting just
+  // keeps them from racing the result.
+  await progress.flush();
   const stored = await complete(job.id, {
     status,
     verdict: result.verdict.verdict,
