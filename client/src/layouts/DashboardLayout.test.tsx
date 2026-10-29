@@ -1,9 +1,11 @@
-import { lazy } from "react"
+import { lazy, type ReactElement } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Route, Routes } from "react-router"
 import { DashboardLayout } from "./DashboardLayout"
+import { useConnections, useConnectionStatuses } from "@/features/forge/api"
+import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
 import { mockApi } from "@/test/apiRoutes"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 
@@ -74,18 +76,25 @@ describe("DashboardLayout", () => {
       credentialsRejectedAt: null,
     }
 
-    function renderOn(route: string) {
+    function renderOn(route: string, element: ReactElement = <p>Page</p>) {
       return renderWithProviders(
         <Routes>
           <Route element={<DashboardLayout />}>
-            <Route path={route} element={<p>Page</p>} />
+            <Route path={route} element={element} />
           </Route>
         </Routes>,
         { route },
       )
     }
 
-    it("flags failed reviews and unhealthy connections with accessible labels", async () => {
+    // Stands in for the pages that run the live checks the sidebar only reads.
+    function CheckingPage() {
+      useApiKeyStatuses(useApiKeys().data?.keys ?? [])
+      useConnectionStatuses(useConnections().data?.connections ?? [])
+      return <p>Page</p>
+    }
+
+    it("flags failed reviews and unhealthy connections a page has checked, with accessible labels", async () => {
       mockApi({
         "GET /api/reviews/attention": { failed: 3, since: "" },
         "GET /api/settings/api-keys": { keys: [apiKey] },
@@ -93,7 +102,7 @@ describe("DashboardLayout", () => {
         "GET /api/connections": { connections: [connection], availableApps: [] },
         "GET /api/connections/c1/status": () => jsonResponse(502, { message: "down" }),
       })
-      renderOn("/usage")
+      renderOn("/usage", <CheckingPage />)
 
       expect(
         await screen.findByRole("link", { name: /^Reviews\W+3 failed reviews since your last visit$/ }),
@@ -107,6 +116,31 @@ describe("DashboardLayout", () => {
       ).toBeInTheDocument()
     })
 
+    it("starts no credential checks itself, but still flags what the server already knows", async () => {
+      const keyStatus = vi.fn(() => jsonResponse(200, { status: "revoked" }))
+      const connectionStatus = vi.fn(() => jsonResponse(200, { status: "revoked" }))
+      mockApi({
+        "GET /api/reviews/attention": { failed: 0, since: "" },
+        "GET /api/settings/api-keys": { keys: [{ ...apiKey, blocked: true }] },
+        "GET /api/settings/api-keys/anthropic/status": keyStatus,
+        "GET /api/connections": {
+          connections: [{ ...connection, credentialsRejectedAt: "2026-01-01T00:00:00Z" }],
+          availableApps: [],
+        },
+        "GET /api/connections/c1/status": connectionStatus,
+      })
+      renderOn("/usage")
+
+      expect(
+        await screen.findByRole("link", { name: /^LLM Connections\W+A connection needs attention$/ }),
+      ).toBeInTheDocument()
+      expect(
+        await screen.findByRole("link", { name: /^Repositories\W+A forge connection needs attention$/ }),
+      ).toBeInTheDocument()
+      expect(keyStatus).not.toHaveBeenCalled()
+      expect(connectionStatus).not.toHaveBeenCalled()
+    })
+
     it("shows nothing while connections are healthy or still being checked", async () => {
       mockApi({
         "GET /api/reviews/attention": { failed: 0, since: "" },
@@ -115,7 +149,7 @@ describe("DashboardLayout", () => {
         "GET /api/connections": { connections: [connection], availableApps: [] },
         "GET /api/connections/c1/status": () => new Promise<Response>(() => {}) as unknown as Response,
       })
-      renderOn("/usage")
+      renderOn("/usage", <CheckingPage />)
 
       await screen.findByText("Page")
       await new Promise((resolve) => setTimeout(resolve, 50))
@@ -131,6 +165,22 @@ describe("DashboardLayout", () => {
       await screen.findByText("Page")
       await new Promise((resolve) => setTimeout(resolve, 50))
       expect(screen.getByRole("link", { name: "Reviews" })).toBeInTheDocument()
+    })
+
+    it("hides the failed count on the list's trailing-slash URL too", async () => {
+      mockApi({ "GET /api/reviews/attention": { failed: 2, since: "" } })
+      renderWithProviders(
+        <Routes>
+          <Route element={<DashboardLayout />}>
+            <Route path="/reviews" element={<p>Page</p>} />
+          </Route>
+        </Routes>,
+        { route: "/reviews/" },
+      )
+
+      await screen.findByText("Page")
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(screen.queryByRole("link", { name: /failed review/ })).not.toBeInTheDocument()
     })
   })
 })

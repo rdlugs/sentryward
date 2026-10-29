@@ -129,10 +129,14 @@ function connectionStatusQuery(id: string) {
 
 // One live credential check per connection, so a slow forge only delays its
 // own row. Undefined while a check is still running, unless the server already
-// knows the credentials were refused.
-export function useConnectionStatuses(connections: Connection[]): Record<string, ConnectionStatus | undefined> {
+// knows the credentials were refused. With live off, only a check some page
+// already ran is read: each one calls the forge and spends its rate limit.
+export function useConnectionStatuses(
+  connections: Connection[],
+  { live = true }: { live?: boolean } = {},
+): Record<string, ConnectionStatus | undefined> {
   return useQueries({
-    queries: connections.map((connection) => connectionStatusQuery(connection.id)),
+    queries: connections.map((connection) => ({ ...connectionStatusQuery(connection.id), enabled: live })),
     combine: (results) =>
       Object.fromEntries(
         results.map((result, index) => {

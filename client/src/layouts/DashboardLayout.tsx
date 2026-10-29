@@ -128,6 +128,8 @@ function NavItems({
               asChild
               isActive={pathname.startsWith(item.to)}
               tooltip={flag ? `${item.label}: ${flag.label}` : item.label}
+              // Room for the badge, as the button keeps for a menu action.
+              className={flag ? "pr-8" : undefined}
             >
               <NavLink to={item.to}>
                 {/* The badge hides with the labels, so a collapsed sidebar
@@ -141,9 +143,13 @@ function NavItems({
                     />
                   )}
                 </span>
-                <span>{item.label}</span>
-                {/* Part of the link's name, so it is read with the item. */}
-                {flag && <span className="sr-only">, {flag.label}</span>}
+                {/* The flag's text is part of the link's name, so it is read
+                    with the item; nested so the label stays the last span the
+                    button truncates. */}
+                <span>
+                  {item.label}
+                  {flag && <span className="sr-only">, {flag.label}</span>}
+                </span>
               </NavLink>
             </SidebarMenuButton>
             {flag && (

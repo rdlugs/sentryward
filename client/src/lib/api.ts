@@ -25,9 +25,10 @@ export function apiWorkspace(): string | null {
   return currentWorkspaceId
 }
 
-// For requests that bypass api(), such as raw-text downloads.
-export function workspaceHeaders(): Record<string, string> {
-  return currentWorkspaceId ? { "x-sentryward-workspace": currentWorkspaceId } : {}
+// For requests that bypass api(), such as raw-text downloads, or that must act
+// in a given workspace whatever is selected now.
+export function workspaceHeaders(id: string | null = currentWorkspaceId): Record<string, string> {
+  return id ? { "x-sentryward-workspace": id } : {}
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

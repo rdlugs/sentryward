@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { AlertTriangle, Play } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
 import {
   ActiveFilterChips,
   FilterPopover,
@@ -22,6 +23,8 @@ import { useDebounced } from "@/hooks/use-debounced"
 import { usePagination } from "@/hooks/use-pagination"
 import { useUrlFilters } from "@/hooks/use-url-filters"
 import { ALL, choices, only, selectedLabel } from "@/lib/filters"
+import { ME_QUERY_KEY } from "@/features/auth/auth-context"
+import { useAuth } from "@/features/auth/useAuth"
 import { useRepos } from "@/features/forge/api"
 import { useMarkReviewsViewed, useReviews, type ReviewQuery } from "@/features/reviews/api"
 import { STATUS_OPTIONS, TRIGGER_OPTIONS, VERDICT_OPTIONS } from "@/features/reviews/options"
@@ -53,12 +56,19 @@ export function ReviewsPage() {
   const q = useDebounced(query.trim())
 
   // Clears the sidebar's failed-review badge. Marked again on leaving, so runs
-  // that fail while the list is open do not light it up afterwards.
+  // that fail while the list is open do not light it up afterwards. Leaving on
+  // a workspace switch marks the one that was open; leaving on logout has no
+  // session to mark with.
+  const queryClient = useQueryClient()
+  const workspaceId = useAuth().workspace?.id
   const { mutate: markViewed } = useMarkReviewsViewed()
   useEffect(() => {
-    markViewed()
-    return () => markViewed()
-  }, [markViewed])
+    if (!workspaceId) return
+    markViewed(workspaceId)
+    return () => {
+      if (queryClient.getQueryData(ME_QUERY_KEY)) markViewed(workspaceId)
+    }
+  }, [markViewed, queryClient, workspaceId])
 
   const repos = useRepos()
   const repoOptions = useMemo(

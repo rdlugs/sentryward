@@ -73,15 +73,16 @@ export function useReviewAttention() {
   })
 }
 
-// The visit is stored on the server, so the badge clears on every device.
+// The visit is stored on the server, so the badge clears on every device. The
+// workspace is passed in, not read from the selection: leaving the list on a
+// switch must mark the workspace that was open. Refetched rather than zeroed,
+// so a poll already in flight cannot restore the old count.
 export function useMarkReviewsViewed() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => api<void>("/reviews/viewed", { method: "POST" }),
-    onSuccess: () =>
-      queryClient.setQueryData<ReviewAttention>(["reviews", "attention"], (old) =>
-        old ? { ...old, failed: 0 } : old,
-      ),
+    mutationFn: (workspaceId: string) =>
+      api<void>("/reviews/viewed", { method: "POST", headers: workspaceHeaders(workspaceId) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reviews", "attention"], exact: true }),
   })
 }
 

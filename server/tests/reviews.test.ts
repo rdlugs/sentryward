@@ -413,6 +413,21 @@ describe("GET /api/reviews/attention", () => {
       .set(...inWorkspace(team.id));
     expect(teamRes.body.failed).toBe(0);
   });
+
+  it("drops a failure once a newer run of the change replaces it, as the list does", async () => {
+    await prisma.reviewJob.createMany({
+      data: [
+        { ...failedRun(1, ago(120_000)), createdAt: ago(180_000) },
+        { ...failedRun(1, ago(60_000), "completed"), createdAt: ago(90_000) },
+        // A superseded run hides nothing: the list skips it too.
+        { ...failedRun(2, ago(120_000)), createdAt: ago(180_000) },
+        { ...failedRun(2, ago(60_000)), status: "superseded" as const, createdAt: ago(90_000) },
+      ],
+    });
+
+    const res = await request(app).get("/api/reviews/attention").set("Cookie", cookie);
+    expect(res.body.failed).toBe(1);
+  });
 });
 
 describe("GET /api/reviews/stats cost", () => {

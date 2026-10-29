@@ -1,10 +1,9 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react"
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { api, ApiError, setApiWorkspace } from "@/lib/api"
-import { AuthContext, type Session, type User, type Workspace } from "./auth-context"
+import { AuthContext, ME_QUERY_KEY, type Session, type User, type Workspace } from "./auth-context"
 import type { LoginInput, RegisterInput, ResetPasswordInput } from "./schemas"
 
-const ME_QUERY_KEY = ["auth", "me"] as const
 export const WORKSPACES_QUERY_KEY = ["auth", "workspaces"] as const
 const STORED_WORKSPACE = "sentryward.workspace"
 

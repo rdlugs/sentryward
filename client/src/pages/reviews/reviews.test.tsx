@@ -32,6 +32,48 @@ describe("Reviews page", () => {
     expect(screen.getByRole("link", { name: "Reviews" })).toBeInTheDocument()
   })
 
+  it("marks the workspace that was open when leaving the list on a switch", async () => {
+    const viewed = vi.fn((init?: RequestInit) => {
+      void init
+      return new Response(null, { status: 204 })
+    })
+    mockApi({
+      "GET /api/reviews": { reviews: [], total: 0, page: 1, limit: 10 },
+      "GET /api/reviews/attention": { failed: 0, since: "" },
+      "POST /api/reviews/viewed": viewed,
+    })
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await waitFor(() => expect(viewed).toHaveBeenCalledTimes(1))
+    await userEvent.click(await screen.findByRole("button", { name: "Switch workspace" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Acme/ }))
+
+    // The switch then lands on Home, after the team's list mounts once.
+    await waitFor(() => expect(viewed.mock.calls.length).toBeGreaterThanOrEqual(2))
+    const headers = viewed.mock.calls.map(
+      ([init]) => (init!.headers as Record<string, string>)["x-sentryward-workspace"],
+    )
+    expect(headers.slice(0, 2)).toEqual(["w-personal", "w-personal"])
+  })
+
+  it("does not mark the list when leaving it by logging out", async () => {
+    const viewed = vi.fn(() => new Response(null, { status: 204 }))
+    mockApi({
+      "GET /api/reviews": { reviews: [], total: 0, page: 1, limit: 10 },
+      "GET /api/reviews/attention": { failed: 0, since: "" },
+      "POST /api/reviews/viewed": viewed,
+      "POST /api/auth/logout": () => new Response(null, { status: 204 }),
+    })
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await waitFor(() => expect(viewed).toHaveBeenCalledTimes(1))
+    await userEvent.click(await screen.findByRole("button", { name: /ada@example.com/ }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Log out" }))
+
+    expect(await screen.findByRole("button", { name: /log in|sign in/i })).toBeInTheDocument()
+    expect(viewed).toHaveBeenCalledTimes(1)
+  })
+
   it("pages through reviews on the server", async () => {
     const reviewsPage = (n: number) => ({ ...listItem, id: `review-${n}`, title: `Review ${n}` })
     mockApi({
