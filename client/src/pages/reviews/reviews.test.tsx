@@ -19,6 +19,19 @@ describe("Reviews page", () => {
     expect(within(row).getByText("abcdef1")).toBeInTheDocument()
   })
 
+  it("marks the list as viewed, clearing the sidebar's failed count", async () => {
+    const viewed = vi.fn(() => new Response(null, { status: 204 }))
+    mockApi({
+      "GET /api/reviews?view=changes&page=1&limit=10": { reviews: [listItem], total: 1, page: 1, limit: 10 },
+      "GET /api/reviews/attention": { failed: 2, since: "" },
+      "POST /api/reviews/viewed": viewed,
+    })
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await waitFor(() => expect(viewed).toHaveBeenCalled())
+    expect(screen.getByRole("link", { name: "Reviews" })).toBeInTheDocument()
+  })
+
   it("pages through reviews on the server", async () => {
     const reviewsPage = (n: number) => ({ ...listItem, id: `review-${n}`, title: `Review ${n}` })
     mockApi({

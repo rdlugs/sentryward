@@ -57,6 +57,34 @@ export function useReviewStats() {
   })
 }
 
+export interface ReviewAttention {
+  // Failed runs since the caller last opened the Reviews list (or the last day).
+  failed: number
+  since: string
+}
+
+// For the sidebar badge. Under the "reviews" key so queueing or rerunning
+// refreshes it, and polled slowly so failures show up without a reload.
+export function useReviewAttention() {
+  return useQuery({
+    queryKey: ["reviews", "attention"],
+    queryFn: () => api<ReviewAttention>("/reviews/attention"),
+    refetchInterval: 60_000,
+  })
+}
+
+// The visit is stored on the server, so the badge clears on every device.
+export function useMarkReviewsViewed() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<void>("/reviews/viewed", { method: "POST" }),
+    onSuccess: () =>
+      queryClient.setQueryData<ReviewAttention>(["reviews", "attention"], (old) =>
+        old ? { ...old, failed: 0 } : old,
+      ),
+  })
+}
+
 export function useReview(id: string) {
   return useQuery({
     queryKey: ["review", id],

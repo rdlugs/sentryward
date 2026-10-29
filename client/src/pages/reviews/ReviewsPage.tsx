@@ -23,7 +23,7 @@ import { usePagination } from "@/hooks/use-pagination"
 import { useUrlFilters } from "@/hooks/use-url-filters"
 import { ALL, choices, only, selectedLabel } from "@/lib/filters"
 import { useRepos } from "@/features/forge/api"
-import { useReviews, type ReviewQuery } from "@/features/reviews/api"
+import { useMarkReviewsViewed, useReviews, type ReviewQuery } from "@/features/reviews/api"
 import { STATUS_OPTIONS, TRIGGER_OPTIONS, VERDICT_OPTIONS } from "@/features/reviews/options"
 import { ReviewStatsStrip } from "@/features/reviews/ReviewStatsStrip"
 import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
@@ -51,6 +51,14 @@ export function ReviewsPage() {
   const includeSuperseded = values.superseded === "true"
   const [manualOpen, setManualOpen] = useState(false)
   const q = useDebounced(query.trim())
+
+  // Clears the sidebar's failed-review badge. Marked again on leaving, so runs
+  // that fail while the list is open do not light it up afterwards.
+  const { mutate: markViewed } = useMarkReviewsViewed()
+  useEffect(() => {
+    markViewed()
+    return () => markViewed()
+  }, [markViewed])
 
   const repos = useRepos()
   const repoOptions = useMemo(

@@ -1,0 +1,43 @@
+import { useConnectionStatuses, useConnections } from "@/features/forge/api"
+import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
+import { useReviewAttention } from "@/features/reviews/api"
+
+// What a nav item flags: a count (failed reviews) or a warning dot. The label
+// is the screen-reader and tooltip text, so the state never rests on color.
+export type NavAttention = { count?: number; label: string }
+
+const EMPTY: never[] = []
+
+// Reuses the pages' own status checks, so fixing a connection there clears its
+// dot at once. A check still running is not a problem yet.
+export function useNavAttention(pathname: string): Record<string, NavAttention | undefined> {
+  const attention = useReviewAttention()
+  const failed = attention.data?.failed ?? 0
+
+  // Only stored keys are checked, as on the LLM Connections page; an
+  // unreadable one has nothing to send the provider.
+  const keys = (useApiKeys().data?.keys ?? EMPTY).filter((key) => key.stored)
+  const keyStatuses = useApiKeyStatuses(keys.filter((key) => !key.undecryptable))
+  const llmUnhealthy = keys.some((key) => {
+    if (key.undecryptable || key.blocked) return true
+    const status = keyStatuses[key.provider]
+    return status === "revoked" || status === "unreachable" || status === "blocked"
+  })
+
+  const connections = useConnections().data?.connections ?? EMPTY
+  const connectionStatuses = useConnectionStatuses(connections)
+  const forgeUnhealthy = connections.some((connection) => {
+    const status = connectionStatuses[connection.id]
+    return status === "revoked" || status === "unreachable"
+  })
+
+  return {
+    // Not while the list is open: those runs are on screen.
+    "/reviews":
+      failed > 0 && pathname !== "/reviews"
+        ? { count: failed, label: `${failed} failed ${failed === 1 ? "review" : "reviews"} since your last visit` }
+        : undefined,
+    "/llm-connections": llmUnhealthy ? { label: "A connection needs attention" } : undefined,
+    "/repositories": forgeUnhealthy ? { label: "A forge connection needs attention" } : undefined,
+  }
+}

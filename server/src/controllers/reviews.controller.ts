@@ -265,6 +265,33 @@ export async function getReviewStats(req: Request, res: Response) {
   });
 }
 
+// With no visit recorded, the last day counts as unseen.
+const UNSEEN_WINDOW_MS = 86_400_000;
+
+// Failed runs the caller has not seen on the Reviews list, for the sidebar.
+// Counted by when they failed, so a run queued before the last visit that
+// fails after it still counts.
+export async function getReviewAttention(req: Request, res: Response) {
+  const membership = await prisma.membership.findUniqueOrThrow({
+    where: { userId_workspaceId: { userId: req.userId!, workspaceId: req.workspaceId! } },
+    select: { reviewsViewedAt: true },
+  });
+  const since = membership.reviewsViewedAt ?? new Date(Date.now() - UNSEEN_WINDOW_MS);
+  const failed = await prisma.reviewJob.count({
+    where: { ...ownedBy(req.workspaceId!), status: "failed", finishedAt: { gt: since } },
+  });
+  res.json({ failed, since: since.toISOString() });
+}
+
+// Per member and workspace, so each teammate clears their own badge.
+export async function markReviewsViewed(req: Request, res: Response) {
+  await prisma.membership.update({
+    where: { userId_workspaceId: { userId: req.userId!, workspaceId: req.workspaceId! } },
+    data: { reviewsViewedAt: new Date() },
+  });
+  res.status(204).end();
+}
+
 async function loadOwnedReview(workspaceId: string, id: string) {
   const review = await prisma.reviewJob.findFirst({
     where: { id, ...ownedBy(workspaceId) },

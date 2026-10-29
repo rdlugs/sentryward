@@ -254,6 +254,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   from: `default`, `profile: <name>`, `global`, `repo override` or the
   repository file (#164). In a repository's scope, a field the repository
   file sets is locked, with a tooltip saying the file wins over the dashboard.
+- Sidebar attention indicators (#162). Reviews shows a count of runs that
+  failed since you last opened the list (the last 24 hours before your first
+  visit), and LLM Connections and Repositories show a warning dot when a
+  connection is revoked, unreachable, blocked by policy or unreadable. The
+  state is part of each link's accessible name and tooltip, and a collapsed
+  sidebar keeps a dot on the icon. New `GET /api/reviews/attention` and
+  `POST /api/reviews/viewed` endpoints, backed by a new
+  `memberships.reviews_viewed_at` column, track the visit per member and
+  workspace, so it clears on every device.
 
 ### Changed
 
