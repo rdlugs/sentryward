@@ -20,7 +20,7 @@ describe("routing and auth", () => {
     renderWithProviders(<App />, { route: "/dashboard" })
 
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument()
-    expect(await screen.findByText("Connect a Git provider")).toBeInTheDocument()
+    expect(await screen.findByRole("heading", { name: "Connect GitHub or GitLab" })).toBeInTheDocument()
     expect(screen.getByRole("link", { name: "Connect a provider" })).toHaveAttribute("href", "/repositories?tab=installation")
   })
 
