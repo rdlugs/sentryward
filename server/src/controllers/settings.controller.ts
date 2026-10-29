@@ -54,6 +54,7 @@ async function requirePassword(userId: string, password: string, field: string) 
 function publicKey(
   provider: ProviderName,
   stored?: { encryptedKey: string | null; baseUrl: string | null; updatedAt: Date },
+  blocked = false,
 ) {
   let last4: string | null = null;
   let undecryptable = false;
@@ -73,6 +74,7 @@ function publicKey(
     baseUrl: stored?.baseUrl ?? null,
     updatedAt: stored?.updatedAt ?? null,
     serverDefault: SERVER_KEYS[provider],
+    blocked,
   };
 }
 
@@ -136,7 +138,17 @@ async function assertAllowed(workspaceId: string, target: LlmTarget, field: "bas
 export async function listApiKeys(req: Request, res: Response) {
   const stored = await prisma.llmCredential.findMany({ where: { workspaceId: req.workspaceId } });
   const byProvider = new Map(stored.map((credential) => [credential.provider, credential]));
-  res.json({ keys: PROVIDERS.map((provider) => publicKey(provider, byProvider.get(provider))) });
+  // The policy refuses a provider or host whichever key would be used, so a
+  // server-wide key is checked too: it has no status request to report it.
+  const policy = await policyFor(req.workspaceId!);
+  const keys = await Promise.all(
+    PROVIDERS.map(async (provider) => {
+      const credential = byProvider.get(provider);
+      const violation = await checkModel(policy, connectionTarget(provider, credential?.baseUrl));
+      return publicKey(provider, credential, Boolean(violation));
+    }),
+  );
+  res.json({ keys });
 }
 
 // The stored secret stays server-side while the provider confirms whether it

@@ -24,6 +24,8 @@ export interface ApiKey {
   baseUrl: string | null
   updatedAt: string | null
   serverDefault: boolean
+  // The privacy policy refuses this provider or its host, whichever key is used.
+  blocked: boolean
 }
 
 export function useApiKeys() {

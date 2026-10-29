@@ -232,6 +232,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- `GET /api/settings/api-keys` reports `blocked` per provider: whether the
+  privacy policy refuses that provider or its host, whichever key is used.
+
 - The dashboard sidebar is split into labelled groups: Activity (Reviews,
   Findings), Insights (Usage, Benchmarks), Workspace (Repositories, LLM
   Connections, Review settings, Notifications, Privacy, in setup order) and,
@@ -282,6 +285,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   its own id, so two on one page keep their labels. Closes #132.
 
 ### Fixed
+
+- The home status no longer says "Reviews are on" when the workspace has no
+  usable LLM connection: it asks for one first. A server-provided key counts
+  as usable unless the workspace stored its own key for that provider (reviews
+  use the stored one, so a revoked stored key counts as missing) or the
+  privacy policy blocks the provider. A provider that does not answer its
+  status check gets its own "Can't reach your LLM provider" message instead.
+  Closes #152.
 
 - An open finding in a file the change later deletes is now resolved (as
   invalidated) instead of staying open forever: a deleted file is never

@@ -148,6 +148,7 @@ describe("/api/settings/api-keys", () => {
       "ollama",
     ]);
     expect(res.body.keys[0]).toMatchObject({ stored: false, last4: null });
+    expect(res.body.keys.every((key: { blocked: boolean }) => key.blocked === false)).toBe(true);
   });
 
   it("stores a key encrypted and only returns its last four characters", async () => {
@@ -636,6 +637,21 @@ describe("privacy policy on LLM connections", () => {
 
     const models = await request(app).get("/api/settings/api-keys/anthropic/models").set("Cookie", cookie);
     expect(models.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("lists the providers the policy refuses as blocked, without calling them", async () => {
+    await prisma.workspacePrivacy.create({ data: { workspaceId, allowedProviders: ["ollama"] } });
+
+    const res = await request(app).get("/api/settings/api-keys").set("Cookie", cookie);
+
+    expect(res.status).toBe(200);
+    expect(Object.fromEntries(res.body.keys.map((key: { provider: string; blocked: boolean }) => [key.provider, key.blocked]))).toEqual({
+      anthropic: true,
+      openai: true,
+      google: true,
+      ollama: false,
+    });
     expect(fetch).not.toHaveBeenCalled();
   });
 

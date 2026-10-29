@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
-import { renderWithProviders } from "@/test/renderWithProviders"
+import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 import { mockApi } from "@/test/apiRoutes"
 import { listItem } from "@/test/fixtures"
 
@@ -37,7 +37,7 @@ const globalConfig = (review: string) => ({
   config: { profile: "balanced", review: { blockOn: "major" }, triggers: { review } },
 })
 
-const apiKey = { provider: "anthropic", stored: true, last4: "abcd", undecryptable: false, baseUrl: null, updatedAt: null, serverDefault: false }
+const apiKey = { provider: "anthropic", stored: true, last4: "abcd", undecryptable: false, baseUrl: null, updatedAt: null, serverDefault: false, blocked: false }
 
 // Defaults to a fully set up account with automatic reviews on.
 function stubHome({
@@ -45,12 +45,26 @@ function stubHome({
   repos = [repo(true)],
   trigger = "published",
   reviews = [listItem],
-}: { connections?: unknown[]; repos?: unknown[]; trigger?: string; reviews?: unknown[] } = {}) {
+  keys = [apiKey],
+  keyStatuses = { anthropic: "active" },
+  keysFail = false,
+}: {
+  connections?: unknown[]
+  repos?: unknown[]
+  trigger?: string
+  reviews?: unknown[]
+  keys?: unknown[]
+  keyStatuses?: Record<string, string>
+  keysFail?: boolean
+} = {}) {
   mockApi({
     "GET /api/connections": { connections, availableApps: ["github"] },
     "GET /api/repos": { repos },
     "GET /api/config/global": globalConfig(trigger),
-    "GET /api/settings/api-keys": { keys: [apiKey] },
+    "GET /api/settings/api-keys": keysFail ? () => jsonResponse(500, { message: "Internal Server Error" }) : { keys },
+    ...Object.fromEntries(
+      Object.entries(keyStatuses).map(([provider, status]) => [`GET /api/settings/api-keys/${provider}/status`, { status }]),
+    ),
     "GET /api/reviews?limit=5": { reviews, total: reviews.length, page: 1, limit: 5 },
   })
   renderWithProviders(<App />, { route: "/home" })
@@ -67,6 +81,64 @@ describe("Home page", () => {
 
     const hero = (await screen.findByText(title)).closest("[data-slot=card]") as HTMLElement
     expect(within(hero).getByRole("link", { name: button })).toHaveAttribute("href", href)
+  })
+
+  it("asks for an LLM connection when none is usable", async () => {
+    stubHome({ keys: [], keyStatuses: {} })
+
+    const hero = (await screen.findByRole("heading", { name: "Connect an LLM provider" })).closest("[data-slot=card]") as HTMLElement
+    expect(within(hero).getByRole("link", { name: "Add an LLM connection" })).toHaveAttribute("href", "/llm-connections")
+  })
+
+  it("counts a server-provided LLM key as usable", async () => {
+    stubHome({
+      keys: [{ ...apiKey, stored: false, last4: null, serverDefault: true }],
+      keyStatuses: {},
+    })
+
+    expect(await screen.findByText("Reviews are on")).toBeInTheDocument()
+  })
+
+  it("treats a revoked LLM connection as missing", async () => {
+    stubHome({ keyStatuses: { anthropic: "revoked" } })
+
+    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+  })
+
+  it("judges a stored key on its own even when the server has a key", async () => {
+    // Reviews use the stored key over the server's, so the revoked one decides.
+    stubHome({ keys: [{ ...apiKey, serverDefault: true }], keyStatuses: { anthropic: "revoked" } })
+
+    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+  })
+
+  it("treats a server key the privacy policy blocks as missing", async () => {
+    stubHome({
+      keys: [{ ...apiKey, stored: false, last4: null, serverDefault: true, blocked: true }],
+      keyStatuses: {},
+    })
+
+    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+  })
+
+  it("says the provider can't be reached instead of asking for a connection", async () => {
+    stubHome({ keyStatuses: { anthropic: "unreachable" } })
+
+    const hero = (await screen.findByRole("heading", { name: "Can't reach your LLM provider" })).closest("[data-slot=card]") as HTMLElement
+    expect(within(hero).getByRole("link", { name: "Check LLM connections" })).toHaveAttribute("href", "/llm-connections")
+  })
+
+  it("does not check an undecryptable key and treats it as missing", async () => {
+    // No status route is stubbed: a request would 404 and read as unreachable.
+    stubHome({ keys: [{ ...apiKey, last4: null, undecryptable: true }], keyStatuses: {} })
+
+    expect(await screen.findByRole("heading", { name: "Connect an LLM provider" })).toBeInTheDocument()
+  })
+
+  it("skips the LLM step when the key list fails to load", async () => {
+    stubHome({ keysFail: true, keyStatuses: {} })
+
+    expect(await screen.findByText("Reviews are on")).toBeInTheDocument()
   })
 
   it("summarises repositories and the review configuration", async () => {

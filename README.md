@@ -736,7 +736,7 @@ so scripts written before workspaces keep working. Routes under
 | GET    | `/api/config/global` | The workspace's global review config, and what it resolves to with each value's source |
 | PUT    | `/api/config/global` | Workspace admins: `{ settings }`, replaces the global review config; `{}` resets it |
 | POST   | `/api/config/rules/check` | `{ patterns }` (up to 50, 300 characters each): `{ errors }`, one per pattern in order, `null` when RE2 compiles it, otherwise the message a save would give |
-| GET    | `/api/settings/api-keys` | Every LLM provider, with whether the workspace stored a credential, its key's last four characters, its custom host and whether the server has a key of its own |
+| GET    | `/api/settings/api-keys` | Every LLM provider, with whether the workspace stored a credential, its key's last four characters, its custom host, whether the server has a key of its own and whether the privacy policy blocks the provider or host (`blocked`) |
 | PUT    | `/api/settings/api-keys/:provider` | Workspace admins: `{ apiKey?, baseUrl? }`, verifies the credential with the provider and stores the key encrypted |
 | DELETE | `/api/settings/api-keys/:provider` | Workspace admins: removes the stored credential |
 | GET    | `/api/settings/api-keys/:provider/status` | `{ status }`: `active`, `revoked` when the provider rejects the key, or `unreachable` |
