@@ -3,14 +3,10 @@ import { useDebounced } from "@/hooks/use-debounced"
 import { usePagination } from "@/hooks/use-pagination"
 import { nextSort, type Sort } from "@/hooks/use-sort"
 import { useUrlFilters } from "@/hooks/use-url-filters"
-import { ALL, selectedLabel } from "@/lib/filters"
+import { ALL, choices, only, selectedLabel } from "@/lib/filters"
 import type { FindingQuery } from "./api"
 import { CATEGORY_OPTIONS, KIND_OPTIONS, LIFECYCLE_OPTIONS, SEVERITY_OPTIONS, STATE_OPTIONS } from "./options"
 import type { FindingSortKey } from "./types"
-
-const only = <T extends string>(value: string) => (value === ALL ? undefined : (value as T))
-
-const choices = (options: { value: string }[]) => [ALL, ...options.map((option) => option.value)]
 
 const SORT_KEYS = ["title", "number", "repository", "state", "severity", "category", "kind", "author"] satisfies FindingSortKey[]
 

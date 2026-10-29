@@ -21,7 +21,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDebounced } from "@/hooks/use-debounced"
 import { usePagination } from "@/hooks/use-pagination"
 import { useUrlFilters } from "@/hooks/use-url-filters"
-import { ALL, selectedLabel } from "@/lib/filters"
+import { ALL, choices, only, selectedLabel } from "@/lib/filters"
 import { useRepos } from "@/features/forge/api"
 import { useReviews, type ReviewQuery } from "@/features/reviews/api"
 import { STATUS_OPTIONS, TRIGGER_OPTIONS, VERDICT_OPTIONS } from "@/features/reviews/options"
@@ -30,10 +30,6 @@ import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
 import { ReviewsTable } from "@/features/reviews/ReviewsTable"
 
 type View = "changes" | "runs"
-
-const only = <T extends string>(value: string) => (value === ALL ? undefined : (value as T))
-
-const choices = (options: { value: string }[]) => [ALL, ...options.map((option) => option.value)]
 
 const DEFAULTS = { view: "changes", status: ALL, verdict: ALL, trigger: ALL, repo: ALL, superseded: "", q: "" }
 

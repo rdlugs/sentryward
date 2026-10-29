@@ -23,7 +23,7 @@ export function ProfileForm({ user }: { user: User }) {
     resolver: zodResolver(profileSchema),
     defaultValues: { name: user.name, email: user.email },
   })
-  const leaving = useUnsavedChanges(form.formState.isDirty)
+  const leaving = useUnsavedChanges(form.formState.isDirty, ["tab"])
 
   async function onSubmit(values: ProfileInput) {
     try {

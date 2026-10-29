@@ -34,11 +34,14 @@ function triggerFromFile(review: ReviewDetail) {
 // page that fixes the cause when the server recognised it.
 export function ReviewProblemActions(props: { review: ReviewDetail; onRerun: () => void; rerunning: boolean }) {
   const { review } = props
-  // A repository with reviews turned off refuses a re-run until it is back on.
+  // A repository with reviews turned off (by hand or after losing access)
+  // refuses a re-run until it is back on, whatever error this run stored.
   const canRerun =
     (review.status === "failed" || review.status === "cancelled" || review.status === "skipped") &&
-    review.errorKind !== "repo_disabled"
-  const fix = review.errorKind && fixFor(review.errorKind, review)
+    review.repository.enabled
+  // Once the repository is back on, there is nothing left to turn on.
+  const stale = review.errorKind === "repo_disabled" && review.repository.enabled
+  const fix = review.errorKind && !stale && fixFor(review.errorKind, review)
   if (!canRerun && !fix) return null
   return (
     <div className="flex flex-col gap-2 pt-1">

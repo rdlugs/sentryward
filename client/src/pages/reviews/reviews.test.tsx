@@ -297,6 +297,24 @@ describe("Reviews page rows, filters and stats", () => {
     expect(screen.getByText("Status:")).toBeInTheDocument()
   })
 
+  it("keeps the filtered list to go back to after a re-run from the review", async () => {
+    const failed = { ...detail, status: "failed", verdict: "error", result: null, error: "Model call timed out" }
+    mockApi({
+      "GET /api/reviews?status=failed&view=changes&page=1&limit=10": firstPage([listItem]),
+      [`GET /api/reviews/${listItem.id}`]: { review: failed },
+      [`POST /api/reviews/${listItem.id}/rerun`]: () =>
+        jsonResponse(202, { review: { ...listItem, id: "new", status: "queued" } }),
+      "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null } },
+    })
+    renderWithProviders(<App />, { route: "/reviews?status=failed" })
+
+    await userEvent.click(await screen.findByRole("link", { name: "Add b and c" }))
+    await userEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Re-run" }))
+
+    expect(await screen.findByText("Waiting for a worker...")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "Back to reviews" })).toHaveAttribute("href", "/reviews?status=failed")
+  })
+
   it("expands a change to show its earlier runs", async () => {
     const earlier = { ...listItem, id: "earlier", headSha: "0123456789", status: "superseded", verdict: null }
     mockApi({
@@ -926,6 +944,7 @@ describe("Review detail page", () => {
           result: null,
           error: "Reviews were turned off for this repository",
           errorKind: "repo_disabled",
+          repository: { ...detail.repository, enabled: false },
         },
       },
     })
@@ -934,6 +953,47 @@ describe("Review detail page", () => {
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByRole("link", { name: "Turn reviews back on" })).toHaveAttribute("href", "/repositories")
     expect(within(alert).queryByRole("button", { name: "Re-run" })).not.toBeInTheDocument()
+  })
+
+  it("offers no re-run after losing access, which turns the repository off", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          status: "skipped",
+          verdict: null,
+          result: null,
+          error: "Sentryward lost access to this repository",
+          errorKind: "forge_access",
+          repository: { ...detail.repository, enabled: false },
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const alert = await screen.findByRole("alert")
+    expect(within(alert).getByRole("link", { name: "Check the installation" })).toBeInTheDocument()
+    expect(within(alert).queryByRole("button", { name: "Re-run" })).not.toBeInTheDocument()
+  })
+
+  it("offers a re-run once the repository's reviews are back on", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          status: "skipped",
+          verdict: null,
+          result: null,
+          error: "Reviews were turned off for this repository",
+          errorKind: "repo_disabled",
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const alert = await screen.findByRole("alert")
+    expect(within(alert).getByRole("button", { name: "Re-run" })).toBeInTheDocument()
+    expect(within(alert).queryByRole("link", { name: "Turn reviews back on" })).not.toBeInTheDocument()
   })
 
   it("links back to every review when one is not found", async () => {

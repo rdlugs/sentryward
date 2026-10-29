@@ -270,6 +270,9 @@ async function loadOwnedReview(workspaceId: string, id: string) {
     where: { id, ...ownedBy(workspaceId) },
     select: {
       ...listFields,
+      // Whether a re-run would be accepted (see queueManual) follows the
+      // repository's current state, not the stored error.
+      repository: { select: { ...listFields.repository.select, enabled: true } },
       baseSha: true,
       attempts: true,
       result: true,

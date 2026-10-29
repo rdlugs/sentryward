@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -26,8 +26,6 @@ export function GlobalConfigForm(props: {
   global: GlobalConfig
   tab: ConfigTab
   onTabChange: (tab: ConfigTab) => void
-  // Lets the page ask before a scope switch drops the edits.
-  onDirtyChange?: (dirty: boolean) => void
 }) {
   const { global } = props
   const save = useSaveGlobalConfig()
@@ -38,9 +36,7 @@ export function GlobalConfigForm(props: {
   const inherited = schema.data && baseConfig(schema.data, form.profile === INHERIT ? undefined : form.profile)
   const finish = (settings: ConfigOverride) => (schema.data ? withoutDefaults(settings, schema.data) : settings)
   const dirty = isDirty(global.settings, form, finish)
-  const leaving = useUnsavedChanges(dirty)
-  const { onDirtyChange } = props
-  useEffect(() => onDirtyChange?.(dirty), [onDirtyChange, dirty])
+  const leaving = useUnsavedChanges(dirty, ["repo"])
   const patternErrors = useRulePatternErrors(form.rules.map((rule) => rule.pattern)).data
   const errors = validateForm(
     form,

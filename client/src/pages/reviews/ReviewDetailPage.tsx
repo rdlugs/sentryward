@@ -65,6 +65,7 @@ function ResultView({ result }: { result: ReviewResult }) {
 export function ReviewDetailPage() {
   const { id = "" } = useParams()
   const navigate = useNavigate()
+  const from: unknown = useLocation().state?.from
   const { data, isPending, isError } = useReview(id)
   const rerun = useRerunReview()
   const cancel = useCancelReview()
@@ -108,7 +109,8 @@ export function ReviewDetailPage() {
   async function runAgain() {
     try {
       const { review: next } = await rerun.mutateAsync(review.id)
-      navigate(`/reviews/${next.id}`)
+      // Carries the list it was opened from, so Back to reviews still returns there.
+      navigate(`/reviews/${next.id}`, { state: { from } })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not start a new review")
     }

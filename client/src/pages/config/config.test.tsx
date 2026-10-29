@@ -822,6 +822,24 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     expect(await screen.findByRole("switch", { name: "Follow global config for team/web" })).toBeInTheDocument()
   })
 
+  it("asks before a link on the same page drops the repository scope", async () => {
+    mockApi(
+      globalRoutes({
+        "GET /api/repos": { repos: [repo("r1", "team/web", { followGlobal: false })] },
+        "GET /api/repos/r1/config": { ref: "main", repoFile: null, warnings: [], config: effective, sources: {} },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?repo=r1&tab=files" })
+
+    await userEvent.type(await screen.findByLabelText("Max chunks"), "20")
+    await userEvent.click(screen.getByRole("link", { name: "Review settings" }))
+
+    const dialog = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+    await userEvent.click(within(dialog).getByRole("button", { name: "Keep editing" }))
+    expect(screen.getByRole("switch", { name: "Follow global config for team/web" })).toBeInTheDocument()
+    expect(screen.getByLabelText("Max chunks")).toHaveDisplayValue("20")
+  })
+
   it("searches the scope list once there are many repositories", async () => {
     const names = ["api", "cli", "docs", "infra", "mobile", "web", "worker"]
     mockApi(

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Info, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -44,8 +44,6 @@ export function RepoConfigForm(props: {
   repo: ForgeRepo
   tab: ConfigTab
   onTabChange: (tab: ConfigTab) => void
-  // Lets the page ask before a scope switch drops the edits.
-  onDirtyChange?: (dirty: boolean) => void
 }) {
   const { repo } = props
   const resolved = useRepoConfig(repo.id)
@@ -59,9 +57,7 @@ export function RepoConfigForm(props: {
   // Edits are locked while the repository follows the global config, so
   // there is nothing to lose then.
   const dirty = isDirty(repo.settings, form) && !repo.followGlobal
-  const leaving = useUnsavedChanges(dirty)
-  const { onDirtyChange } = props
-  useEffect(() => onDirtyChange?.(dirty), [onDirtyChange, dirty])
+  const leaving = useUnsavedChanges(dirty, ["repo"])
   const patternErrors = useRulePatternErrors(form.rules.map((rule) => rule.pattern)).data
   const errors = validateForm(
     form,

@@ -225,6 +225,8 @@ export interface ReviewDetail extends ReviewListItem {
   // The config the run used, with the layer each field came from. Cleared by
   // retention like the result.
   resolvedConfig: { sources?: Record<string, string>; repoFile?: string | null } | null
+  // `enabled` is the repository's current state: a re-run is refused while it is off.
+  repository: ReviewListItem["repository"] & { enabled: boolean }
 }
 
 export type ReviewErrorKind =

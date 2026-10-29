@@ -5,7 +5,7 @@ import { UnreadableTokenError } from "../src/services/providers/token.ts";
 import { PolicyViolation } from "../src/services/privacyPolicy.ts";
 import { errorKind } from "../src/services/reviewErrors.ts";
 import { resolveLlm, type LlmCredentials } from "../src/worker/llmEndpoint.ts";
-import { ACCESS_LOST_REASON, DISABLED_REASON } from "../src/worker/queue.ts";
+import { ACCESS_LOST_REASON, DISABLED_REASON, NO_REPOSITORY_REASON } from "../src/worker/queue.ts";
 import { skipReason } from "../src/worker/runJob.ts";
 
 const noCredentials: LlmCredentials = { keys: {}, baseUrls: {}, connections: {} };
@@ -55,7 +55,7 @@ describe("errorKind", () => {
     expect(errorKind("failed", CREDENTIALS_REJECTED_REASON)).toBe("forge_credentials");
     expect(errorKind("failed", new UnreadableTokenError("gitlab").message)).toBe("forge_credentials");
     expect(errorKind("skipped", ACCESS_LOST_REASON)).toBe("forge_access");
-    expect(errorKind("failed", "The repository is no longer connected")).toBe("forge_access");
+    expect(errorKind("failed", NO_REPOSITORY_REASON)).toBe("forge_access");
     expect(errorKind("skipped", DISABLED_REASON)).toBe("repo_disabled");
     expect(errorKind("cancelled", DISABLED_REASON)).toBe("repo_disabled");
   });
@@ -78,5 +78,16 @@ describe("errorKind", () => {
   it("finds a known error among several stored on one line each", () => {
     const blocked = new PolicyViolation("instance", "local_only", "openai/gpt-5", "api.openai.com");
     expect(errorKind("failed", `Chunk 2 failed: timeout\n${blocked.message}`)).toBe("privacy");
+  });
+
+  it("looks inside errors recorded as failed review passes", () => {
+    const blocked = new PolicyViolation("workspace", "provider", "openai/gpt-5", "api.openai.com", ["anthropic"]);
+    const missingKey = llmError(withLlm({ baseUrl: "http://llm.internal", endpointKey: "openai" }));
+    // The pipeline's wording for a failed pass (review/pipeline.ts).
+    const pass = (n: number, message: string) => `Review pass ${n} failed: ${message}`;
+
+    expect(errorKind("partial", pass(1, blocked.message))).toBe("privacy");
+    expect(errorKind("failed", `${pass(1, "timeout")}\n${pass(2, missingKey)}`)).toBe("llm_connection");
+    expect(errorKind("failed", pass(1, llmError(withLlm({}))))).toBe("llm_config");
   });
 });
