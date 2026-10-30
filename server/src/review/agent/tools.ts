@@ -2,7 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { estimateTokens } from "../context/budget.ts";
 import { MAX_CONTEXT_FILE_CHARS, fileLines, mergeRanges, renderContext, type LineRange } from "../context/fileContext.ts";
-import type { ContextSource } from "../context/gather.ts";
+import type { ContextSource, DirListing } from "../context/gather.ts";
 
 // The tools an agentic pass may call to read more of the repository than its
 // gathered context shows.
@@ -145,25 +145,38 @@ export function agentTools(input: AgentToolsInput) {
       list_dir: tool({
         description:
           `List a directory at the change's head revision, e.g. to find a file's tests or siblings. ` +
-          `Directories end in "/"; at most ${MAX_DIR_ENTRIES} entries; path is relative to the repository root ("" for the root).`,
+          `Directories end in "/" and symlinks in "@"; at most ${MAX_DIR_ENTRIES} entries; ` +
+          `path is relative to the repository root ("" for the root).`,
         inputSchema: z.object({ path: z.string() }),
         execute: async ({ path: requested }) => {
           if (used >= input.maxToolTokens) return BUDGET_SPENT;
-          const root = ["", ".", "./", "/"].includes(requested.trim());
-          const path = root ? "" : safePath(requested.replace(/\/+$/, ""));
+          // Trimmed before the trailing slashes go, or "src/ " would keep one.
+          // "/" is refused like any absolute path, as read_file does.
+          const trimmed = requested.trim();
+          const root = ["", ".", "./"].includes(trimmed);
+          const path = root ? "" : safePath(trimmed.replace(/\/+$/, ""));
           if (path === undefined) return "Refused: use a path relative to the repository root, without '..'.";
           const shown = path || "the repository root";
-          let entries: string[] | null;
+          let listing: DirListing | null;
           try {
-            entries = await listDir(path);
+            listing = await listDir(path);
           } catch (err) {
             return `Could not list ${shown}: ${err instanceof Error ? err.message : String(err)}`;
           }
-          if (entries === null) return `${shown} is not a directory at the head revision.`;
+          if (listing === null) return `${shown} is not a directory at the head revision.`;
           // Directories first, so a capped listing still shows where to look next.
-          const sorted = [...entries].sort((a, b) => Number(!a.endsWith("/")) - Number(!b.endsWith("/")) || a.localeCompare(b));
+          const sorted = [...listing.entries].sort(
+            (a, b) => Number(!a.endsWith("/")) - Number(!b.endsWith("/")) || a.localeCompare(b),
+          );
           const listed = sorted.slice(0, MAX_DIR_ENTRIES);
-          const more = sorted.length > listed.length ? `\n(${sorted.length - listed.length} more not shown)` : "";
+          const hidden = sorted.length - listed.length;
+          // The forge returned only part of the directory, so a missing name
+          // proves nothing; say so rather than give a count that is too low.
+          const more = listing.truncated
+            ? `\n(more than ${hidden} not shown; this listing is incomplete, so use read_file to check whether a specific file exists)`
+            : hidden > 0
+              ? `\n(${hidden} more not shown)`
+              : "";
           return spend(untrusted(`Entries of ${path ? `${path}/` : "the repository root"}:\n${listed.join("\n") || "(empty)"}${more}`));
         },
       }),

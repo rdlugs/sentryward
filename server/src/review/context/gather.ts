@@ -30,10 +30,18 @@ export interface ContextSource {
   // Paths of files mentioning `term`, best match first. May search another
   // revision than the head: GitHub only indexes the default branch.
   searchCode(term: string): Promise<string[]>;
-  // Entries of a directory at the head revision ("" is the root), directories
-  // ending in "/", or null when the path is missing or not a directory. Only
-  // agentic passes list directories, so a source may leave it out.
-  listDir?(path: string): Promise<string[] | null>;
+  // Entries of a directory at the head revision ("" is the root), or null when
+  // the path is missing or not a directory. Only agentic passes list
+  // directories, so a source may leave it out.
+  listDir?(path: string): Promise<DirListing | null>;
+}
+
+// Directories end in "/" and symlinks in "@" (their target's type is unknown
+// without another request). A forge caps how many entries one request
+// returns, so `truncated` says the entries are not the whole directory.
+export interface DirListing {
+  entries: string[];
+  truncated: boolean;
 }
 
 export interface GatherInput {

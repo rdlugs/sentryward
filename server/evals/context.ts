@@ -31,7 +31,11 @@ export function caseContext(caseDir: string): ContextSource | undefined {
       const absolute = resolve(root, path);
       if ((absolute !== root && !absolute.startsWith(root + sep)) || !existsSync(absolute)) return null;
       if (!statSync(absolute).isDirectory()) return null;
-      return readdirSync(absolute, { withFileTypes: true }).map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name));
+      // The same entries walk() indexes for searchCode, so the two agree.
+      const entries = readdirSync(absolute, { withFileTypes: true }).flatMap((entry) =>
+        entry.isDirectory() ? [`${entry.name}/`] : entry.isFile() ? [entry.name] : [],
+      );
+      return { entries, truncated: false };
     },
   };
 }

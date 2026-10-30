@@ -1,3 +1,4 @@
+import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
 import type { ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
@@ -91,6 +92,8 @@ interface GlComparison {
 interface GlTreeEntry {
   name: string;
   type: "tree" | "blob" | "commit";
+  // Git's file mode; a symlink is a blob with mode 120000.
+  mode: string;
 }
 
 interface GlPipeline {
@@ -328,20 +331,27 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     }
   }
 
-  // One page is enough: a pass is shown far fewer entries than that. GitLab
-  // answers a file's path with an empty list rather than a 404, and git keeps
-  // no empty directories, so an empty list means "not a directory".
-  async listDirAtRef(project: string, path: string, ref: string): Promise<string[] | null> {
+  // One page is enough: a pass is shown far fewer entries than that, and a
+  // next page only marks the listing truncated. GitLab answers a file's path
+  // with an empty list rather than a 404, and git keeps no empty directories,
+  // so an empty list means "not a directory".
+  async listDirAtRef(project: string, path: string, ref: string): Promise<DirListing | null> {
     const query = `${path ? `path=${encodeURIComponent(path)}&` : ""}ref=${encodeURIComponent(ref)}&per_page=100`;
-    let entries: GlTreeEntry[];
+    let res: Response;
     try {
-      entries = await this.http.json<GlTreeEntry[]>(`${this.project(project)}/repository/tree?${query}`);
+      res = await this.http.request(`${this.project(project)}/repository/tree?${query}`);
     } catch (err) {
       if (isNotFound(err)) return null;
       throw err;
     }
+    const entries = (await res.json()) as GlTreeEntry[];
     if (entries.length === 0) return null;
-    return entries.map((entry) => (entry.type === "tree" ? `${entry.name}/` : entry.name));
+    return {
+      entries: entries.map((entry) =>
+        entry.type === "tree" ? `${entry.name}/` : entry.mode === "120000" ? `${entry.name}@` : entry.name,
+      ),
+      truncated: !!res.headers.get("x-next-page"),
+    };
   }
 
   // GitLab already knows which issues an MR closes, from the same keywords.

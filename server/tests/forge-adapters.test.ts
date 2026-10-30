@@ -95,9 +95,24 @@ describe("GitHubAdapter", () => {
       },
       { url: /\/repos\/acme\/web\/contents\?ref=head1$/, body: [{ name: "README.md", type: "file" }] },
     ]);
-    expect(await gh.listDirAtRef("acme/web", "src/a b", "head1")).toEqual(["users/", "users.test.ts"]);
-    expect(await gh.listDirAtRef("acme/web", "", "head1")).toEqual(["README.md"]);
+    expect(await gh.listDirAtRef("acme/web", "src/a b", "head1")).toEqual({
+      entries: ["users/", "users.test.ts"],
+      truncated: false,
+    });
+    expect(await gh.listDirAtRef("acme/web", "", "head1")).toEqual({ entries: ["README.md"], truncated: false });
     expect(calls).toHaveLength(2);
+  });
+
+  it("marks symlinks, and a directory at the contents endpoint's cap as truncated", async () => {
+    const full = Array.from({ length: 1000 }, (_, i) => ({ name: `f${i}.json`, type: "file" }));
+    const { adapter: gh } = adapter([
+      { url: /\/contents\/pkgs\?ref=head1$/, body: [{ name: "shared", type: "symlink" }] },
+      { url: /\/contents\/fixtures\?ref=head1$/, body: full },
+    ]);
+    expect(await gh.listDirAtRef("acme/web", "pkgs", "head1")).toEqual({ entries: ["shared@"], truncated: false });
+    const listing = await gh.listDirAtRef("acme/web", "fixtures", "head1");
+    expect(listing?.entries).toHaveLength(1000);
+    expect(listing?.truncated).toBe(true);
   });
 
   it("returns null when listing a file or a missing directory", async () => {
@@ -671,15 +686,31 @@ describe("GitLabAdapter", () => {
       {
         url: /\/repository\/tree\?path=src%2Fusers&ref=h1&per_page=100$/,
         body: [
-          { name: "models", type: "tree" },
-          { name: "index.ts", type: "blob" },
+          { name: "models", type: "tree", mode: "040000" },
+          { name: "index.ts", type: "blob", mode: "100644" },
+          { name: "shared", type: "blob", mode: "120000" },
         ],
       },
-      { url: /\/repository\/tree\?ref=h1&per_page=100$/, body: [{ name: "src", type: "tree" }] },
+      { url: /\/repository\/tree\?ref=h1&per_page=100$/, body: [{ name: "src", type: "tree", mode: "040000" }] },
     ]);
-    expect(await gl.listDirAtRef("team/app", "src/users", "h1")).toEqual(["models/", "index.ts"]);
-    expect(await gl.listDirAtRef("team/app", "", "h1")).toEqual(["src/"]);
+    expect(await gl.listDirAtRef("team/app", "src/users", "h1")).toEqual({
+      entries: ["models/", "index.ts", "shared@"],
+      truncated: false,
+    });
+    expect(await gl.listDirAtRef("team/app", "", "h1")).toEqual({ entries: ["src/"], truncated: false });
     expect(calls).toHaveLength(2);
+  });
+
+  it("fetches one page of a directory and marks it truncated when there are more", async () => {
+    const { adapter: gl, calls } = adapter([
+      {
+        url: /\/repository\/tree\?path=tests&ref=h1&per_page=100$/,
+        headers: { "x-next-page": "2" },
+        body: [{ name: "a.test.ts", type: "blob", mode: "100644" }],
+      },
+    ]);
+    expect(await gl.listDirAtRef("team/app", "tests", "h1")).toEqual({ entries: ["a.test.ts"], truncated: true });
+    expect(calls).toHaveLength(1);
   });
 
   it("returns null when listing a file or a missing directory", async () => {

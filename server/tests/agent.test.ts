@@ -85,7 +85,7 @@ describe("agent tools", () => {
       ...source().context,
       listDir: async (path) => {
         listed.push(path);
-        return dirs[path] ?? null;
+        return dirs[path] ? { entries: dirs[path], truncated: false } : null;
       },
     };
     const { tools } = agentTools({ source: context, searches: searchBudget(5), maxToolTokens: 30_000 });
@@ -95,22 +95,36 @@ describe("agent tools", () => {
       "<untrusted>\nEntries of src/:\nusers/\nhelper.test.ts\nhelper.ts\n</untrusted>",
     );
     expect(await run(tools.list_dir, { path: "" })).toContain("Entries of the repository root:\nsrc/\nREADME.md");
+    expect(await run(tools.list_dir, { path: "src/ " })).toContain("Entries of src/:");
     const big = await run(tools.list_dir, { path: "big" });
     expect(big).toContain(`f${MAX_DIR_ENTRIES - 1}.ts`);
     expect(big).not.toContain(`f${MAX_DIR_ENTRIES}.ts`);
     expect(big).toContain("(5 more not shown)");
 
-    for (const path of ["../x", "/etc", "src/../../x", "~"]) {
+    for (const path of ["../x", "/etc", "/", "src/../../x", "~"]) {
       expect(await run(tools.list_dir, { path })).toMatch(/^Refused/);
     }
     expect(await run(tools.list_dir, { path: "missing" })).toBe("missing is not a directory at the head revision.");
-    expect(listed).toEqual(["src", "", "big", "missing"]);
+    expect(listed).toEqual(["src", "", "src", "big", "missing"]);
+  });
+
+  it("says a truncated listing is incomplete instead of counting what is missing", async () => {
+    const entries = Array.from({ length: 100 }, (_, i) => `f${String(i).padStart(3, "0")}.ts`);
+    const context: ContextSource = { ...source().context, listDir: async () => ({ entries, truncated: true }) };
+    const { tools } = agentTools({ source: context, searches: searchBudget(5), maxToolTokens: 30_000 });
+
+    const text = await run(tools.list_dir, { path: "tests" });
+    expect(text).toContain(`(more than ${100 - MAX_DIR_ENTRIES} not shown; this listing is incomplete`);
+    expect(text).not.toMatch(/\(\d+ more not shown\)/);
   });
 
   it("counts listings against the pass's budget", async () => {
     const context: ContextSource = {
       ...source().context,
-      listDir: async () => Array.from({ length: MAX_DIR_ENTRIES }, (_, i) => `a-rather-long-file-name-${i}.ts`),
+      listDir: async () => ({
+        entries: Array.from({ length: MAX_DIR_ENTRIES }, (_, i) => `a-rather-long-file-name-${i}.ts`),
+        truncated: false,
+      }),
     };
     const { tools } = agentTools({ source: context, searches: searchBudget(5), maxToolTokens: 600 });
 
