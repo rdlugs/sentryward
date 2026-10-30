@@ -10,6 +10,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Phone layout for the Reviews and Findings lists (#165). Below 640px wide
+  (phones, or high browser zoom) each review and finding is a stacked card
+  instead of a table row, so the lists reflow at 320px without scrolling
+  sideways. Cards keep every column's value, the row menu and click-anywhere
+  to open; a review's earlier runs expand inside its card, and a finding's
+  change title is written out rather than left in a tooltip. Findings get a
+  "Sort by" picker and a direction toggle in place of the sortable headers.
+  Long active-filter chips truncate instead of widening the page, and the
+  pagination's "Rows per page" label reads "Rows" on phones so its controls
+  wrap.
 - Command palette and a global "Review a PR" action (#161). `Ctrl+K` (`Cmd+K`
   on macOS, where plain `Ctrl+K` stays the text fields' "delete to end of
   line") opens and closes a palette from any dashboard page, also from the top

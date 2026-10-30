@@ -26,15 +26,16 @@ export interface ActiveFilter {
 // link from another page.
 export function ActiveFilterChips({ filters }: { filters: ActiveFilter[] }) {
   return filters.map((filter) => (
-    <Badge key={filter.label} variant="secondary" className="h-7 gap-1 pr-1 pl-2.5">
-      <span>
+    // max-w-full and truncate: a long repository path must not widen the page on a phone.
+    <Badge key={filter.label} variant="secondary" className="h-7 max-w-full gap-1 pr-1 pl-2.5">
+      <span className="truncate" title={`${filter.label}: ${filter.value}`}>
         {filter.label}: <span className="font-normal">{filter.value}</span>
       </span>
       <button
         type="button"
         onClick={filter.onRemove}
         aria-label={`Remove ${filter.label} filter`}
-        className="rounded-full p-0.5 hover:bg-foreground/10"
+        className="shrink-0 rounded-full p-0.5 hover:bg-foreground/10"
       >
         <X className="size-3" />
       </button>

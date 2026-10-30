@@ -6,6 +6,7 @@ import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 import { mockApi } from "@/test/apiRoutes"
 import type { FindingCalibration, FindingDetail, FindingRow, FindingStats } from "@/features/findings/types"
 import { detail as reviewDetail } from "@/test/fixtures"
+import { setViewportWidth } from "@/test/viewport"
 
 const finding: FindingRow = {
   id: "f-1",
@@ -599,6 +600,71 @@ describe("Findings sorting", () => {
     expect(screen.getByRole("columnheader", { name: "Severity" })).toHaveAttribute("aria-sort", "descending")
     await userEvent.click(header())
     await waitFor(() => expect(screen.getByRole("columnheader", { name: "Severity" })).not.toHaveAttribute("aria-sort"))
+  })
+})
+
+describe("Findings on a phone", () => {
+  it("stacks each finding as a card with every column's value", async () => {
+    setViewportWidth(320)
+    mockApi({ "GET /api/findings?page=1&limit=10": page([finding]) })
+    renderWithProviders(<App />, { route: "/findings" })
+
+    const list = await screen.findByRole("list", { name: "Findings" })
+    expect(screen.queryByRole("table")).not.toBeInTheDocument()
+    const card = within(list).getByRole("listitem")
+    expect(within(card).getByRole("button", { name: "SQL built from input" })).toBeInTheDocument()
+    expect(within(card).getByText("src/app.ts:3")).toBeInTheDocument()
+    expect(within(card).getByText("web")).toHaveAttribute("title", "acme/web")
+    // No tooltip on touch, so the change title is written out.
+    expect(within(card).getByText(/#42 · Add b and c/)).toBeInTheDocument()
+    expect(within(card).getByText("Open")).toBeInTheDocument()
+    expect(within(card).getByText("critical")).toBeInTheDocument()
+    expect(within(card).getByText("Security · Potential issue · alice")).toBeInTheDocument()
+    expect(within(card).getByRole("button", { name: "Actions for SQL built from input" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument()
+  })
+
+  it("opens the finding from anywhere on its card", async () => {
+    setViewportWidth(320)
+    mockApi({
+      "GET /api/findings?page=1&limit=10": page([finding]),
+      "GET /api/findings/f-1": findingDetail,
+    })
+    renderWithProviders(<App />, { route: "/findings" })
+
+    const card = within(await screen.findByRole("list", { name: "Findings" })).getByRole("listitem")
+    await userEvent.click(within(card).getByText("src/app.ts:3"))
+
+    expect(await screen.findByRole("dialog", { name: "SQL built from input" })).toBeInTheDocument()
+  })
+
+  it("sorts with a picker and a direction toggle in place of the headers", async () => {
+    setViewportWidth(320)
+    const requested: string[] = []
+    const answer = (url: string) => () => {
+      requested.push(url)
+      return jsonResponse(200, page([finding]))
+    }
+    const base = "GET /api/findings?"
+    mockApi({
+      [`${base}page=1&limit=10`]: answer("default"),
+      [`${base}sort=severity&dir=asc&page=1&limit=10`]: answer("asc"),
+      [`${base}sort=severity&dir=desc&page=1&limit=10`]: answer("desc"),
+    })
+    renderWithProviders(<App />, { route: "/findings" })
+
+    await screen.findByRole("list", { name: "Findings" })
+    await userEvent.click(screen.getByRole("combobox", { name: "Sort by" }))
+    await userEvent.click(await screen.findByRole("option", { name: "Severity" }))
+    await waitFor(() => expect(requested).toContain("asc"))
+
+    await userEvent.click(screen.getByRole("button", { name: "Sorted ascending, sort descending" }))
+    await waitFor(() => expect(requested).toContain("desc"))
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Sort by" }))
+    await userEvent.click(await screen.findByRole("option", { name: "Most recently seen" }))
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Sort by" })).toHaveTextContent("Most recently seen"))
+    expect(screen.queryByRole("button", { name: /^Sorted/ })).not.toBeInTheDocument()
   })
 })
 

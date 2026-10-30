@@ -2,10 +2,10 @@ import type { MouseEvent } from "react"
 
 const CONTROLS = "a, button, input, select, textarea, label, [role=button], [role=menuitem]"
 
-// Lets a click anywhere on a table row open it, while the row's own link or
-// button stays the target for keyboard, middle-click and open-in-new-tab.
+// Lets a click anywhere on a table row or list card open it, while its own
+// link or button stays the target for keyboard, middle-click and open-in-new-tab.
 export function rowClick(open: () => void) {
-  return (event: MouseEvent<HTMLTableRowElement>) => {
+  return (event: MouseEvent<HTMLElement>) => {
     const target = event.target as Element
     // React bubbles events through portals, so clicks in a row's menu or
     // dialogs reach the row even though they are not inside it in the DOM.
