@@ -6,6 +6,7 @@ import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 import { mockApi } from "@/test/apiRoutes"
 import { detail, listItem } from "@/test/fixtures"
+import { setViewportWidth } from "@/test/viewport"
 
 describe("Reviews page", () => {
   it("lists reviews with their status, verdict and finding counts", async () => {
@@ -445,6 +446,67 @@ describe("Reviews page rows, filters and stats", () => {
       "href",
       "/usage?period=7d",
     )
+  })
+})
+
+describe("Reviews page on a phone", () => {
+  const firstPage = (reviews: unknown[], total = reviews.length) => ({ reviews, total, page: 1, limit: 10 })
+
+  it("stacks each review as a card instead of a table", async () => {
+    setViewportWidth(320)
+    mockApi({ "GET /api/reviews?view=changes&page=1&limit=10": firstPage([listItem]) })
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    const list = await screen.findByRole("list", { name: "Reviews" })
+    expect(screen.queryByRole("table")).not.toBeInTheDocument()
+    const card = within(list).getByRole("listitem")
+    expect(within(card).getByRole("link", { name: "Add b and c" })).toBeInTheDocument()
+    expect(within(card).getByText(/acme\/web/)).toBeInTheDocument()
+    expect(within(card).getByText("abcdef1")).toBeInTheDocument()
+    expect(within(card).getByText("Completed")).toBeInTheDocument()
+    expect(within(card).getByText("Blocked")).toBeInTheDocument()
+    expect(within(card).getByText("critical")).toBeInTheDocument()
+    expect(within(card).getByRole("button", { name: "Actions for Add b and c" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Next page" })).toBeInTheDocument()
+  })
+
+  it("opens the review from anywhere on its card", async () => {
+    setViewportWidth(320)
+    mockApi({
+      "GET /api/reviews?view=changes&page=1&limit=10": firstPage([listItem]),
+      [`GET /api/reviews/${listItem.id}`]: { review: detail },
+    })
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    const card = within(await screen.findByRole("list", { name: "Reviews" })).getByRole("listitem")
+    await userEvent.click(within(card).getByText("Blocked"))
+
+    expect(await screen.findByRole("link", { name: "Back to reviews" })).toBeInTheDocument()
+  })
+
+  it("expands a card to show the change's earlier runs", async () => {
+    setViewportWidth(320)
+    const earlier = { ...listItem, id: "earlier", headSha: "0123456789", status: "superseded", verdict: null }
+    mockApi({
+      "GET /api/reviews?view=changes&page=1&limit=10": firstPage([{ ...listItem, runCount: 2 }]),
+      "GET /api/reviews?repoId=r1&number=42&view=runs&includeSuperseded=true&limit=20": firstPage([listItem, earlier]),
+    })
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "2 runs" }))
+
+    const history = await screen.findByRole("list", { name: "Earlier runs of Add b and c" })
+    expect(screen.queryByRole("link", { name: "Back to reviews" })).not.toBeInTheDocument()
+    expect(within(history).getByText("0123456")).toBeInTheDocument()
+  })
+
+  it("says so when nothing matches", async () => {
+    setViewportWidth(320)
+    mockApi({ "GET /api/reviews?status=failed&view=changes&page=1&limit=10": firstPage([]) })
+    renderWithProviders(<App />, { route: "/reviews?status=failed" })
+
+    expect(await screen.findByText("No reviews match your filters.")).toBeInTheDocument()
+    expect(screen.queryByRole("table")).not.toBeInTheDocument()
   })
 })
 

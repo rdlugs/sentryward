@@ -1,24 +1,42 @@
 import * as React from "react"
 
 const MOBILE_BREAKPOINT = 768
-const query = `(max-width: ${MOBILE_BREAKPOINT - 1}px)`
+// Tailwind's `sm`: below it the main lists render as cards instead of tables.
+const SM_BREAKPOINT = 640
 
-// Module-level so useSyncExternalStore sees a stable subscribe and doesn't
+// Cached per query so useSyncExternalStore sees a stable subscribe and doesn't
 // resubscribe on every render.
-function subscribe(onChange: () => void) {
-  const mql = window.matchMedia(query)
-  mql.addEventListener("change", onChange)
-  return () => mql.removeEventListener("change", onChange)
-}
+const stores = new Map<string, { subscribe: (onChange: () => void) => () => void; getSnapshot: () => boolean }>()
 
-function getSnapshot() {
-  return window.matchMedia(query).matches
+function store(query: string) {
+  let entry = stores.get(query)
+  if (!entry) {
+    entry = {
+      subscribe(onChange) {
+        const mql = window.matchMedia(query)
+        mql.addEventListener("change", onChange)
+        return () => mql.removeEventListener("change", onChange)
+      },
+      getSnapshot: () => window.matchMedia(query).matches,
+    }
+    stores.set(query, entry)
+  }
+  return entry
 }
 
 function getServerSnapshot() {
   return false
 }
 
-export function useIsMobile() {
+export function useMediaQuery(query: string) {
+  const { subscribe, getSnapshot } = store(query)
   return React.useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+}
+
+export function useIsMobile() {
+  return useMediaQuery(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
+}
+
+export function useIsBelowSm() {
+  return useMediaQuery(`(max-width: ${SM_BREAKPOINT - 1}px)`)
 }

@@ -31,8 +31,13 @@ export function TablePagination({
       <p aria-live="polite">{total > 0 && `Showing ${first}-${last} of ${total}`}</p>
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-2">
+          {/* Reads "Rows" on phones so the controls wrap onto two lines at 320px;
+              the select keeps its full name for screen readers. */}
           <Label htmlFor={sizeId} className="font-normal text-muted-foreground">
-            Rows per page
+            {/* One flex item, so the label's gap does not split the words. */}
+            <span>
+              Rows <span className="sr-only sm:not-sr-only">per page</span>
+            </span>
           </Label>
           <Select value={String(size)} onValueChange={(value) => onSizeChange(Number(value))}>
             <SelectTrigger id={sizeId} size="sm" className="w-18">

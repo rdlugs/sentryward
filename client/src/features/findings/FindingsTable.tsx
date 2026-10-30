@@ -1,11 +1,14 @@
-import { useState, type ReactNode } from "react"
-import { EyeOff, MoreHorizontal, RotateCcw } from "lucide-react"
+import { useId, useState, type ReactNode } from "react"
+import { ArrowDown, ArrowUp, EyeOff, MoreHorizontal, RotateCcw } from "lucide-react"
 import { SortableHead } from "@/components/SortableHead"
 import { NoMatchesRow } from "@/components/TableFilters"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { useIsBelowSm } from "@/hooks/use-mobile"
 import type { Sort } from "@/hooks/use-sort"
 import { rowClick } from "@/lib/rowClick"
 import { SeverityBadge } from "@/features/reviews/badges"
@@ -65,10 +68,102 @@ const COLUMNS: { key: FindingSortKey; label: string }[] = [
   { key: "author", label: "PR/MR Author" },
 ]
 
+// Select needs a non-empty value for "no sort".
+const DEFAULT_ORDER = "default"
+
+// Stands in for the sortable headers on cards: a column picker and a
+// direction toggle, rather than the headers' three-step cycle.
+function SortControl({
+  sort,
+  onSortChange,
+}: {
+  sort: Sort<FindingSortKey>
+  onSortChange: (sort: Sort<FindingSortKey>) => void
+}) {
+  const id = useId()
+  const DirIcon = sort?.dir === "desc" ? ArrowDown : ArrowUp
+  return (
+    <div className="flex items-center gap-2 pb-2">
+      <Label htmlFor={id} className="shrink-0 font-normal text-muted-foreground">
+        Sort by
+      </Label>
+      <Select
+        value={sort?.key ?? DEFAULT_ORDER}
+        onValueChange={(value) =>
+          onSortChange(value === DEFAULT_ORDER ? null : { key: value as FindingSortKey, dir: sort?.dir ?? "asc" })
+        }
+      >
+        <SelectTrigger id={id} size="sm" className="min-w-0 flex-1">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent position="popper" align="start">
+          <SelectItem value={DEFAULT_ORDER}>Most recently seen</SelectItem>
+          {COLUMNS.map((column) => (
+            <SelectItem key={column.key} value={column.key}>
+              {column.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {sort && (
+        <Button
+          variant="outline"
+          size="icon-sm"
+          aria-label={sort.dir === "asc" ? "Sorted ascending, sort descending" : "Sorted descending, sort ascending"}
+          onClick={() => onSortChange({ key: sort.key, dir: sort.dir === "asc" ? "desc" : "asc" })}
+        >
+          <DirIcon />
+        </Button>
+      )}
+    </div>
+  )
+}
+
+// Below `sm` the columns become a stacked card per finding, so the list
+// reflows at 320px instead of scrolling sideways (WCAG 1.4.10).
+function FindingCard({ finding, onOpen }: { finding: FindingRow; onOpen: (finding: FindingRow) => void }) {
+  const meta = [
+    CATEGORY_LABEL[finding.category] ?? finding.category,
+    KIND_LABEL[finding.kind] ?? finding.kind,
+    finding.author,
+  ].filter(Boolean)
+  return (
+    <li onClick={rowClick(() => onOpen(finding))} className="flex cursor-pointer flex-col gap-2 border-b py-3 last:border-0">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <button
+            type="button"
+            onClick={() => onOpen(finding)}
+            className="text-left font-medium break-words hover:underline focus-visible:underline focus-visible:outline-none"
+          >
+            {finding.title}
+          </button>
+          <div className="font-mono text-xs break-all text-muted-foreground">
+            {finding.file}:{finding.startLine}
+          </div>
+        </div>
+        <FindingActions finding={finding} />
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StateBadge state={finding.state} />
+        <SeverityBadge severity={finding.severity} />
+      </div>
+      {/* No tooltip on touch, so the change title is spelled out. */}
+      <div className="text-xs break-words text-muted-foreground">
+        <span title={finding.repository.fullPath}>{repoName(finding.repository.fullPath)}</span>{" "}
+        {changeLabel(finding.repository.provider, finding.number)}
+        {finding.changeTitle && <> · {finding.changeTitle}</>}
+      </div>
+      <div className="text-xs text-muted-foreground">{meta.join(" · ")}</div>
+    </li>
+  )
+}
+
 export function FindingsTable({
   findings,
   sort,
   onSort,
+  onSortChange,
   onOpen,
   emptyMessage,
 }: {
@@ -76,10 +171,30 @@ export function FindingsTable({
   // Applied by the server, since the list is paged there.
   sort: Sort<FindingSortKey>
   onSort: (key: FindingSortKey) => void
+  // Sets the sort outright, for the card layout's sort control.
+  onSortChange: (sort: Sort<FindingSortKey>) => void
   onOpen: (finding: FindingRow) => void
   // Shown in place of rows; the headers stay so the table keeps its shape.
   emptyMessage: ReactNode
 }) {
+  const cards = useIsBelowSm()
+  if (cards) {
+    return (
+      <>
+        <SortControl sort={sort} onSortChange={onSortChange} />
+        {findings.length ? (
+          <ul aria-label="Findings">
+            {findings.map((finding) => (
+              <FindingCard key={finding.id} finding={finding} onOpen={onOpen} />
+            ))}
+          </ul>
+        ) : (
+          <p className="py-8 text-center text-muted-foreground">{emptyMessage}</p>
+        )}
+      </>
+    )
+  }
+
   return (
     <Table>
       <TableHeader>

@@ -119,6 +119,7 @@ export function FindingList({
               findings={data.findings}
               sort={filters.sort}
               onSort={filters.onSort}
+              onSortChange={filters.setSort}
               onOpen={onOpen}
               emptyMessage={filters.narrowed ? emptyMessage.noMatch : emptyMessage.none}
             />

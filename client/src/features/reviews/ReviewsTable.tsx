@@ -13,6 +13,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { PROVIDERS } from "@/features/forge/providers"
+import { useIsBelowSm } from "@/hooks/use-mobile"
 import { rowClick } from "@/lib/rowClick"
 import { formatDuration, timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
@@ -153,8 +154,8 @@ function ReviewActions({ review }: { review: ReviewListItem }) {
   )
 }
 
-// Earlier runs of one change, loaded when its row is expanded.
-function RunHistory({ review, colSpan, from }: { review: ReviewListItem; colSpan: number; from: string }) {
+// Earlier runs of one change, loaded when its row or card is expanded.
+function RunHistoryList({ review, from }: { review: ReviewListItem; from: string }) {
   const { data, isPending, isError } = useReviews({
     repoId: review.repository.id,
     number: review.number,
@@ -164,32 +165,131 @@ function RunHistory({ review, colSpan, from }: { review: ReviewListItem; colSpan
   })
   const runs = data?.reviews.filter((run) => run.id !== review.id) ?? []
 
+  if (isPending) return <Skeleton className="h-6 w-full" />
+  if (isError) return <p className="text-sm text-destructive">Could not load earlier runs.</p>
+  if (runs.length === 0) return <p className="text-sm text-muted-foreground">No earlier runs.</p>
+  return (
+    <ul className="flex flex-col gap-1.5" aria-label={`Earlier runs of ${changeTitle(review)}`}>
+      {runs.map((run) => (
+        <li key={run.id} className="flex flex-wrap items-center gap-2 text-sm">
+          <StatusBadge status={run.status} reason={run.error} />
+          <VerdictBadge verdict={run.verdict} />
+          <TriggerIcon trigger={run.trigger} />
+          <ReviewLink id={run.id} from={from} className="hover:underline">
+            <code>{run.headSha.slice(0, 7)}</code>
+          </ReviewLink>
+          <span className="text-muted-foreground">{timeAgo(run.createdAt)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function RunHistory({ review, colSpan, from }: { review: ReviewListItem; colSpan: number; from: string }) {
   return (
     <TableRow className="bg-muted/30 hover:bg-muted/30">
       <TableCell colSpan={colSpan} className="py-2 pl-10">
-        {isPending ? (
-          <Skeleton className="h-6 w-full" />
-        ) : isError ? (
-          <p className="text-sm text-destructive">Could not load earlier runs.</p>
-        ) : runs.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No earlier runs.</p>
-        ) : (
-          <ul className="flex flex-col gap-1.5" aria-label={`Earlier runs of ${changeTitle(review)}`}>
-            {runs.map((run) => (
-              <li key={run.id} className="flex flex-wrap items-center gap-2 text-sm">
-                <StatusBadge status={run.status} reason={run.error} />
-                <VerdictBadge verdict={run.verdict} />
-                <TriggerIcon trigger={run.trigger} />
-                <ReviewLink id={run.id} from={from} className="hover:underline">
-                  <code>{run.headSha.slice(0, 7)}</code>
-                </ReviewLink>
-                <span className="text-muted-foreground">{timeAgo(run.createdAt)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
+        <RunHistoryList review={review} from={from} />
       </TableCell>
     </TableRow>
+  )
+}
+
+function ForgeLink({ review }: { review: ReviewListItem }) {
+  const webUrl = review.summary?.webUrl
+  if (!webUrl) return null
+  return (
+    <a
+      href={webUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open on ${PROVIDERS[review.repository.provider].label}`}
+      className="shrink-0 text-muted-foreground hover:text-foreground"
+    >
+      <ExternalLink className="size-3.5" />
+    </a>
+  )
+}
+
+function RunsToggle({ runs, open, onToggle }: { runs: number; open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="mt-1 inline-flex items-center gap-0.5 text-xs text-muted-foreground hover:text-foreground"
+    >
+      <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+      {runs} runs
+    </button>
+  )
+}
+
+// Below `sm` the columns become a stacked card per review, so the list reflows
+// at 320px instead of scrolling sideways (WCAG 1.4.10).
+function ReviewCard({
+  review,
+  actions,
+  grouped,
+  open,
+  onToggle,
+  from,
+  now,
+}: {
+  review: ReviewListItem
+  actions: boolean
+  grouped: boolean
+  open: boolean
+  onToggle: () => void
+  from: string
+  now: number
+}) {
+  const navigate = useNavigate()
+  const runs = review.runCount ?? 1
+  return (
+    <li
+      onClick={rowClick(() => navigate(`/reviews/${review.id}`, { state: { from } }))}
+      className="flex cursor-pointer flex-col gap-2 border-b py-3 last:border-0"
+    >
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start gap-1.5">
+            <ReviewLink id={review.id} from={from} className="min-w-0 font-medium break-words hover:underline">
+              {changeTitle(review)}
+            </ReviewLink>
+            <span className="mt-1 inline-flex">
+              <ForgeLink review={review} />
+            </span>
+          </div>
+          <div className="text-xs break-all text-muted-foreground">
+            {review.repository.fullPath} {changeLabel(review.repository.provider, review.number)} ·{" "}
+            <code>{review.headSha.slice(0, 7)}</code>
+          </div>
+        </div>
+        {actions && <ReviewActions review={review} />}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StatusBadge status={review.status} reason={review.error} />
+        <TriggerIcon trigger={review.trigger} />
+        <VerdictBadge verdict={review.verdict} />
+        <FindingCounts review={review} />
+      </div>
+      {review.error && <div className="text-xs break-words text-muted-foreground">{review.error}</div>}
+      <div className="text-xs text-muted-foreground">
+        Queued {timeAgo(review.createdAt)}
+        <Duration review={review} now={now} />
+      </div>
+      {grouped && runs > 1 && (
+        <div>
+          <RunsToggle runs={runs} open={open} onToggle={onToggle} />
+          {open && (
+            <div className="mt-2 rounded-md bg-muted/30 p-2">
+              <RunHistoryList review={review} from={from} />
+            </div>
+          )}
+        </div>
+      )}
+    </li>
   )
 }
 
@@ -213,6 +313,7 @@ export function ReviewsTable({
   const from = location.pathname + location.search
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const colSpan = 5 + Number(actions)
+  const cards = useIsBelowSm()
 
   function toggle(id: string) {
     setExpanded((current) => {
@@ -221,6 +322,26 @@ export function ReviewsTable({
       else next.add(id)
       return next
     })
+  }
+
+  if (cards) {
+    if (!reviews.length) return <p className="py-8 text-center text-muted-foreground">{emptyMessage}</p>
+    return (
+      <ul aria-label="Reviews">
+        {reviews.map((review) => (
+          <ReviewCard
+            key={review.id}
+            review={review}
+            actions={actions}
+            grouped={grouped}
+            open={expanded.has(review.id)}
+            onToggle={() => toggle(review.id)}
+            from={from}
+            now={now}
+          />
+        ))}
+      </ul>
+    )
   }
 
   return (
@@ -240,7 +361,6 @@ export function ReviewsTable({
         {reviews.map((review) => {
           const runs = review.runCount ?? 1
           const open = expanded.has(review.id)
-          const webUrl = review.summary?.webUrl
           return (
             <Fragment key={review.id}>
               <TableRow
@@ -252,17 +372,7 @@ export function ReviewsTable({
                     <ReviewLink id={review.id} from={from} className="truncate font-medium hover:underline">
                       {changeTitle(review)}
                     </ReviewLink>
-                    {webUrl && (
-                      <a
-                        href={webUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        aria-label={`Open on ${PROVIDERS[review.repository.provider].label}`}
-                        className="shrink-0 text-muted-foreground hover:text-foreground"
-                      >
-                        <ExternalLink className="size-3.5" />
-                      </a>
-                    )}
+                    <ForgeLink review={review} />
                   </div>
                   <div className="truncate text-xs text-muted-foreground">
                     {review.repository.fullPath} {changeLabel(review.repository.provider, review.number)} ·{" "}
@@ -270,15 +380,7 @@ export function ReviewsTable({
                   </div>
                   {review.error && <div className="truncate text-xs text-muted-foreground">{review.error}</div>}
                   {grouped && runs > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => toggle(review.id)}
-                      aria-expanded={open}
-                      className="mt-1 inline-flex items-center gap-0.5 text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
-                      {runs} runs
-                    </button>
+                    <RunsToggle runs={runs} open={open} onToggle={() => toggle(review.id)} />
                   )}
                 </TableCell>
                 <TableCell>

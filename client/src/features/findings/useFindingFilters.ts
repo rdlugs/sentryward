@@ -70,6 +70,10 @@ export function useFindingFilters(repoOptions: RepoOption[], prefix?: string) {
     set({ sort: next?.key ?? "", dir: next?.dir ?? "" })
   }
 
+  function setSort(next: Sort<FindingSortKey>) {
+    set({ sort: next?.key ?? "", dir: next?.dir ?? "" })
+  }
+
   function clearFilters() {
     set({ state: ALL, lifecycle: ALL, severity: ALL, category: ALL, kind: ALL, repo: ALL })
   }
@@ -100,6 +104,7 @@ export function useFindingFilters(repoOptions: RepoOption[], prefix?: string) {
     params,
     sort,
     onSort,
+    setSort,
     pagination,
     filtering,
     narrowed,
