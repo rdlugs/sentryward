@@ -5,6 +5,7 @@ import { createMemoryRouter, RouterProvider } from "react-router"
 import { QueryClientProvider } from "@tanstack/react-query"
 import { ThemeProvider } from "next-themes"
 import { AuthProvider } from "@/features/auth/AuthProvider"
+import { ManualReviewProvider } from "@/features/reviews/ManualReviewProvider"
 import { DensityProvider } from "@/features/density/DensityProvider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
@@ -20,7 +21,8 @@ export function renderWithProviders(ui: ReactElement, { route = "/" } = {}) {
         element: (
           <AuthProvider>
             <TooltipProvider>
-              {ui}
+              {/* As DashboardLayout does, for pages rendered without it. */}
+              <ManualReviewProvider>{ui}</ManualReviewProvider>
               <Toaster />
             </TooltipProvider>
           </AuthProvider>

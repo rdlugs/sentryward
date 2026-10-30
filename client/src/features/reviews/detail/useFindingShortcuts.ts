@@ -55,10 +55,11 @@ export function useFindingShortcuts(handlers: FindingShortcutHandlers) {
             o: ref.current.toggle,
             c: ref.current.copy,
           }[letter]
-      // Only stops the browser's own Ctrl+J (downloads), Ctrl+U (view source)
-      // and Ctrl+O (open file) when the shortcut did something here. Ctrl+K is
-      // the command palette's (see layouts/CommandPalette.tsx).
-      if (action && action()) event.preventDefault()
+      // Only stops the browser's own Ctrl+J (downloads) and Ctrl+O (open file)
+      // when the shortcut did something here. Ctrl+U is always stopped: on the
+      // first finding, opening view source would be far worse than nothing.
+      // Ctrl+K is the command palette's (see layouts/CommandPalette.tsx).
+      if ((action && action()) || letter === "u") event.preventDefault()
     }
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)

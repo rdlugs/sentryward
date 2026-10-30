@@ -1,6 +1,6 @@
 import { lazy, type ReactElement } from "react"
 import { describe, expect, it, vi } from "vitest"
-import { screen, waitFor, within } from "@testing-library/react"
+import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Route, Routes, useLocation } from "react-router"
 import { DashboardLayout } from "./DashboardLayout"
@@ -237,6 +237,45 @@ describe("DashboardLayout", () => {
       expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument()
     })
 
+    it("closes with the same shortcut", async () => {
+      renderLayout()
+      const palette = await openPalette()
+      await userEvent.keyboard("{Control>}k{/Control}")
+      await waitFor(() => expect(palette).not.toBeInTheDocument())
+    })
+
+    it("uses Cmd+K on macOS and leaves Ctrl+K to text fields", async () => {
+      const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel")
+      try {
+        renderLayout()
+        await screen.findByText("At /usage")
+        expect(screen.getByRole("button", { name: "Search" })).toHaveAttribute("aria-keyshortcuts", "Meta+K")
+        expect(fireEvent.keyDown(document.body, { key: "k", ctrlKey: true })).toBe(true)
+        expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument()
+        await openPalette("{Meta>}k{/Meta}")
+      } finally {
+        platform.mockRestore()
+      }
+    })
+
+    it("does not open over another dialog", async () => {
+      renderLayout()
+      await screen.findByText("At /usage")
+      await userEvent.click(screen.getByRole("button", { name: "Review a PR" }))
+      await screen.findByRole("dialog", { name: "Manual review" })
+
+      await userEvent.keyboard("{Control>}k{/Control}")
+      expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument()
+    })
+
+    it("explains a repository search while repositories could not be loaded", async () => {
+      renderLayout({ "GET /api/repos": () => jsonResponse(500, { message: "Boom" }) })
+      const palette = await openPalette()
+      await userEvent.type(screen.getByRole("combobox", { name: "Search pages and repositories" }), "acme/web")
+
+      expect(await within(palette).findByText("Could not load repositories.")).toBeInTheDocument()
+    })
+
     it("hides admin pages from members", async () => {
       renderLayout()
       const palette = await openPalette()
@@ -271,6 +310,28 @@ describe("DashboardLayout", () => {
 
       expect(await screen.findByText(`At /reviews/${listItem.id}`)).toBeInTheDocument()
       expect(JSON.parse(String(create.mock.calls[0]![0]?.body))).toEqual({ url: "https://github.com/acme/web/pull/42" })
+    })
+
+    it("stays put when closed before a pasted link is queued", async () => {
+      let respond!: (response: Response) => void
+      const pending = new Promise<Response>((resolve) => {
+        respond = resolve
+      })
+      renderLayout({ "POST /api/reviews": () => pending as unknown as Response })
+      await openPalette()
+      await userEvent.type(
+        screen.getByRole("combobox", { name: "Search pages and repositories" }),
+        "https://github.com/acme/web/pull/42",
+      )
+      await userEvent.keyboard("{Enter}")
+      await userEvent.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument())
+
+      respond(jsonResponse(201, { review: listItem }))
+      expect(await screen.findByText("Review queued")).toBeInTheDocument()
+      expect(screen.getByText("At /usage")).toBeInTheDocument()
+      await userEvent.click(await screen.findByRole("button", { name: "Open" }))
+      expect(await screen.findByText(`At /reviews/${listItem.id}`)).toBeInTheDocument()
     })
 
     it("starts a manual review from the palette or the top bar", async () => {

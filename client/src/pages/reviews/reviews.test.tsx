@@ -1021,6 +1021,18 @@ describe("Review detail page", () => {
     expect(fireEvent.keyDown(document.activeElement!, { key: "o", ctrlKey: true })).toBe(false)
   })
 
+  it("never lets Ctrl+U open view source, even on the first finding", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard(ctrl("j"))
+    const first = document.activeElement!
+    expect(fireEvent.keyDown(first, { key: "u", ctrlKey: true })).toBe(false)
+    expect(first).toHaveFocus()
+  })
+
   it("leaves Ctrl+J to the browser on a review with no findings", async () => {
     mockApi({
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, findings: [] } } },

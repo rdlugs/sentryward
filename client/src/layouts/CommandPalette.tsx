@@ -13,8 +13,9 @@ import {
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { useRepos } from "@/features/forge/api"
 import { PROVIDERS } from "@/features/forge/providers"
-import { useCreateReview } from "@/features/reviews/api"
-import { ApiError } from "@/lib/api"
+import { reviewUrlErrorMessage, useCreateReview } from "@/features/reviews/api"
+import { useStartManualReview } from "@/features/reviews/useStartManualReview"
+import { isMac } from "@/lib/platform"
 import type { NavGroup } from "./DashboardLayout"
 
 interface Props {
@@ -22,32 +23,44 @@ interface Props {
   onOpenChange: (open: boolean) => void
   // Already filtered for the user's role, so admin pages only show for admins.
   groups: NavGroup[]
-  onStartReview: () => void
 }
 
-// Ctrl+K or Cmd+K, toggling. Unlike the findings shortcuts it also works while
-// typing in a field: jumping somewhere else is what the palette is for.
-function usePaletteShortcut(toggle: () => void) {
+// Another dialog, sheet or menu has focus (Radix keeps it inside the open layer).
+function inOtherLayer(target: EventTarget | null) {
+  return (
+    target instanceof Element &&
+    target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null
+  )
+}
+
+// Cmd+K on macOS, where plain Ctrl+K is the text fields' "delete to end of
+// line"; Ctrl+K elsewhere. Toggling. Unlike the findings shortcuts it also
+// works while typing in a field: jumping somewhere else is what the palette is
+// for. It does not open over another dialog or menu, which would stack two
+// focus traps.
+function usePaletteShortcut(open: boolean, toggle: () => void) {
   // Read through a ref so the listener is bound once, not on every render.
-  const ref = useRef(toggle)
+  const ref = useRef({ open, toggle })
   useEffect(() => {
-    ref.current = toggle
+    ref.current = { open, toggle }
   })
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      const modifier = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey || event.metaKey
+      if (event.defaultPrevented || !modifier || event.altKey || event.shiftKey) return
       if (event.key.toLowerCase() !== "k") return
+      if (!ref.current.open && inOtherLayer(event.target)) return
       event.preventDefault()
-      ref.current()
+      ref.current.toggle()
     }
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)
   }, [])
 }
 
-export function CommandPalette({ open, onOpenChange, groups, onStartReview }: Props) {
-  usePaletteShortcut(() => onOpenChange(!open))
+export function CommandPalette({ open, onOpenChange, groups }: Props) {
+  usePaletteShortcut(open, () => onOpenChange(!open))
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -59,22 +72,22 @@ export function CommandPalette({ open, onOpenChange, groups, onStartReview }: Pr
         </DialogDescription>
         {/* Only mounted while open, so the search starts empty and repositories
             are not fetched until someone looks for one. */}
-        <Palette groups={groups} onClose={() => onOpenChange(false)} onStartReview={onStartReview} />
+        <Palette groups={groups} onClose={() => onOpenChange(false)} />
       </DialogContent>
     </Dialog>
   )
 }
 
-function Palette({
-  groups,
-  onClose,
-  onStartReview,
-}: {
-  groups: NavGroup[]
-  onClose: () => void
-  onStartReview: () => void
-}) {
+function Palette({ groups, onClose }: { groups: NavGroup[]; onClose: () => void }) {
   const navigate = useNavigate()
+  const startReview = useStartManualReview()
+  const closed = useRef(false)
+  useEffect(() => {
+    closed.current = false
+    return () => {
+      closed.current = true
+    }
+  }, [])
   const [search, setSearch] = useState("")
   const repos = useRepos()
   const createReview = useCreateReview()
@@ -89,23 +102,32 @@ function Palette({
   async function reviewUrl() {
     try {
       const { review } = await createReview.mutateAsync({ url })
-      go(`/reviews/${review.id}`)
+      const to = `/reviews/${review.id}`
+      // Closed while the request was out: don't pull the user to a page they
+      // backed out of, but let them get there.
+      if (closed.current) {
+        toast.success("Review queued", { action: { label: "Open", onClick: () => navigate(to) } })
+        return
+      }
+      go(to)
     } catch (err) {
-      toast.error(
-        err instanceof ApiError ? (err.fieldErrors?.url?.[0] ?? err.message) : "Could not queue the review",
-      )
+      toast.error(reviewUrlErrorMessage(err))
     }
   }
 
   return (
-    <Command label="Search pages and repositories" className="rounded-none!">
+    // No vim bindings: cmdk would take Ctrl+K as "previous item" and stop the
+    // shortcut from closing the palette.
+    <Command label="Search pages and repositories" className="rounded-none!" vimBindings={false}>
       <CommandInput
         value={search}
         onValueChange={setSearch}
         placeholder="Search pages and repositories, or paste a link..."
       />
       <CommandList className="max-h-96">
-        <CommandEmpty>No results.</CommandEmpty>
+        {/* A repository search finds nothing until the list arrives; say so
+            rather than suggest the repository does not exist. */}
+        <CommandEmpty>{repos.isPending ? "Loading repositories..." : "No results."}</CommandEmpty>
         <CommandGroup heading="Actions">
           {/* Always listed while a link is typed: the link itself is the match. */}
           {isUrl && (
@@ -119,7 +141,7 @@ function Palette({
             keywords={["pull request", "merge request", "PR", "MR"]}
             onSelect={() => {
               onClose()
-              onStartReview()
+              startReview()
             }}
           >
             <GitPullRequest />
@@ -163,6 +185,12 @@ function Palette({
                 </CommandItem>
               )
             })}
+          </CommandGroup>
+        )}
+        {/* Kept while searching, so a missing repository is explained. */}
+        {repos.isError && (
+          <CommandGroup heading="Repositories" forceMount>
+            <p className="px-2 py-1.5 text-sm text-muted-foreground">Could not load repositories.</p>
           </CommandGroup>
         )}
       </CommandList>

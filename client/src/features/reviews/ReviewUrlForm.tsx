@@ -4,8 +4,7 @@ import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Field, FieldError, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { ApiError } from "@/lib/api"
-import { useCreateReview } from "./api"
+import { reviewUrlErrorMessage, useCreateReview } from "./api"
 
 export function ReviewUrlForm({ onQueued }: { onQueued?: () => void }) {
   const [url, setUrl] = useState("")
@@ -22,7 +21,7 @@ export function ReviewUrlForm({ onQueued }: { onQueued?: () => void }) {
       onQueued?.()
       navigate(`/reviews/${review.id}`)
     } catch (err) {
-      setError(err instanceof ApiError ? (err.fieldErrors?.url?.[0] ?? err.message) : "Something went wrong")
+      setError(reviewUrlErrorMessage(err))
     }
   }
 

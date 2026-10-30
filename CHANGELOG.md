@@ -10,15 +10,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
-- Command palette and a global "Review a PR" action (#161). `Ctrl+K` (or
-  `Cmd+K`) opens a palette from any dashboard page, also from the top bar's
-  Search button: it jumps to any page (admin pages only for admins, plus
+- Command palette and a global "Review a PR" action (#161). `Ctrl+K` (`Cmd+K`
+  on macOS, where plain `Ctrl+K` stays the text fields' "delete to end of
+  line") opens and closes a palette from any dashboard page, also from the top
+  bar's Search button: it jumps to any page (admin pages only for admins, plus
   Settings), lists repositories and opens a repository's reviews, starts a
   manual review, and queues a review for a pasted pull or merge request link.
+  It does not open over another dialog, sheet or menu, says when repositories
+  are still loading or could not be loaded, and closing it while a link is
+  being queued leaves you on the page with a "Review queued" toast to open it.
   A "Review a PR" button in the top bar opens the manual review sheet from
-  every page.
+  every page; Home and Reviews open that same sheet.
 - Keyboard navigation and severity jump for findings on the review page
-  (#157). `Ctrl+J`/`Ctrl+K` move between findings in display order, `Ctrl+O`
+  (#157). `Ctrl+J`/`Ctrl+U` move between findings in display order, `Ctrl+O`
   or `Enter` expands or collapses the focused one, `Ctrl+C` copies its agent
   prompt (or the selected text, when there is a selection), and `Ctrl+?` opens
   a dialog listing the shortcuts. Shortcuts are ignored while typing in a
@@ -28,9 +32,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   shortcuts dialog. Focus from the keyboard, a jump, Tab or a click shares one
   position, and the focus ring stays visible after a mouse-started jump.
   `Ctrl+O` and `Ctrl+C` only act while a finding has focus, a shortcut with
-  nothing to act on is left to the browser (so its own `Ctrl+J`, `Ctrl+K` and
-  `Ctrl+O` still work), `Ctrl+?` follows the active keyboard layout, and a
-  jump clears the bar even when it wraps on narrow screens.
+  nothing to act on is left to the browser (so its own `Ctrl+J` and `Ctrl+O`
+  still work, while `Ctrl+U` never opens view source on the review page),
+  `Ctrl+?` follows the active keyboard layout, and a jump clears the bar even
+  when it wraps on narrow screens.
 - Key metrics on Home (#154). Once the workspace has a review, Home shows
   four tiles above the setup checklist: open critical/major findings, reviews
   and failed runs in the last 7 days, and estimated spend over the last 30
@@ -310,9 +315,6 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
-- On the review page, "Previous finding" moved from `Ctrl+K` to `Ctrl+U`
-  (#161), leaving `Ctrl+K` to the command palette. The shortcuts dialog
-  lists the new key.
 - The review page header groups "Copy prompt for all findings", "Copy
   markdown" and "Download markdown" into an Export menu (#155), leaving Re-run
   (and Cancel while the review is active) as the only buttons. Items keep

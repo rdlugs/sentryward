@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo } from "react"
 import { AlertTriangle, Play } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
@@ -29,7 +29,7 @@ import { useRepos } from "@/features/forge/api"
 import { useMarkReviewsViewed, useReviews, type ReviewQuery } from "@/features/reviews/api"
 import { STATUS_OPTIONS, TRIGGER_OPTIONS, VERDICT_OPTIONS } from "@/features/reviews/options"
 import { ReviewStatsStrip } from "@/features/reviews/ReviewStatsStrip"
-import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
+import { useStartManualReview } from "@/features/reviews/useStartManualReview"
 import { ReviewsTable } from "@/features/reviews/ReviewsTable"
 
 type View = "changes" | "runs"
@@ -52,7 +52,7 @@ export function ReviewsPage() {
   const { status, verdict, trigger, repo, q: query } = values
   const view = values.view as View
   const includeSuperseded = values.superseded === "true"
-  const [manualOpen, setManualOpen] = useState(false)
+  const startReview = useStartManualReview()
   const q = useDebounced(query.trim())
 
   // Clears the sidebar's failed-review badge. Marked again on leaving, so runs
@@ -140,7 +140,7 @@ export function ReviewsPage() {
             <TabsTrigger value="runs">All runs</TabsTrigger>
           </TabsList>
         </Tabs>
-        <Button onClick={() => setManualOpen(true)}>
+        <Button onClick={startReview}>
           <Play />
           Manual review
         </Button>
@@ -221,7 +221,6 @@ export function ReviewsPage() {
           </CardContent>
         </Card>
       )}
-      <ManualReviewSheet open={manualOpen} onOpenChange={setManualOpen} />
     </PageShell>
   )
 }
