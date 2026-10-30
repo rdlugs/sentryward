@@ -46,7 +46,6 @@ export async function listRepos(req: Request, res: Response) {
     // orders by `position` itself.
     orderBy: { fullPath: "asc" },
   });
-  const lastReviews = await latestReviews(stored.map((repo) => repo.id));
   res.json({
     repos: stored.map((repo) => ({
       id: repo.id,
@@ -60,7 +59,6 @@ export async function listRepos(req: Request, res: Response) {
       settings: repo.settings,
       followGlobal: repo.followGlobal,
       position: repo.position,
-      lastReview: lastReviews.get(repo.id) ?? null,
     })),
   });
 }
@@ -92,26 +90,39 @@ async function latestReviews(repositoryIds: string[]) {
   );
 }
 
-export async function reorderRepos(req: Request, res: Response) {
-  const { ids } = reorderReposSchema.parse(req.body);
-  const current = await prisma.repository.findMany({
+// Separate from listRepos, which the pickers share: only the Repositories tab
+// shows these, so only it pays for the query.
+export async function listLastReviews(req: Request, res: Response) {
+  const stored = await prisma.repository.findMany({
     where: { connection: { workspaceId: req.workspaceId! } },
     select: { id: true },
   });
-  // The full set, not a subset: a repository added or removed since the page
-  // loaded would otherwise land somewhere nobody chose.
-  const known = new Set(current.map((repo) => repo.id));
-  if (ids.length !== known.size || !ids.every((id) => known.has(id))) {
-    throw new HttpError(409, "Repositories changed since the page loaded; reload and try again");
-  }
-  await prisma.$transaction(
-    ids.map((id, position) =>
-      prisma.repository.updateMany({
-        where: { id, connection: { workspaceId: req.workspaceId! } },
-        data: { position },
-      }),
-    ),
-  );
+  const lastReviews = await latestReviews(stored.map((repo) => repo.id));
+  res.json({ lastReviews: Object.fromEntries(lastReviews) });
+}
+
+export async function reorderRepos(req: Request, res: Response) {
+  const { ids } = reorderReposSchema.parse(req.body);
+  await prisma.$transaction(async (tx) => {
+    // Locking every row up front, always by id, makes overlapping reorders
+    // wait for each other instead of deadlocking on rows taken in request
+    // order, and keeps the check below true until the writes commit.
+    const current = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT r.id FROM repositories r
+      JOIN forge_connections c ON c.id = r.connection_id
+      WHERE c.workspace_id = ${req.workspaceId!}::uuid
+      ORDER BY r.id
+      FOR UPDATE OF r`);
+    // The full set, not a subset: a repository added or removed since the page
+    // loaded would otherwise land somewhere nobody chose.
+    const known = new Set(current.map((repo) => repo.id));
+    if (ids.length !== known.size || !ids.every((id) => known.has(id))) {
+      throw new HttpError(409, "Repositories changed since the page loaded; reload and try again");
+    }
+    for (const [position, id] of ids.entries()) {
+      await tx.repository.update({ where: { id }, data: { position } });
+    }
+  });
   res.status(204).end();
 }
 

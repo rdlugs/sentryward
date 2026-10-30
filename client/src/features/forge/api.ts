@@ -24,10 +24,6 @@ export type ConnectionStatus = "active" | "revoked" | "unreachable"
 // Healthy connections first; ones still being checked sink to the bottom.
 const STATUS_RANK: Record<ConnectionStatus, number> = { active: 0, unreachable: 1, revoked: 2 }
 
-export function statusRank(status: ConnectionStatus | undefined) {
-  return status ? STATUS_RANK[status] : 3
-}
-
 export const STATUS_LABELS: Record<ConnectionStatus, string> = {
   active: "Active",
   revoked: "Inactive",
@@ -76,8 +72,15 @@ export interface ForgeRepo {
   followGlobal: boolean
   // Place in the Repositories tab's dragged order; null sorts last, by path.
   position: number | null
-  // Newest review that ran (skipped and superseded runs do not count).
-  lastReview: { id: string; number: number; status: JobStatus; verdict: Verdict | null; createdAt: string } | null
+}
+
+// A repository's newest review that ran (skipped and superseded runs do not count).
+export interface LastReview {
+  id: string
+  number: number
+  status: JobStatus
+  verdict: Verdict | null
+  createdAt: string
 }
 
 // The Repositories tab's order. The API lists by path for the pickers that share it.
@@ -92,7 +95,7 @@ export function byPosition(a: ForgeRepo, b: ForgeRepo) {
 
 // A repository the forge account can see; id is null until it is added.
 export interface AvailableRepo
-  extends Omit<ForgeRepo, "id" | "connectionId" | "account" | "followGlobal" | "position" | "lastReview"> {
+  extends Omit<ForgeRepo, "id" | "connectionId" | "account" | "followGlobal" | "position"> {
   id: string | null
   private: boolean
 }
@@ -205,11 +208,18 @@ export function useDeleteConnection() {
 
 type ConnectionsData = NonNullable<ReturnType<typeof useConnections>["data"]>
 
+const REORDER_CONNECTIONS = ["connections", "reorder"]
+
 // Takes the whole list in its new order. The cache is reordered first so a
 // dropped card stays where it was dropped, and put back if the save fails.
+// Saves run one at a time, in drop order, so the last order chosen is the one
+// stored, and only the last one refetches, so an earlier save's refetch
+// cannot undo a newer drop on screen.
 export function useReorderConnections() {
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: REORDER_CONNECTIONS,
+    scope: { id: "reorder-connections" },
     mutationFn: (ids: string[]) =>
       api<void>("/connections/order", { method: "PUT", body: JSON.stringify({ ids }) }),
     onMutate: async (ids) => {
@@ -225,7 +235,11 @@ export function useReorderConnections() {
     onError: (_error, _ids, context) => {
       if (context?.previous) queryClient.setQueryData(["connections"], context.previous)
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["connections"], exact: true }),
+    onSettled: () => {
+      if (queryClient.isMutating({ mutationKey: REORDER_CONNECTIONS }) === 1) {
+        return queryClient.invalidateQueries({ queryKey: ["connections"], exact: true })
+      }
+    },
   })
 }
 
@@ -237,11 +251,25 @@ export function useRepos() {
   })
 }
 
+// Each repository's newest review, by id. Only the Repositories tab shows
+// them, so they are not part of the list the pickers share. The key sits under
+// ["repos"] so the invalidations that refresh the list refresh these too.
+export function useLastReviews() {
+  return useQuery({
+    queryKey: ["repos", "last-reviews"],
+    queryFn: () => api<{ lastReviews: Record<string, LastReview | undefined> }>("/repos/last-reviews"),
+  })
+}
+
+const REORDER_REPOS = ["repos", "reorder"]
+
 // Like useReorderConnections, but the cache keeps its path order for the
 // pickers that share it, so the new order goes onto each row's position.
 export function useReorderRepos() {
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: REORDER_REPOS,
+    scope: { id: "reorder-repos" },
     mutationFn: (ids: string[]) => api<void>("/repos/order", { method: "PUT", body: JSON.stringify({ ids }) }),
     onMutate: async (ids) => {
       await queryClient.cancelQueries({ queryKey: ["repos"], exact: true })
@@ -256,7 +284,11 @@ export function useReorderRepos() {
     onError: (_error, _ids, context) => {
       if (context?.previous) queryClient.setQueryData(["repos"], context.previous)
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["repos"], exact: true }),
+    onSettled: () => {
+      if (queryClient.isMutating({ mutationKey: REORDER_REPOS }) === 1) {
+        return queryClient.invalidateQueries({ queryKey: ["repos"], exact: true })
+      }
+    },
   })
 }
 
@@ -306,9 +338,13 @@ export function useAddRepos(connectionId: string) {
   })
 }
 
+// Keyed so the grid can tell which repositories still have a save in flight.
+export const SET_REPO_ENABLED = ["repos", "set-enabled"]
+
 export function useSetRepoEnabled() {
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: SET_REPO_ENABLED,
     mutationFn: ({ repo, enabled }: { repo: ForgeRepo; enabled: boolean }) =>
       api<EnableResult>(`/repos/${repo.id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
     onSuccess: () => {

@@ -1,7 +1,7 @@
 import { Link } from "react-router"
 import { useSortable } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { ExternalLink, GripVertical, MoreHorizontal, SlidersHorizontal, Trash2 } from "lucide-react"
+import { ExternalLink, MoreHorizontal, SlidersHorizontal, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter } from "@/components/ui/card"
 import {
@@ -15,9 +15,11 @@ import { Switch } from "@/components/ui/switch"
 import { StatusBadge, VerdictBadge } from "@/features/reviews/badges"
 import { cn } from "@/lib/utils"
 import { timeAgo } from "@/lib/time"
-import type { ConnectionStatus, ForgeRepo } from "./api"
+import { hasOverrides } from "@/features/config/api"
+import type { ConnectionStatus, ForgeRepo, LastReview } from "./api"
 import { ConnectionStatusBadge } from "./ConnectionStatusBadge"
 import { PROVIDERS } from "./providers"
+import { DragHandle } from "./SortableGrid"
 
 function RepoActions({ repo, onRemove }: { repo: ForgeRepo; onRemove: () => void }) {
   return (
@@ -45,8 +47,9 @@ function RepoActions({ repo, onRemove }: { repo: ForgeRepo; onRemove: () => void
   )
 }
 
-function LastReview({ repo }: { repo: ForgeRepo }) {
-  const review = repo.lastReview
+function LastReviewLine({ repo, review }: { repo: ForgeRepo; review: LastReview | null | undefined }) {
+  // Not known yet (still loading, or the request failed).
+  if (review === undefined) return null
   if (!review) return <p className="text-muted-foreground">No reviews yet</p>
   return (
     <div className="flex min-w-0 items-center gap-2">
@@ -65,6 +68,7 @@ function LastReview({ repo }: { repo: ForgeRepo }) {
 
 export function RepoCard({
   repo,
+  lastReview,
   status,
   reorderable,
   toggling,
@@ -72,6 +76,8 @@ export function RepoCard({
   onRemove,
 }: {
   repo: ForgeRepo
+  // Undefined until loaded; null when the repository has no review yet.
+  lastReview: LastReview | null | undefined
   // The connection's credential check.
   status: ConnectionStatus | undefined
   // Off while filtering, for members, or with a single card.
@@ -87,7 +93,7 @@ export function RepoCard({
   })
   const provider = PROVIDERS[repo.account.provider]
   // Matches the "Overrides" badge on the Configuration page.
-  const custom = !repo.followGlobal && Object.keys(repo.settings).length > 0
+  const custom = hasOverrides(repo)
 
   return (
     <li
@@ -100,16 +106,12 @@ export function RepoCard({
         <CardContent className="flex flex-1 flex-col gap-3">
           <div className="flex items-start gap-2">
             {reorderable && (
-              <button
-                ref={setActivatorNodeRef}
-                type="button"
-                className="-ml-1 flex h-8 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:cursor-grabbing"
-                {...attributes}
-                {...listeners}
-                aria-label={`Reorder ${repo.fullPath}`}
-              >
-                <GripVertical className="size-4" />
-              </button>
+              <DragHandle
+                label={`Reorder ${repo.fullPath}`}
+                handleRef={setActivatorNodeRef}
+                attributes={attributes}
+                listeners={listeners}
+              />
             )}
             <span className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background">
               <provider.icon className="size-4" aria-hidden />
@@ -135,7 +137,7 @@ export function RepoCard({
             <span className="text-xs text-muted-foreground">{custom ? "Custom settings" : "Global settings"}</span>
           </div>
           <div className="mt-auto">
-            <LastReview repo={repo} />
+            <LastReviewLine repo={repo} review={lastReview} />
           </div>
         </CardContent>
         <CardFooter className="justify-between gap-2">

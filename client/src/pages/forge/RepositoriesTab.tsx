@@ -1,15 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router"
-import {
-  closestCenter,
-  DndContext,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from "@dnd-kit/core"
-import { arrayMove, rectSortingStrategy, SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable"
+import { useMutationState } from "@tanstack/react-query"
 import { CircleAlert, FolderGit2, Loader2, Plus } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -20,6 +11,7 @@ import {
   SearchInput,
   type ActiveFilter,
 } from "@/components/TableFilters"
+import { ApiError } from "@/lib/api"
 import { ALL, matchesQuery, selectedLabel } from "@/lib/filters"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -38,12 +30,15 @@ import { useAuth } from "@/features/auth/useAuth"
 import { AddReposSheet } from "@/features/forge/AddReposSheet"
 import { FORGE_KIND_OPTIONS, forgeKey } from "@/features/forge/forgeKind"
 import { RepoCard } from "@/features/forge/RepoCard"
+import { SortableGrid } from "@/features/forge/SortableGrid"
 import {
   byPosition,
   pausedConnections,
+  SET_REPO_ENABLED,
   STATUS_OPTIONS,
   useConnectionStatuses,
   useConnections,
+  useLastReviews,
   useRemoveRepo,
   useReorderRepos,
   useRepos,
@@ -57,6 +52,10 @@ const REVIEW_OPTIONS = [
   { value: "enabled", label: "Enabled" },
   { value: "disabled", label: "Disabled" },
 ]
+
+// Cards rendered at first and added by each "Show more", so a large workspace
+// does not mount (and measure on every drag) hundreds of sortable cards.
+const PAGE_SIZE = 24
 
 type ConnectionsById = Record<string, Connection | undefined>
 
@@ -77,12 +76,17 @@ function RepoGrid({
 }) {
   const setEnabled = useSetRepoEnabled()
   const reorder = useReorderRepos()
+  const lastReviews = useLastReviews()
   const [removing, setRemoving] = useState<ForgeRepo | null>(null)
-  const sensors = useSensors(
-    // A few pixels of travel before a drag starts, so clicking the handle stays a click.
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  )
+  const [shown, setShown] = useState(PAGE_SIZE)
+  // Every repository with a save in flight, not just the latest one toggled:
+  // a second toggle on the same card before the first returns could finish
+  // first and leave the switch showing the wrong state.
+  const pendingIds = useMutationState({
+    filters: { mutationKey: SET_REPO_ENABLED, status: "pending" },
+    select: (mutation) => (mutation.state.variables as { repo: ForgeRepo } | undefined)?.repo.id,
+  })
+  const toggling = new Set(pendingIds)
 
   async function toggle(repo: ForgeRepo, enabled: boolean) {
     try {
@@ -96,39 +100,48 @@ function RepoGrid({
 
   // Dragging is only offered on the unfiltered list, so `repos` is the whole
   // order the server stores.
-  function onDragEnd({ active, over }: DragEndEvent) {
-    if (!over || active.id === over.id) return
-    const ids = repos.map((repo) => repo.id)
-    const moved = arrayMove(ids, ids.indexOf(String(active.id)), ids.indexOf(String(over.id)))
-    reorder.mutate(moved, { onError: () => toast.error("Could not save the repository order") })
+  function onReorder(ids: string[]) {
+    reorder.mutate(ids, {
+      // A 409 says the list changed under the user, which a generic message would hide.
+      onError: (err) =>
+        toast.error(err instanceof ApiError && err.status === 409 ? err.message : "Could not save the repository order"),
+    })
   }
+
+  const visible = repos.slice(0, shown)
+  const remaining = repos.length - visible.length
 
   return (
     <>
       {repos.length ? (
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-          <SortableContext items={repos.map((repo) => repo.id)} strategy={rectSortingStrategy}>
-            <ul aria-label="Repositories" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {repos.map((repo) => (
-                <RepoCard
-                  key={repo.id}
-                  repo={repo}
-                  status={statuses[repo.connectionId]}
-                  reorderable={reorderable}
-                  toggling={setEnabled.isPending && setEnabled.variables?.repo.id === repo.id}
-                  onToggle={(enabled) => toggle(repo, enabled)}
-                  onRemove={() => setRemoving(repo)}
-                />
-              ))}
-            </ul>
-          </SortableContext>
-        </DndContext>
+        <SortableGrid ids={repos.map((repo) => repo.id)} shown={visible.length} label="Repositories" onReorder={onReorder}>
+          {visible.map((repo) => (
+            <RepoCard
+              key={repo.id}
+              repo={repo}
+              // Missing from a loaded map means no review yet.
+              lastReview={lastReviews.data ? (lastReviews.data.lastReviews[repo.id] ?? null) : undefined}
+              status={statuses[repo.connectionId]}
+              reorderable={reorderable}
+              toggling={toggling.has(repo.id)}
+              onToggle={(enabled) => toggle(repo, enabled)}
+              onRemove={() => setRemoving(repo)}
+            />
+          ))}
+        </SortableGrid>
       ) : (
         <Empty className="border border-dashed">
           <EmptyHeader>
             <EmptyDescription>No repositories match your filters.</EmptyDescription>
           </EmptyHeader>
         </Empty>
+      )}
+      {remaining > 0 && (
+        <div className="flex justify-center">
+          <Button variant="outline" size="sm" onClick={() => setShown((count) => count + PAGE_SIZE)}>
+            Show more ({remaining} remaining)
+          </Button>
+        </div>
       )}
       <RemoveRepoDialog repo={removing} onOpenChange={(open) => !open && setRemoving(null)} />
     </>
@@ -278,7 +291,13 @@ function RepoList({
           {narrowed ? "Clear search and filters to reorder." : "Drag cards by their handle to reorder them."}
         </p>
       )}
-      <RepoGrid repos={filtered} statuses={statuses} reorderable={reorderable} />
+      {/* Keyed by the filters so a new search starts again from the first page. */}
+      <RepoGrid
+        key={JSON.stringify([query, forge, account, status, reviews])}
+        repos={filtered}
+        statuses={statuses}
+        reorderable={reorderable}
+      />
     </>
   )
 }

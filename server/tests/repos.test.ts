@@ -137,17 +137,14 @@ describe("repository order and latest review", () => {
     await job("skipped", 3, "2026-01-03");
     await job("superseded", 4, "2026-01-04");
 
-    const repos = await listed();
+    const res = await request(app).get("/api/repos/last-reviews").set("Cookie", cookie);
 
-    expect(repos.map((repo: { fullPath: string }) => repo.fullPath)).toEqual(["team/api", "team/web"]);
-    expect(repos[0].lastReview).toEqual({
-      id: newest.id,
-      number: 2,
-      status: "running",
-      verdict: null,
-      createdAt: "2026-01-02T00:00:00.000Z",
+    expect(res.status).toBe(200);
+    expect(res.body.lastReviews).toEqual({
+      [api.id]: { id: newest.id, number: 2, status: "running", verdict: null, createdAt: "2026-01-02T00:00:00.000Z" },
     });
-    expect(repos[1].lastReview).toBeNull();
+    // The shared list leaves them to the endpoint above.
+    expect((await listed())[0]).not.toHaveProperty("lastReview");
   });
 
   it("saves an order the list reports as position, keeping it sorted by path", async () => {
@@ -163,6 +160,17 @@ describe("repository order and latest review", () => {
       ["team/b", 2],
       ["team/c", 0],
     ]);
+  });
+
+  it("lets overlapping reorders finish one after the other", async () => {
+    const repos = await Promise.all(["team/a", "team/b", "team/c", "team/d"].map((path) => addRepo(path)));
+    const ids = repos.map((repo) => repo.id);
+
+    const results = await Promise.all([reorder(ids), reorder([...ids].reverse())]);
+
+    expect(results.map((res) => res.status)).toEqual([204, 204]);
+    const positions = (await listed()).map((repo: { position: number }) => repo.position);
+    expect([[0, 1, 2, 3], [3, 2, 1, 0]]).toContainEqual(positions);
   });
 
   it("409s unless the ids are exactly the workspace's repositories", async () => {

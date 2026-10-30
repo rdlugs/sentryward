@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { useGlobalConfig } from "@/features/config/api"
+import { hasOverrides, useGlobalConfig } from "@/features/config/api"
 import { DEFAULT_CONFIG_TAB, isConfigTab, type ConfigTab } from "@/features/config/tabs"
 import { GlobalConfigForm } from "@/features/config/GlobalConfigForm"
 import { FollowGlobalSwitch, RepoConfigForm } from "@/features/config/RepoConfigForm"
@@ -43,7 +43,7 @@ export function ConfigurationPage() {
           label: repo.fullPath,
           description: repo.account.login,
           keywords: [repo.account.login],
-          badge: !repo.followGlobal && Object.keys(repo.settings).length > 0 && (
+          badge: hasOverrides(repo) && (
             <Badge variant="secondary" className="ml-auto">
               Overrides
             </Badge>

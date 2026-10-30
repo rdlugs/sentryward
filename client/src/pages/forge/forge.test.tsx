@@ -297,7 +297,7 @@ describe("Connections page", () => {
 
       await moveRight("bravo")
 
-      expect(await screen.findByText("Could not save the new order")).toBeInTheDocument()
+      expect(await screen.findByText("Connections changed")).toBeInTheDocument()
       await waitFor(() => expect(accounts()).toEqual(["bravo", "alpha", "charlie"]))
     })
 
@@ -542,7 +542,6 @@ const addedRepo = (id: string, fullPath: string, extra: Record<string, unknown> 
   enabled: true,
   settings: {},
   position: null,
-  lastReview: null,
   ...extra,
 })
 
@@ -943,8 +942,45 @@ describe("Repositories page", () => {
 
       await moveRight("team/web")
 
-      expect(await screen.findByText("Could not save the repository order")).toBeInTheDocument()
+      // The server's explanation, not a generic failure.
+      expect(await screen.findByText("Repositories changed")).toBeInTheDocument()
       await waitFor(() => expect(repoOrder()).toEqual(["team/web", "team/api", "team/docs"]))
+    })
+
+    it("falls back to a generic message for other failures", async () => {
+      mockApi({ ...routes, "PUT /api/repos/order": () => jsonResponse(500, { message: "boom" }) })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+
+      await moveRight("team/web")
+
+      expect(await screen.findByText("Could not save the repository order")).toBeInTheDocument()
+    })
+
+    it("saves quick moves one after the other and keeps the last order", async () => {
+      const saved: unknown[] = []
+      const finishers: ((response: Response) => void)[] = []
+      mockApi({
+        ...routes,
+        "PUT /api/repos/order": (init?: RequestInit) => {
+          saved.push(JSON.parse(String(init?.body)))
+          return new Promise<Response>((resolve) => finishers.push(resolve)) as unknown as Response
+        },
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+
+      await moveRight("team/web")
+      await moveRight("team/web")
+
+      // The second save waits for the first.
+      await waitFor(() => expect(saved).toHaveLength(1))
+      expect(repoOrder()).toEqual(["team/api", "team/docs", "team/web"])
+      finishers[0](new Response(null, { status: 204 }))
+      await waitFor(() => expect(saved).toEqual([{ ids: ["r1", "r3", "r2"] }, { ids: ["r1", "r2", "r3"] }]))
+      // The first save's refetch would bring back the old order; only the last one refetches.
+      expect(repoOrder()).toEqual(["team/api", "team/docs", "team/web"])
+      finishers[1](new Response(null, { status: 204 }))
     })
 
     it("offers no handle while searching or to members", async () => {
@@ -975,15 +1011,14 @@ describe("Repositories page", () => {
       "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
       "GET /api/connections/c1/status": { status: "active" },
       "GET /api/repos": {
-        repos: [
-          addedRepo("r1", "team/api", {
-            lastReview: { id: "j1", number: 7, status: "completed", verdict: "pass", createdAt: "2026-03-15T12:00:00.000Z" },
-          }),
-          addedRepo("r2", "team/web", {
-            lastReview: { id: "j2", number: 8, status: "running", verdict: null, createdAt: "2026-03-15T12:00:00.000Z" },
-          }),
-          addedRepo("r3", "team/docs"),
-        ],
+        repos: [addedRepo("r1", "team/api"), addedRepo("r2", "team/web"), addedRepo("r3", "team/docs")],
+      },
+      // Fetched apart from the list the pickers share; repositories with none are left out.
+      "GET /api/repos/last-reviews": {
+        lastReviews: {
+          r1: { id: "j1", number: 7, status: "completed", verdict: "pass", createdAt: "2026-03-15T12:00:00.000Z" },
+          r2: { id: "j2", number: 8, status: "running", verdict: null, createdAt: "2026-03-15T12:00:00.000Z" },
+        },
       },
     })
     renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
@@ -991,10 +1026,10 @@ describe("Repositories page", () => {
       within(await within(await screen.findByRole("list", { name: "Repositories" })).findByRole("listitem", { name: path }))
 
     const api = await card("team/api")
-    expect(api.getByRole("link", { name: /^!7/ })).toHaveAttribute("href", "/reviews/j1")
+    expect(await api.findByRole("link", { name: /^!7/ })).toHaveAttribute("href", "/reviews/j1")
     expect(api.getByText("Pass")).toBeInTheDocument()
     expect((await card("team/web")).getByText("Running")).toBeInTheDocument()
-    expect((await card("team/docs")).getByText("No reviews yet")).toBeInTheDocument()
+    expect(await (await card("team/docs")).findByText("No reviews yet")).toBeInTheDocument()
   })
 
   it("only locks the switch of the repository being saved", async () => {
@@ -1015,6 +1050,52 @@ describe("Repositories page", () => {
     await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeDisabled())
     expect(screen.getByRole("switch", { name: "Reviews for team/web" })).toBeEnabled()
     finish(jsonResponse(200, { repo: { id: "r1" } }))
+  })
+
+  it("keeps a switch locked while another repository is toggled", async () => {
+    const finish: Record<string, (response: Response) => void> = {}
+    const hold = (id: string) => () =>
+      new Promise<Response>((resolve) => {
+        finish[id] = resolve
+      }) as unknown as Response
+    mockApi({
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": { repos: [addedRepo("r1", "team/api"), addedRepo("r2", "team/web")] },
+      "PATCH /api/repos/r1": hold("r1"),
+      "PATCH /api/repos/r2": hold("r2"),
+    })
+    renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+
+    await userEvent.click(await screen.findByRole("switch", { name: "Reviews for team/api" }))
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeDisabled())
+    await userEvent.click(screen.getByRole("switch", { name: "Reviews for team/web" }))
+
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/web" })).toBeDisabled())
+    // Still waiting on its own save.
+    expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeDisabled()
+    finish.r1(jsonResponse(200, { repo: { id: "r1" } }))
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeEnabled())
+    expect(screen.getByRole("switch", { name: "Reviews for team/web" })).toBeDisabled()
+    finish.r2(jsonResponse(200, { repo: { id: "r2" } }))
+  })
+
+  it("shows repositories a page at a time", async () => {
+    const repos = Array.from({ length: 30 }, (_, index) => addedRepo(`r${index}`, `team/repo-${String(index).padStart(2, "0")}`))
+    mockApi({
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": { repos },
+    })
+    renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+    const items = async () =>
+      within(await screen.findByRole("list", { name: "Repositories" })).getAllByRole("listitem")
+
+    expect(await items()).toHaveLength(24)
+    await userEvent.click(screen.getByRole("button", { name: "Show more (6 remaining)" }))
+
+    expect(await items()).toHaveLength(30)
+    expect(screen.queryByRole("button", { name: /^Show more/ })).not.toBeInTheDocument()
   })
 
   it("asks for confirmation before removing a repository", async () => {

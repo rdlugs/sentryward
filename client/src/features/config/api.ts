@@ -28,6 +28,13 @@ export interface Rule {
 }
 
 // A partial review config; mirrors server/src/review/config/schema.ts.
+// Whether a repository's own saved settings apply instead of the global
+// config. Shared by the Repositories cards and the Configuration picker so the
+// two always agree.
+export function hasOverrides(repo: Pick<ForgeRepo, "followGlobal" | "settings">) {
+  return !repo.followGlobal && Object.keys(repo.settings).length > 0
+}
+
 export interface ConfigOverride {
   profile?: string
   llm?: {

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.ts";
+import { Prisma } from "../generated/prisma/client.ts";
 import { encrypt } from "../lib/crypto.ts";
 import { assertSafeForgeHost } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
@@ -67,21 +68,25 @@ export async function listConnections(req: Request, res: Response) {
 
 export async function reorderConnections(req: Request, res: Response) {
   const { ids } = reorderConnectionsSchema.parse(req.body);
-  const current = await prisma.forgeConnection.findMany({
-    where: { workspaceId: req.workspaceId },
-    select: { id: true },
+  await prisma.$transaction(async (tx) => {
+    // Locking every row up front, always by id, makes overlapping reorders
+    // wait for each other instead of deadlocking on rows taken in request
+    // order, and keeps the check below true until the writes commit.
+    const current = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT id FROM forge_connections
+      WHERE workspace_id = ${req.workspaceId!}::uuid
+      ORDER BY id
+      FOR UPDATE`);
+    // The full set, not a subset: a connection added or removed since the page
+    // loaded would otherwise land somewhere nobody chose.
+    const known = new Set(current.map((connection) => connection.id));
+    if (ids.length !== known.size || !ids.every((id) => known.has(id))) {
+      throw new HttpError(409, "Connections changed since the page loaded; reload and try again");
+    }
+    for (const [position, id] of ids.entries()) {
+      await tx.forgeConnection.update({ where: { id }, data: { position } });
+    }
   });
-  // The full set, not a subset: a connection added or removed since the page
-  // loaded would otherwise land somewhere nobody chose.
-  const known = new Set(current.map((connection) => connection.id));
-  if (ids.length !== known.size || !ids.every((id) => known.has(id))) {
-    throw new HttpError(409, "Connections changed since the page loaded; reload and try again");
-  }
-  await prisma.$transaction(
-    ids.map((id, position) =>
-      prisma.forgeConnection.updateMany({ where: { id, workspaceId: req.workspaceId }, data: { position } }),
-    ),
-  );
   res.status(204).end();
 }
 

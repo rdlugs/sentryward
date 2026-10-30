@@ -715,7 +715,8 @@ so scripts written before workspaces keep working. Routes under
 | GET    | `/api/connections/gitlab/oauth/start?workspace=` | Session only: redirects to GitLab's OAuth authorize page with a single-use state (PKCE) |
 | GET    | `/api/connections/gitlab/oauth/callback` | Session only: GitLab's OAuth redirect URI; validates the state, exchanges the code and stores the connection |
 | DELETE | `/api/connections/:id` | Removes a connection and its repositories |
-| GET    | `/api/repos?connectionId=` | Repositories the connection can see, by path, with their enabled flag, `position` (the Repositories tab's saved order, or null) and `lastReview` (newest run that wasn't skipped or superseded, or null) |
+| GET    | `/api/repos?connectionId=` | Repositories the connection can see, by path, with their enabled flag and `position` (the Repositories tab's saved order, or null) |
+| GET    | `/api/repos/last-reviews` | `{ lastReviews }`, each added repository's newest run that wasn't skipped or superseded, by repository id; repositories with none are left out |
 | PUT    | `/api/repos/order`   | Admins: `{ ids }`, every added repository in the workspace in the order to show them; 409 if the set has changed |
 | POST   | `/api/repos`         | `{ connectionId, externalId }`, enables a repository for review |
 | PATCH  | `/api/repos/:id`     | `{ enabled?, settings?, followGlobal? }`; `settings` replaces the saved review overrides, `followGlobal` makes the repository ignore them and use only the global config |

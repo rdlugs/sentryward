@@ -337,6 +337,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `PUT /api/connections/order` endpoint in a new `forge_connections.position`
   column; connections added later go after the ordered ones. Reordering is
   off while searching or filtering, since the order belongs to the whole list.
+  Quick successive drags are saved one after the other, so the last order
+  chosen is the one stored, and overlapping saves (two admins at once) wait
+  for each other instead of failing. A save refused because the list changed
+  says so rather than showing a generic error.
 - "Reconnect" on a connection whose credentials the forge rejected. It opens
   the connect sheet with that connection's provider, hosting option and host
   already filled in, so connecting the same account again resumes automatic
@@ -348,8 +352,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `position`, which the Repositories tab sorts by, with unplaced ones last.
 - Each repository card shows its last review: the verdict (or status while it
   is queued, running or failed), the pull or merge request number and how long
-  ago, linking to the review. `GET /api/repos` returns it as `lastReview`,
-  read in one query; skipped and superseded runs don't count. A new
+  ago, linking to the review. The new `GET /api/repos/last-reviews` endpoint
+  returns them, read in one query, so pages that only list repositories don't
+  pay for it; skipped and superseded runs don't count. A new
   `review_jobs (repository_id, created_at)` index serves it.
 
 ### Changed
@@ -366,8 +371,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   controls. Each card shows the path (linking to the forge), account, default
   branch, connection status, whether it uses global or custom settings, its
   last review and the review switch. Column sorting and pagination are gone
-  from this tab, replaced by the saved drag order. Turning reviews on or off
-  now only locks that repository's switch while it saves, not every switch.
+  from this tab, replaced by the saved drag order; it shows 24 cards at a
+  time with a "Show more" button. Turning reviews on or off now only locks
+  that repository's switch while it saves, not every switch.
 - Redesigned login, sign-up, password reset and invite pages. On wide screens
   they split into a product panel (what Sentryward does, light or dark with
   the theme) beside the form; on phones only the form shows, under the logo.

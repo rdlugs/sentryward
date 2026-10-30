@@ -2,16 +2,6 @@ import { useEffect, useMemo, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useSearchParams } from "react-router"
-import {
-  closestCenter,
-  DndContext,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from "@dnd-kit/core"
-import { arrayMove, rectSortingStrategy, SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable"
 import { Loader2, Plug, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
@@ -58,9 +48,10 @@ import {
 import { FORGE_KIND_OPTIONS, forgeKey } from "@/features/forge/forgeKind"
 import { ConnectionCard } from "@/features/forge/ConnectionCard"
 import { ConnectionDetailsSheet } from "@/features/forge/ConnectionDetailsSheet"
+import { SortableGrid } from "@/features/forge/SortableGrid"
 import { isProvider, offersOAuth, PROVIDER_IDS, PROVIDERS, type TokenMethod } from "@/features/forge/providers"
 import type { Provider } from "@/features/reviews/types"
-import { apiWorkspace } from "@/lib/api"
+import { ApiError, apiWorkspace } from "@/lib/api"
 
 // The install (or OAuth sign-in) starts with a browser navigation, which cannot carry the
 // workspace header, so a team workspace goes in the query instead.
@@ -189,39 +180,31 @@ function ConnectionGrid({
   const reorder = useReorderConnections()
   const [selected, setSelected] = useState<Connection | null>(null)
   const [removing, setRemoving] = useState<Connection | null>(null)
-  const sensors = useSensors(
-    // A few pixels of travel before a drag starts, so clicking the handle stays a click.
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  )
 
-  function onDragEnd({ active, over }: DragEndEvent) {
-    if (!over || active.id === over.id) return
-    const ids = connections.map((connection) => connection.id)
-    const moved = arrayMove(ids, ids.indexOf(String(active.id)), ids.indexOf(String(over.id)))
-    reorder.mutate(moved, { onError: () => toast.error("Could not save the new order") })
+  function onReorder(ids: string[]) {
+    reorder.mutate(ids, {
+      // A 409 says the list changed under the user, which a generic message would hide.
+      onError: (err) =>
+        toast.error(err instanceof ApiError && err.status === 409 ? err.message : "Could not save the new order"),
+    })
   }
 
   return (
     <>
       {connections.length ? (
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-          <SortableContext items={connections.map((connection) => connection.id)} strategy={rectSortingStrategy}>
-            <ul aria-label="Connections" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {connections.map((connection) => (
-                <ConnectionCard
-                  key={connection.id}
-                  connection={connection}
-                  status={statuses[connection.id]}
-                  reorderable={reorderable}
-                  onDetails={() => setSelected(connection)}
-                  onRemove={() => setRemoving(connection)}
-                  onReconnect={() => onReconnect(connection)}
-                />
-              ))}
-            </ul>
-          </SortableContext>
-        </DndContext>
+        <SortableGrid ids={connections.map((connection) => connection.id)} label="Connections" onReorder={onReorder}>
+          {connections.map((connection) => (
+            <ConnectionCard
+              key={connection.id}
+              connection={connection}
+              status={statuses[connection.id]}
+              reorderable={reorderable}
+              onDetails={() => setSelected(connection)}
+              onRemove={() => setRemoving(connection)}
+              onReconnect={() => onReconnect(connection)}
+            />
+          ))}
+        </SortableGrid>
       ) : (
         <Empty className="border border-dashed">
           <EmptyHeader>

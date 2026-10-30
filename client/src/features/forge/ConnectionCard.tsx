@@ -1,7 +1,7 @@
 import { Link } from "react-router"
 import { useSortable } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { FolderGit2, GripVertical, Info, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react"
+import { FolderGit2, Info, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter } from "@/components/ui/card"
 import {
@@ -16,6 +16,7 @@ import type { Connection, ConnectionStatus } from "./api"
 import { ConnectionStatusBadge } from "./ConnectionStatusBadge"
 import { kindLabel } from "./forgeKind"
 import { PROVIDERS } from "./providers"
+import { DragHandle } from "./SortableGrid"
 
 function formatDate(value: string) {
   return new Date(value).toLocaleDateString(undefined, { dateStyle: "medium" })
@@ -94,16 +95,12 @@ export function ConnectionCard({
         <CardContent className="flex flex-1 flex-col gap-3">
           <div className="flex items-start gap-2">
             {reorderable && (
-              <button
-                ref={setActivatorNodeRef}
-                type="button"
-                className="-ml-1 flex h-8 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:cursor-grabbing"
-                {...attributes}
-                {...listeners}
-                aria-label={`Reorder ${connection.accountLogin}`}
-              >
-                <GripVertical className="size-4" />
-              </button>
+              <DragHandle
+                label={`Reorder ${connection.accountLogin}`}
+                handleRef={setActivatorNodeRef}
+                attributes={attributes}
+                listeners={listeners}
+              />
             )}
             <span className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background">
               <provider.icon className="size-4" aria-hidden />
