@@ -7,6 +7,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { Sort } from "@/hooks/use-sort"
+import { rowClick } from "@/lib/rowClick"
 import { SeverityBadge } from "@/features/reviews/badges"
 import { changeLabel } from "@/features/reviews/links"
 import { IgnoreFindingDialog } from "./IgnoreFindingDialog"
@@ -92,7 +93,7 @@ export function FindingsTable({
       <TableBody>
         {!findings.length && <NoMatchesRow colSpan={COLUMNS.length + 1}>{emptyMessage}</NoMatchesRow>}
         {findings.map((finding) => (
-          <TableRow key={finding.id}>
+          <TableRow key={finding.id} onClick={rowClick(() => onOpen(finding))} className="cursor-pointer">
             <TableCell className="max-w-md whitespace-normal">
               <button
                 type="button"

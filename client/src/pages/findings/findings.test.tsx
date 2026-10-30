@@ -427,6 +427,8 @@ describe("Findings page", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Actions for SQL built from input" }))
     await userEvent.click(await screen.findByRole("menuitem", { name: "Ignore" }))
     const dialog = await screen.findByRole("dialog", { name: "Ignore this finding?" })
+    // The menu is portaled, so its clicks bubble to the row; they must not open the sheet.
+    expect(screen.queryByRole("dialog", { name: "SQL built from input" })).not.toBeInTheDocument()
 
     // A reason is required.
     await userEvent.click(within(dialog).getByRole("button", { name: "Ignore finding" }))
@@ -618,6 +620,19 @@ describe("Finding details sheet", () => {
     expect(within(sheet).getByRole("link", { name: "Open review" })).toHaveAttribute("href", "/reviews/review-1")
     // Still on the findings page underneath.
     expect(screen.getByRole("table", { hidden: true })).toBeInTheDocument()
+  })
+
+  it("opens the finding from anywhere on its row", async () => {
+    mockApi({
+      "GET /api/findings?page=1&limit=10": page([finding]),
+      "GET /api/findings/f-1": findingDetail,
+    })
+    renderWithProviders(<App />, { route: "/findings" })
+
+    const row = (await screen.findByRole("button", { name: "SQL built from input" })).closest("tr")!
+    await userEvent.click(within(row).getByText("web"))
+
+    expect(await screen.findByRole("dialog", { name: "SQL built from input" })).toBeInTheDocument()
   })
 
   it("explains when the full text is gone", async () => {
