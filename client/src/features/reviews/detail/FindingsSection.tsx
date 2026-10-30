@@ -1,14 +1,19 @@
-import { useMemo, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import { useSearchParams } from "react-router"
 import { ChevronsDownUp, ChevronsUpDown, FileCode } from "lucide-react"
 import { SearchInput } from "@/components/TableFilters"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { copyToClipboard } from "@/lib/clipboard"
 import { ALL } from "@/lib/filters"
 import { cn } from "@/lib/utils"
+import { findingPrompt } from "../agentPrompt"
 import { BUCKET_ICON } from "../icons"
 import { SEVERITY_CLASS } from "../severity"
 import { FindingCard } from "../FindingCard"
+import { SeverityJump } from "./SeverityJump"
+import { ShortcutsDialog } from "./ShortcutsDialog"
+import { useFindingShortcuts } from "./useFindingShortcuts"
 import {
   BUCKET_ORDER,
   BUCKET_TITLE,
@@ -98,6 +103,63 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
       (!filters.bucket || f.bucket === filters.bucket) &&
       (!fileQuery || f.file.toLowerCase().includes(fileQuery)),
   )
+
+  // Render order (bucket, then file), so keyboard navigation and the severity
+  // jump follow what is on screen rather than the order the model reported.
+  const ordered = BUCKET_ORDER.flatMap((bucket) =>
+    groupByFile(visible.filter((f) => f.bucket === bucket)).flatMap(([, items]) => items),
+  )
+  const visibleCounts = Object.fromEntries(
+    SEVERITIES.map((s) => [s, visible.filter((f) => f.severity === s).length]),
+  ) as Record<Severity, number>
+
+  // The finding j/k/o/c act on. Kept in sync with Tab and clicks through the
+  // cards' onFocus; a finding hidden by a filter no longer counts as current.
+  const [current, setCurrent] = useState<string | null>(null)
+  const currentIndex = ordered.findIndex((f) => f.fingerprint === current)
+  const triggers = useRef(new Map<string, HTMLButtonElement>())
+  const [helpOpen, setHelpOpen] = useState(false)
+
+  function focusFinding(fingerprint: string, block: ScrollLogicalPosition) {
+    const trigger = triggers.current.get(fingerprint)
+    if (!trigger) return
+    // jsdom has no scrollIntoView. focusVisible keeps the ring on a jump started with the mouse.
+    trigger.scrollIntoView?.({ block })
+    trigger.focus({ preventScroll: true, focusVisible: true })
+    setCurrent(fingerprint)
+  }
+
+  function step(delta: 1 | -1) {
+    if (!ordered.length) return
+    const index =
+      currentIndex === -1
+        ? delta === 1
+          ? 0
+          : ordered.length - 1
+        : Math.min(Math.max(currentIndex + delta, 0), ordered.length - 1)
+    focusFinding(ordered[index].fingerprint, "nearest")
+  }
+
+  function jumpTo(severity: Severity) {
+    const first = ordered.find((f) => f.severity === severity)
+    if (first) focusFinding(first.fingerprint, "start")
+  }
+
+  useFindingShortcuts({
+    next: () => step(1),
+    previous: () => step(-1),
+    toggle: () => {
+      const finding = ordered[currentIndex]
+      if (finding) toggle(finding.fingerprint, !open.has(finding.fingerprint))
+    },
+    copy: () => {
+      const finding = ordered[currentIndex]
+      if (finding) void copyToClipboard(findingPrompt(finding), "Agent prompt")
+    },
+    help: () => {
+      if (result.findings.length) setHelpOpen(true)
+    },
+  })
 
   function setAll(expanded: boolean) {
     setOpen((prev) => {
@@ -194,6 +256,9 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
         </div>
       </div>
 
+      <SeverityJump counts={visibleCounts} onJump={jumpTo} onShowShortcuts={() => setHelpOpen(true)} />
+      <ShortcutsDialog open={helpOpen} onOpenChange={setHelpOpen} />
+
       {visible.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
           No findings match these filters.
@@ -234,6 +299,13 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
                         change={result.change}
                         open={open.has(finding.fingerprint)}
                         onOpenChange={(expanded) => toggle(finding.fingerprint, expanded)}
+                        onFocus={() => setCurrent(finding.fingerprint)}
+                        triggerRef={(el) => {
+                          if (el) triggers.current.set(finding.fingerprint, el)
+                          return () => {
+                            triggers.current.delete(finding.fingerprint)
+                          }
+                        }}
                       />
                     ))}
                   </div>

@@ -844,6 +844,137 @@ describe("Review detail page", () => {
     expect(writeText.mock.calls[0][0]).toContain("Suggested replacement for those lines:\n\ndb.query(sql, [q])")
   })
 
+  // The card trigger's accessible name starts with its severity badge.
+  const findingTrigger = (title: string) => screen.getByRole("button", { name: new RegExp(title) })
+  // Holds Ctrl for every key in the sequence, e.g. ctrl("jj") is Ctrl+J twice.
+  const ctrl = (keys: string) => `{Control>}${keys}{/Control}`
+
+  it("moves between findings in display order with Ctrl+J and Ctrl+K and toggles them with Ctrl+O and Enter", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard(ctrl("j"))
+    expect(findingTrigger("SQL injection")).toHaveFocus()
+    await user.keyboard(ctrl("jj"))
+    expect(findingTrigger("Rename c")).toHaveFocus()
+    // Stops at the last finding instead of wrapping.
+    await user.keyboard(ctrl("j"))
+    expect(findingTrigger("Rename c")).toHaveFocus()
+    await user.keyboard(ctrl("k"))
+    expect(findingTrigger("Caller ignores result")).toHaveFocus()
+
+    const caller = findingTrigger("Caller ignores result")
+    expect(caller).toHaveAttribute("aria-expanded", "false")
+    await user.keyboard(ctrl("o"))
+    expect(caller).toHaveAttribute("aria-expanded", "true")
+    await user.keyboard("{Enter}")
+    expect(caller).toHaveAttribute("aria-expanded", "false")
+  })
+
+  it("ignores the shortcut letters without Ctrl", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard("j?")
+    expect(findingTrigger("SQL injection")).not.toHaveFocus()
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument()
+  })
+
+  it("continues keyboard navigation from a finding focused with the mouse", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    await user.click(await screen.findByRole("button", { name: /Caller ignores result/ }))
+    await user.keyboard(ctrl("j"))
+    expect(findingTrigger("Rename c")).toHaveFocus()
+  })
+
+  it("copies the focused finding's agent prompt with Ctrl+C", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    // Nothing focused yet, so nothing to copy.
+    await user.keyboard(ctrl("c"))
+    expect(writeText).not.toHaveBeenCalled()
+
+    await user.keyboard(ctrl("jc"))
+    expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/^In src\/app\.ts around line 11: SQL injection in search/))
+  })
+
+  it("leaves Ctrl+C to the browser while text is selected", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard(ctrl("j"))
+    window.getSelection()?.selectAllChildren(screen.getByText("SQL injection in search"))
+    await user.keyboard(ctrl("c"))
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it("ignores shortcuts while typing in the file filter", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const search = await screen.findByRole("searchbox", { name: "Filter by file path" })
+    await user.type(search, "jk?")
+    await user.keyboard(ctrl("j?"))
+    expect(search).toHaveValue("jk?")
+    expect(search).toHaveFocus()
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument()
+  })
+
+  it("lists the shortcuts in a dialog opened with Ctrl+? or the severity bar's button", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard(ctrl("?"))
+    const dialog = await screen.findByRole("dialog", { name: "Keyboard shortcuts" })
+    expect(within(dialog).getByText("Next finding")).toBeInTheDocument()
+    expect(within(dialog).getByText("Copy the agent prompt for the focused finding")).toBeInTheDocument()
+    // Shortcuts do not act on the findings behind the open dialog.
+    await user.keyboard(ctrl("j"))
+    expect(screen.getByRole("button", { name: /SQL injection/, hidden: true })).not.toHaveFocus()
+
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+    const bar = screen.getByRole("navigation", { name: "Jump to severity" })
+    await user.click(within(bar).getByRole("button", { name: "Keyboard shortcuts" }))
+    expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument()
+  })
+
+  it("jumps to the first finding of a severity, counting only the visible findings", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const bar = await screen.findByRole("navigation", { name: "Jump to severity" })
+    await user.click(within(bar).getByRole("button", { name: "Jump to first major finding (1)" }))
+    expect(findingTrigger("Caller ignores result")).toHaveFocus()
+    // The jump moves the keyboard position too.
+    await user.keyboard(ctrl("j"))
+    expect(findingTrigger("Rename c")).toHaveFocus()
+
+    const toolbar = screen.getByRole("toolbar", { name: "Filter findings" })
+    await user.click(within(toolbar).getByRole("button", { name: /critical/ }))
+    expect(within(bar).getByRole("button", { name: "Jump to first major finding (0)" })).toBeDisabled()
+    expect(within(bar).getByRole("button", { name: "Jump to first critical finding (1)" })).toBeEnabled()
+  })
+
   // The export actions live in the header's Export menu, which closes after each pick.
   async function exportItem(name: string, user: Pick<typeof userEvent, "click"> = userEvent) {
     await user.click(await screen.findByRole("button", { name: "Export" }))
