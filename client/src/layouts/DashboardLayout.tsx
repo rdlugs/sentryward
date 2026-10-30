@@ -1,4 +1,4 @@
-import { Suspense } from "react"
+import { Suspense, useState } from "react"
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import {
   Bell,
@@ -12,6 +12,7 @@ import {
   House,
   KeyRound,
   LogOut,
+  Search,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
@@ -23,6 +24,7 @@ import { DensityToggle } from "@/components/density-toggle"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ModeToggle } from "@/components/mode-toggle"
 import { UserAvatar } from "@/components/UserAvatar"
+import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,11 +51,13 @@ import {
 } from "@/components/ui/sidebar"
 import { FullPageSpinner } from "@/features/auth/FullPageSpinner"
 import { useAuth } from "@/features/auth/useAuth"
+import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
 import { WorkspaceSwitcher } from "@/features/workspaces/WorkspaceSwitcher"
+import { CommandPalette } from "./CommandPalette"
 import { useNavAttention, type NavAttention } from "./useNavAttention"
 
-type NavItem = { to: string; label: string; icon: typeof House }
-type NavGroup = { label?: string; adminOnly?: boolean; items: NavItem[] }
+export type NavItem = { to: string; label: string; icon: typeof House }
+export type NavGroup = { label?: string; adminOnly?: boolean; items: NavItem[] }
 
 // Grouped by what you come to do: follow reviews, read the numbers, set the
 // workspace up (in the order a new workspace needs it), run the instance.
@@ -94,6 +98,10 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
 ]
+
+// The top bar's hint for the palette; Ctrl+K and Cmd+K both work everywhere.
+const PALETTE_SHORTCUT =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K"
 
 // Where you are, for the top bar; each page renders its own h1. Groups have no
 // page of their own, so they are plain text rather than links.
@@ -169,6 +177,9 @@ export function DashboardLayout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const attention = useNavAttention(pathname)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  // Here rather than on a page, so a manual review can be started from anywhere.
+  const [reviewOpen, setReviewOpen] = useState(false)
 
   async function handleLogout() {
     try {
@@ -266,6 +277,24 @@ export function DashboardLayout() {
             </ol>
           </nav>
           <div className="ml-auto flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Search"
+              aria-keyshortcuts="Control+K Meta+K"
+            >
+              <Search />
+              <span className="hidden sm:inline">Search</span>
+              <kbd className="ml-2 hidden rounded border bg-muted px-1 font-mono text-[0.7rem] sm:inline">
+                {PALETTE_SHORTCUT}
+              </kbd>
+            </Button>
+            <Button size="sm" onClick={() => setReviewOpen(true)} aria-label="Review a PR">
+              <GitPullRequest />
+              <span className="hidden sm:inline">Review a PR</span>
+            </Button>
             <DensityToggle />
             <ModeToggle />
           </div>
@@ -279,6 +308,13 @@ export function DashboardLayout() {
             <Outlet key={workspace?.id} />
           </Suspense>
         </ErrorBoundary>
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          groups={groups}
+          onStartReview={() => setReviewOpen(true)}
+        />
+        <ManualReviewSheet open={reviewOpen} onOpenChange={setReviewOpen} />
       </SidebarInset>
     </SidebarProvider>
   )
