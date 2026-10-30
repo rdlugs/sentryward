@@ -4,7 +4,7 @@ import { app } from "../src/app.ts";
 import { decrypt, encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
-import { createUser } from "./helpers/users.ts";
+import { addMember, createTeam, createUser, inWorkspace } from "./helpers/users.ts";
 
 let cookie: string;
 let connectionId: string;
@@ -114,6 +114,92 @@ describe("GET /api/repos", () => {
       }),
       expect.objectContaining({ fullPath: "team/web", connectionId, account: { login: "dev", provider: "gitlab", host: "gitlab.com" } }),
     ]);
+  });
+});
+
+describe("repository order and latest review", () => {
+  const addRepo = (fullPath: string, connection = connectionId) =>
+    prisma.repository.create({
+      data: { connectionId: connection, provider: "gitlab", host: "gitlab.com", fullPath, externalId: fullPath, defaultBranch: "main" },
+    });
+  const listed = async () => (await request(app).get("/api/repos").set("Cookie", cookie)).body.repos;
+  const reorder = (ids: string[]) => request(app).put("/api/repos/order").set("Cookie", cookie).send({ ids });
+
+  it("returns each repository's newest review that ran, or null", async () => {
+    const api = await addRepo("team/api");
+    await addRepo("team/web");
+    const job = (status: "completed" | "skipped" | "superseded" | "running", number: number, createdAt: string) =>
+      prisma.reviewJob.create({
+        data: { repositoryId: api.id, number, headSha: "h", trigger: "manual", status, createdAt: new Date(createdAt) },
+      });
+    await job("completed", 1, "2026-01-01");
+    const newest = await job("running", 2, "2026-01-02");
+    await job("skipped", 3, "2026-01-03");
+    await job("superseded", 4, "2026-01-04");
+
+    const repos = await listed();
+
+    expect(repos.map((repo: { fullPath: string }) => repo.fullPath)).toEqual(["team/api", "team/web"]);
+    expect(repos[0].lastReview).toEqual({
+      id: newest.id,
+      number: 2,
+      status: "running",
+      verdict: null,
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    expect(repos[1].lastReview).toBeNull();
+  });
+
+  it("saves an order the list reports as position, keeping it sorted by path", async () => {
+    const a = await addRepo("team/a");
+    const b = await addRepo("team/b");
+    const c = await addRepo("team/c");
+
+    expect((await reorder([c.id, a.id, b.id])).status).toBe(204);
+
+    const repos = await listed();
+    expect(repos.map((repo: { fullPath: string; position: number }) => [repo.fullPath, repo.position])).toEqual([
+      ["team/a", 1],
+      ["team/b", 2],
+      ["team/c", 0],
+    ]);
+  });
+
+  it("409s unless the ids are exactly the workspace's repositories", async () => {
+    const other = await createUser("other@example.com");
+    const foreign = await prisma.forgeConnection.create({
+      data: { workspaceId: other.workspace.id, provider: "gitlab", host: "gitlab.com", kind: "token", accountLogin: "x" },
+    });
+    const a = await addRepo("team/a");
+    const b = await addRepo("team/b");
+    const theirs = await addRepo("them/x", foreign.id);
+
+    expect((await reorder([a.id])).status).toBe(409);
+    expect((await reorder([a.id, b.id, theirs.id])).status).toBe(409);
+    expect((await reorder([a.id, theirs.id])).status).toBe(409);
+    expect((await reorder([a.id, a.id])).status).toBe(400);
+    const stored = await prisma.repository.findMany({ select: { position: true } });
+    expect(stored.every((repo) => repo.position === null)).toBe(true);
+  });
+
+  it("refuses workspace members who are not admins", async () => {
+    const owner = await createUser("owner@example.com");
+    const team = await createTeam(owner.user.id, "Acme");
+    const me = await prisma.user.findUniqueOrThrow({ where: { email: "dev@example.com" } });
+    await addMember(team.id, me.id, "member");
+    const teamConnection = await prisma.forgeConnection.create({
+      data: { workspaceId: team.id, provider: "gitlab", host: "gitlab.com", kind: "token", accountLogin: "acme" },
+    });
+    const repo = await addRepo("acme/api", teamConnection.id);
+
+    const res = await request(app)
+      .put("/api/repos/order")
+      .set("Cookie", cookie)
+      .set(...inWorkspace(team.id))
+      .send({ ids: [repo.id] });
+
+    expect(res.status).toBe(403);
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).position).toBeNull();
   });
 });
 

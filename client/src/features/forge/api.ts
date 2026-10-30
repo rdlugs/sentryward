@@ -74,10 +74,25 @@ export interface ForgeRepo {
   settings: ConfigOverride
   // Ignore `settings` and use the global config.
   followGlobal: boolean
+  // Place in the Repositories tab's dragged order; null sorts last, by path.
+  position: number | null
+  // Newest review that ran (skipped and superseded runs do not count).
+  lastReview: { id: string; number: number; status: JobStatus; verdict: Verdict | null; createdAt: string } | null
+}
+
+// The Repositories tab's order. The API lists by path for the pickers that share it.
+export function byPosition(a: ForgeRepo, b: ForgeRepo) {
+  if (a.position !== b.position) {
+    if (a.position === null) return 1
+    if (b.position === null) return -1
+    return a.position - b.position
+  }
+  return a.fullPath.localeCompare(b.fullPath)
 }
 
 // A repository the forge account can see; id is null until it is added.
-export interface AvailableRepo extends Omit<ForgeRepo, "id" | "connectionId" | "account" | "followGlobal"> {
+export interface AvailableRepo
+  extends Omit<ForgeRepo, "id" | "connectionId" | "account" | "followGlobal" | "position" | "lastReview"> {
   id: string | null
   private: boolean
 }
@@ -188,11 +203,60 @@ export function useDeleteConnection() {
   })
 }
 
+type ConnectionsData = NonNullable<ReturnType<typeof useConnections>["data"]>
+
+// Takes the whole list in its new order. The cache is reordered first so a
+// dropped card stays where it was dropped, and put back if the save fails.
+export function useReorderConnections() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: string[]) =>
+      api<void>("/connections/order", { method: "PUT", body: JSON.stringify({ ids }) }),
+    onMutate: async (ids) => {
+      await queryClient.cancelQueries({ queryKey: ["connections"], exact: true })
+      const previous = queryClient.getQueryData<ConnectionsData>(["connections"])
+      if (previous) {
+        const byId = new Map(previous.connections.map((connection) => [connection.id, connection]))
+        const connections = ids.flatMap((id) => byId.get(id) ?? [])
+        queryClient.setQueryData<ConnectionsData>(["connections"], { ...previous, connections })
+      }
+      return { previous }
+    },
+    onError: (_error, _ids, context) => {
+      if (context?.previous) queryClient.setQueryData(["connections"], context.previous)
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["connections"], exact: true }),
+  })
+}
+
 // Added repositories across every connection.
 export function useRepos() {
   return useQuery({
     queryKey: ["repos"],
     queryFn: () => api<{ repos: ForgeRepo[] }>("/repos"),
+  })
+}
+
+// Like useReorderConnections, but the cache keeps its path order for the
+// pickers that share it, so the new order goes onto each row's position.
+export function useReorderRepos() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: string[]) => api<void>("/repos/order", { method: "PUT", body: JSON.stringify({ ids }) }),
+    onMutate: async (ids) => {
+      await queryClient.cancelQueries({ queryKey: ["repos"], exact: true })
+      const previous = queryClient.getQueryData<{ repos: ForgeRepo[] }>(["repos"])
+      if (previous) {
+        const positions = new Map(ids.map((id, index) => [id, index]))
+        const repos = previous.repos.map((repo) => ({ ...repo, position: positions.get(repo.id) ?? repo.position }))
+        queryClient.setQueryData(["repos"], { ...previous, repos })
+      }
+      return { previous }
+    },
+    onError: (_error, _ids, context) => {
+      if (context?.previous) queryClient.setQueryData(["repos"], context.previous)
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["repos"], exact: true }),
   })
 }
 

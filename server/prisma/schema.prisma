@@ -286,6 +286,9 @@ model ForgeConnection {
   // credentials. While set, repository hooks queue nothing; reconnecting the
   // account or a passing status check clears it.
   credentialsRejectedAt DateTime?      @map("credentials_rejected_at") @db.Timestamptz
+  // Order an admin dragged the Connections tab into. Null (never reordered, or
+  // added since) sorts after by creation, so the create paths leave it alone.
+  position              Int?
   createdAt             DateTime       @default(now()) @map("created_at") @db.Timestamptz
   updatedAt             DateTime       @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -332,6 +335,9 @@ model Repository {
   settings               Json          @default("{}")
   // When set, `settings` is ignored and only the workspace's global config applies.
   followGlobal           Boolean       @default(true) @map("follow_global")
+  // Order an admin dragged the Repositories tab into. Null (never reordered,
+  // or added since) sorts after by path, so adding a repository leaves it alone.
+  position               Int?
   // GitLab project hook Sentryward registered, and the secret GitLab sends with it.
   webhookId              String?       @map("webhook_id")
   encryptedWebhookSecret String?       @map("encrypted_webhook_secret")
@@ -401,6 +407,8 @@ model ReviewJob {
   @@index([status, createdAt])
   @@index([status, finishedAt])
   @@index([repositoryId, number])
+  // Each repository's latest review, for the Repositories tab.
+  @@index([repositoryId, createdAt])
   // Same reason as the repository path index: the search is ILIKE '%q%'.
   @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("review_jobs")

@@ -1,25 +1,28 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router"
-import { CircleAlert, FolderGit2, Loader2, MoreHorizontal, Plus, SlidersHorizontal, Trash2 } from "lucide-react"
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core"
+import { arrayMove, rectSortingStrategy, SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable"
+import { CircleAlert, FolderGit2, Loader2, Plus } from "lucide-react"
 import { toast } from "sonner"
-import { SortableHead } from "@/components/SortableHead"
 import {
   ActiveFilterChips,
   FilterPopover,
   FilterSelect,
   FilterToolbar,
-  NoMatchesRow,
   SearchInput,
   type ActiveFilter,
 } from "@/components/TableFilters"
-import { TablePagination } from "@/components/TablePagination"
 import { ALL, matchesQuery, selectedLabel } from "@/lib/filters"
-import { paginate, usePagination } from "@/hooks/use-pagination"
-import { useSort } from "@/hooks/use-sort"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogClose,
@@ -29,28 +32,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Switch } from "@/components/ui/switch"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { useAuth } from "@/features/auth/useAuth"
 import { AddReposSheet } from "@/features/forge/AddReposSheet"
-import { ConnectionStatusBadge } from "@/features/forge/ConnectionStatusBadge"
-import { FORGE_KIND_OPTIONS, forgeKey, kindLabel } from "@/features/forge/forgeKind"
-import { PROVIDERS } from "@/features/forge/providers"
+import { FORGE_KIND_OPTIONS, forgeKey } from "@/features/forge/forgeKind"
+import { RepoCard } from "@/features/forge/RepoCard"
 import {
+  byPosition,
   pausedConnections,
-  statusRank,
   STATUS_OPTIONS,
   useConnectionStatuses,
   useConnections,
   useRemoveRepo,
+  useReorderRepos,
   useRepos,
   useSetRepoEnabled,
   type Connection,
@@ -66,64 +61,28 @@ const REVIEW_OPTIONS = [
 type ConnectionsById = Record<string, Connection | undefined>
 
 // The repo only knows its provider; the connection says how it was connected.
-function repoForge(repo: ForgeRepo, connections: ConnectionsById) {
+function repoForgeKey(repo: ForgeRepo, connections: ConnectionsById) {
   const connection = connections[repo.connectionId]
-  return {
-    key: connection ? forgeKey(connection) : null,
-    label: connection ? kindLabel(connection) : PROVIDERS[repo.account.provider].label,
-    icon: PROVIDERS[repo.account.provider].icon,
-  }
+  return connection ? forgeKey(connection) : null
 }
 
-type SortKey = "repository" | "forge" | "account" | "status" | "defaultBranch" | "reviews"
-
-function compareRepos(
-  a: ForgeRepo,
-  b: ForgeRepo,
-  key: SortKey,
-  statuses: Record<string, ConnectionStatus | undefined>,
-  connections: ConnectionsById,
-) {
-  switch (key) {
-    case "repository":
-      return a.fullPath.localeCompare(b.fullPath)
-    case "forge":
-      return repoForge(a, connections).label.localeCompare(repoForge(b, connections).label)
-    case "account":
-      return a.account.login.localeCompare(b.account.login)
-    case "status":
-      return statusRank(statuses[a.connectionId]) - statusRank(statuses[b.connectionId])
-    case "defaultBranch":
-      return a.defaultBranch.localeCompare(b.defaultBranch)
-    case "reviews":
-      // Enabled first.
-      return Number(b.enabled) - Number(a.enabled)
-  }
-}
-
-function RepoTable({
+function RepoGrid({
   repos,
   statuses,
-  connections,
+  reorderable,
 }: {
   repos: ForgeRepo[]
   statuses: Record<string, ConnectionStatus | undefined>
-  connections: ConnectionsById
+  reorderable: boolean
 }) {
   const setEnabled = useSetRepoEnabled()
-  // Unsorted keeps the API order (by repository path).
-  const { sort, onSort } = useSort<SortKey>()
+  const reorder = useReorderRepos()
   const [removing, setRemoving] = useState<ForgeRepo | null>(null)
-
-  const sorted = useMemo(() => {
-    if (!sort) return repos
-    const direction = sort.dir === "asc" ? 1 : -1
-    return [...repos].sort(
-      (a, b) => direction * compareRepos(a, b, sort.key, statuses, connections) || a.fullPath.localeCompare(b.fullPath),
-    )
-  }, [repos, sort, statuses, connections])
-  const pagination = usePagination()
-  const page = paginate(sorted, pagination.page, pagination.size)
+  const sensors = useSensors(
+    // A few pixels of travel before a drag starts, so clicking the handle stays a click.
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   async function toggle(repo: ForgeRepo, enabled: boolean) {
     try {
@@ -135,68 +94,42 @@ function RepoTable({
     }
   }
 
-  const head = { sort, onSort }
+  // Dragging is only offered on the unfiltered list, so `repos` is the whole
+  // order the server stores.
+  function onDragEnd({ active, over }: DragEndEvent) {
+    if (!over || active.id === over.id) return
+    const ids = repos.map((repo) => repo.id)
+    const moved = arrayMove(ids, ids.indexOf(String(active.id)), ids.indexOf(String(over.id)))
+    reorder.mutate(moved, { onError: () => toast.error("Could not save the repository order") })
+  }
+
   return (
     <>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <SortableHead label="Repository" sortKey="repository" {...head} />
-            <SortableHead label="Forge" sortKey="forge" {...head} />
-            <SortableHead label="Account" sortKey="account" {...head} />
-            <SortableHead label="Connection" sortKey="status" {...head} />
-            <SortableHead label="Default branch" sortKey="defaultBranch" {...head} />
-            <SortableHead label="Reviews" sortKey="reviews" {...head} />
-            <TableHead />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {!sorted.length && <NoMatchesRow colSpan={7}>No repositories match your filters.</NoMatchesRow>}
-          {page.rows.map((repo) => {
-            const forge = repoForge(repo, connections)
-            return (
-              <TableRow key={repo.id}>
-                <TableCell>
-                  <a href={repo.webUrl} target="_blank" rel="noreferrer" className="font-medium hover:underline">
-                    {repo.fullPath}
-                  </a>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline">
-                    <forge.icon />
-                    {forge.label}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {repo.account.login} ({repo.account.host})
-                </TableCell>
-                <TableCell>
-                  <ConnectionStatusBadge status={statuses[repo.connectionId]} />
-                </TableCell>
-                <TableCell className="text-muted-foreground">{repo.defaultBranch}</TableCell>
-                <TableCell>
-                  <Switch
-                    checked={repo.enabled}
-                    onCheckedChange={(checked) => toggle(repo, checked)}
-                    aria-label={`Reviews for ${repo.fullPath}`}
-                    disabled={setEnabled.isPending}
-                  />
-                </TableCell>
-                <TableCell className="text-right">
-                  <RepoActions repo={repo} onRemove={() => setRemoving(repo)} />
-                </TableCell>
-              </TableRow>
-            )
-          })}
-        </TableBody>
-      </Table>
-      <TablePagination
-        page={page.page}
-        size={pagination.size}
-        total={page.total}
-        onPageChange={pagination.setPage}
-        onSizeChange={pagination.setSize}
-      />
+      {repos.length ? (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+          <SortableContext items={repos.map((repo) => repo.id)} strategy={rectSortingStrategy}>
+            <ul aria-label="Repositories" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {repos.map((repo) => (
+                <RepoCard
+                  key={repo.id}
+                  repo={repo}
+                  status={statuses[repo.connectionId]}
+                  reorderable={reorderable}
+                  toggling={setEnabled.isPending && setEnabled.variables?.repo.id === repo.id}
+                  onToggle={(enabled) => toggle(repo, enabled)}
+                  onRemove={() => setRemoving(repo)}
+                />
+              ))}
+            </ul>
+          </SortableContext>
+        </DndContext>
+      ) : (
+        <Empty className="border border-dashed">
+          <EmptyHeader>
+            <EmptyDescription>No repositories match your filters.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
       <RemoveRepoDialog repo={removing} onOpenChange={(open) => !open && setRemoving(null)} />
     </>
   )
@@ -208,8 +141,8 @@ function initialAccount(requested: string | null, connections: Connection[]) {
   return connections.some((connection) => connection.id === requested) ? requested : ALL
 }
 
-// The search and filters sit above the card, so their state lives here and
-// the table only sorts what it is given.
+// The search and filters sit above the grid, so their state lives here and
+// the grid only shows what it is given.
 function RepoList({
   repos,
   connections,
@@ -240,23 +173,15 @@ function RepoList({
       { replace: true },
     )
   }, [params, setParams])
-  const { setPage } = usePagination()
+  const { workspace } = useAuth()
+  const canManage = workspace?.role === "owner" || workspace?.role === "admin"
   const filtering = forge !== ALL || account !== ALL || status !== ALL || reviews !== ALL
-
-  // A new filter or search starts over at the first page.
-  function filterBy<T>(set: (value: T) => void) {
-    return (value: T) => {
-      set(value)
-      setPage(1)
-    }
-  }
 
   function clearFilters() {
     setForge(ALL)
     setAccount(ALL)
     setStatus(ALL)
     setReviews(ALL)
-    setPage(1)
   }
 
   const connectionsById = useMemo<ConnectionsById>(
@@ -272,42 +197,44 @@ function RepoList({
     [connections],
   )
 
+  const ordered = useMemo(() => [...repos].sort(byPosition), [repos])
+
   const filtered = useMemo(
     () =>
-      repos.filter(
+      ordered.filter(
         (repo) =>
           matchesQuery(query, repo.fullPath, repo.account.login, repo.account.host, repo.defaultBranch) &&
-          (forge === ALL || repoForge(repo, connectionsById).key === forge) &&
+          (forge === ALL || repoForgeKey(repo, connectionsById) === forge) &&
           (account === ALL || repo.connectionId === account) &&
           // Connections still being checked match no specific status.
           (status === ALL || statuses[repo.connectionId] === status) &&
           (reviews === ALL || repo.enabled === (reviews === "enabled")),
       ),
-    [repos, query, forge, account, status, reviews, statuses, connectionsById],
+    [ordered, query, forge, account, status, reviews, statuses, connectionsById],
   )
 
   const activeFilters = [
-    { label: "Forge", value: selectedLabel(forge, FORGE_KIND_OPTIONS), onRemove: () => filterBy(setForge)(ALL) },
-    { label: "Account", value: selectedLabel(account, accountOptions), onRemove: () => filterBy(setAccount)(ALL) },
-    { label: "Connection status", value: selectedLabel(status, STATUS_OPTIONS), onRemove: () => filterBy(setStatus)(ALL) },
-    { label: "Reviews", value: selectedLabel(reviews, REVIEW_OPTIONS), onRemove: () => filterBy(setReviews)(ALL) },
+    { label: "Forge", value: selectedLabel(forge, FORGE_KIND_OPTIONS), onRemove: () => setForge(ALL) },
+    { label: "Account", value: selectedLabel(account, accountOptions), onRemove: () => setAccount(ALL) },
+    { label: "Connection status", value: selectedLabel(status, STATUS_OPTIONS), onRemove: () => setStatus(ALL) },
+    { label: "Reviews", value: selectedLabel(reviews, REVIEW_OPTIONS), onRemove: () => setReviews(ALL) },
   ].filter((filter): filter is ActiveFilter => filter.value !== null)
+
+  // The saved order is the whole list's, so a filtered subset cannot be reordered.
+  const narrowed = filtering || query.trim() !== ""
+  const reorderable = canManage && repos.length > 1 && !narrowed
 
   return (
     <>
-      <FilterToolbar>
-        <ActiveFilterChips filters={activeFilters} />
-        <Button size="sm" onClick={onAdd}>
-          <Plus />
-          Add repository
-        </Button>
-        <FilterPopover active={filtering} onClear={clearFilters}>
+      <FilterToolbar align="start">
+        <SearchInput label="Search repositories" value={query} onChange={setQuery} />
+        <FilterPopover active={filtering} onClear={clearFilters} align="start">
           <FilterSelect
             id="repo-forge"
             label="Forge"
             allLabel="All forges"
             value={forge}
-            onValueChange={filterBy(setForge)}
+            onValueChange={setForge}
             options={FORGE_KIND_OPTIONS}
           />
           {/* With one connection the filter changes nothing, unless it was preset by "Manage repositories". */}
@@ -317,7 +244,7 @@ function RepoList({
               label="Account"
               allLabel="All accounts"
               value={account}
-              onValueChange={filterBy(setAccount)}
+              onValueChange={setAccount}
               options={accountOptions}
             />
           )}
@@ -326,7 +253,7 @@ function RepoList({
             label="Connection status"
             allLabel="All statuses"
             value={status}
-            onValueChange={filterBy(setStatus)}
+            onValueChange={setStatus}
             options={STATUS_OPTIONS}
           />
           <FilterSelect
@@ -334,21 +261,24 @@ function RepoList({
             label="Reviews"
             allLabel="All reviews"
             value={reviews}
-            onValueChange={filterBy(setReviews)}
+            onValueChange={setReviews}
             options={REVIEW_OPTIONS}
           />
         </FilterPopover>
-        <SearchInput label="Search repositories" value={query} onChange={filterBy(setQuery)} />
+        <Button size="sm" onClick={onAdd}>
+          <Plus />
+          Add repository
+        </Button>
+        {/* Last, so applying a filter does not shift the controls. */}
+        <ActiveFilterChips filters={activeFilters} />
       </FilterToolbar>
       <PausedAlert connections={pausedConnections(connections, statuses)} />
-      <Card>
-        <CardHeader>
-          <CardTitle>Repositories</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <RepoTable repos={filtered} statuses={statuses} connections={connectionsById} />
-        </CardContent>
-      </Card>
+      {canManage && repos.length > 1 && (
+        <p className="text-sm text-muted-foreground">
+          {narrowed ? "Clear search and filters to reorder." : "Drag cards by their handle to reorder them."}
+        </p>
+      )}
+      <RepoGrid repos={filtered} statuses={statuses} reorderable={reorderable} />
     </>
   )
 }
@@ -379,33 +309,7 @@ function PausedAlert({ connections }: { connections: Connection[] }) {
   )
 }
 
-function RepoActions({ repo, onRemove }: { repo: ForgeRepo; onRemove: () => void }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="size-8" aria-label={`Actions for ${repo.fullPath}`}>
-          <MoreHorizontal />
-        </Button>
-      </DropdownMenuTrigger>
-      {/* The shared menu matches its trigger's width, which is far too narrow for an icon button. */}
-      <DropdownMenuContent align="end" className="w-max whitespace-nowrap">
-        <DropdownMenuItem asChild>
-          <Link to={`/configuration?repo=${repo.id}`}>
-            <SlidersHorizontal />
-            Review settings
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onRemove}>
-          <Trash2 />
-          Remove
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-// Rendered once beside the table rather than inside the row menu, which
+// Rendered once beside the grid rather than inside a card's menu, which
 // unmounts its items (and any dialog in them) as soon as it closes.
 function RemoveRepoDialog({ repo, onOpenChange }: { repo: ForgeRepo | null; onOpenChange: (open: boolean) => void }) {
   const remove = useRemoveRepo()
@@ -461,8 +365,10 @@ export function RepositoriesTab() {
 
   if (isPending || (connections.length && repos.isPending)) {
     return (
-      <div>
-        <Skeleton className="h-40 w-full" />
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true">
+        {[0, 1, 2].map((index) => (
+          <Skeleton key={index} className="h-48 rounded-xl" />
+        ))}
       </div>
     )
   }

@@ -331,9 +331,43 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `memberships.reviews_viewed_at` column, track the visit per member and
   workspace, so it clears on every device. Leaving the list on a workspace
   switch records the visit in the workspace that was open.
+- Drag-to-reorder connections. Workspace admins can drag a connection card by
+  its handle (or move it with the keyboard: Space, arrow keys, Space) to set
+  the order everyone in the workspace sees. The order is saved by the new
+  `PUT /api/connections/order` endpoint in a new `forge_connections.position`
+  column; connections added later go after the ordered ones. Reordering is
+  off while searching or filtering, since the order belongs to the whole list.
+- "Reconnect" on a connection whose credentials the forge rejected. It opens
+  the connect sheet with that connection's provider, hosting option and host
+  already filled in, so connecting the same account again resumes automatic
+  reviews and keeps its repositories and history.
+- Drag-to-reorder repositories, the same way as connections. The order is
+  saved by the new `PUT /api/repos/order` endpoint in a new
+  `repositories.position` column. `GET /api/repos` still lists by path (the
+  pickers elsewhere rely on that) and now returns each repository's
+  `position`, which the Repositories tab sorts by, with unplaced ones last.
+- Each repository card shows its last review: the verdict (or status while it
+  is queued, running or failed), the pull or merge request number and how long
+  ago, linking to the review. `GET /api/repos` returns it as `lastReview`,
+  read in one query; skipped and superseded runs don't count. A new
+  `review_jobs (repository_id, created_at)` index serves it.
 
 ### Changed
 
+- The Installation tab lists connections as a grid of cards instead of a
+  table. Each card shows the account, host, connection type, status,
+  repository count and who added it and when, with "Manage repositories" and
+  "Details" buttons; the menu keeps Details and Remove. Column sorting and
+  pagination are gone from this tab, replaced by the saved drag order, and
+  it shows skeleton cards while loading instead of a blank area. Its search,
+  filter and "Add connection" controls sit on the left, in that order.
+- The Repositories tab lists repositories as a grid of cards instead of a
+  table, with the same left-aligned search, filter and "Add repository"
+  controls. Each card shows the path (linking to the forge), account, default
+  branch, connection status, whether it uses global or custom settings, its
+  last review and the review switch. Column sorting and pagination are gone
+  from this tab, replaced by the saved drag order. Turning reviews on or off
+  now only locks that repository's switch while it saves, not every switch.
 - Redesigned login, sign-up, password reset and invite pages. On wide screens
   they split into a product panel (what Sentryward does, light or dark with
   the theme) beside the form; on phones only the form shows, under the logo.

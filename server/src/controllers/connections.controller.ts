@@ -30,6 +30,7 @@ import {
   githubInstallSchema,
   gitlabOAuthCallbackSchema,
   gitlabOAuthStartSchema,
+  reorderConnectionsSchema,
 } from "../schemas/connections.schema.ts";
 
 const publicConnection = {
@@ -51,7 +52,7 @@ export async function listConnections(req: Request, res: Response) {
     where: { workspaceId: req.workspaceId },
     // Only enabled repositories count as added, matching the details sheet.
     select: { ...publicConnection, _count: { select: { repositories: { where: { enabled: true } } } } },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ position: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
   });
   const connections = rows.map(({ _count, ...connection }) => ({
     ...connection,
@@ -62,6 +63,26 @@ export async function listConnections(req: Request, res: Response) {
   // (cloud or self-hosted) option.
   const oauthHosts = gitlabOAuthConfigured() ? { gitlab: env.GITLAB_OAUTH_HOST } : {};
   res.json({ connections, availableApps, oauthHosts });
+}
+
+export async function reorderConnections(req: Request, res: Response) {
+  const { ids } = reorderConnectionsSchema.parse(req.body);
+  const current = await prisma.forgeConnection.findMany({
+    where: { workspaceId: req.workspaceId },
+    select: { id: true },
+  });
+  // The full set, not a subset: a connection added or removed since the page
+  // loaded would otherwise land somewhere nobody chose.
+  const known = new Set(current.map((connection) => connection.id));
+  if (ids.length !== known.size || !ids.every((id) => known.has(id))) {
+    throw new HttpError(409, "Connections changed since the page loaded; reload and try again");
+  }
+  await prisma.$transaction(
+    ids.map((id, position) =>
+      prisma.forgeConnection.updateMany({ where: { id, workspaceId: req.workspaceId }, data: { position } }),
+    ),
+  );
+  res.status(204).end();
 }
 
 const RECENT_REVIEWS = 5;

@@ -10,6 +10,14 @@ export const availableReposQuerySchema = z.object({
   connectionId: z.uuid(),
 });
 
+// Every added repository in the workspace, in the order to show them.
+export const reorderReposSchema = z.object({
+  ids: z
+    .array(z.uuid())
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, "Each repository may appear only once"),
+});
+
 export const enableRepoSchema = z.object({
   connectionId: z.uuid(),
   externalId: z.string().min(1),

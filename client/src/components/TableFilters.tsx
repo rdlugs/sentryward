@@ -11,9 +11,14 @@ import { ALL } from "@/lib/filters"
 import { cn } from "@/lib/utils"
 
 // Sits above the table card: active filter chips, filter button, then search,
-// aligned right.
-export function FilterToolbar({ children }: { children: ReactNode }) {
-  return <div className="flex flex-wrap items-center justify-end gap-2">{children}</div>
+// aligned right. Pages without a table (the Connections cards) align it left,
+// search first.
+export function FilterToolbar({ children, align = "end" }: { children: ReactNode; align?: "start" | "end" }) {
+  return (
+    <div className={cn("flex flex-wrap items-center gap-2", align === "end" ? "justify-end" : "justify-start")}>
+      {children}
+    </div>
+  )
 }
 
 export interface ActiveFilter {
@@ -48,10 +53,13 @@ export function FilterPopover({
   children,
   active,
   onClear,
+  align = "end",
 }: {
   children: ReactNode
   active: boolean
   onClear: () => void
+  // Matches the toolbar's side, so the panel opens toward the page rather than off its edge.
+  align?: "start" | "end"
 }) {
   return (
     <Popover>
@@ -61,7 +69,7 @@ export function FilterPopover({
           {active && <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary" aria-hidden />}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-72 gap-4">
+      <PopoverContent align={align} className="w-72 gap-4">
         {children}
         {active && (
           <Button variant="ghost" size="sm" className="self-start" onClick={onClear}>
