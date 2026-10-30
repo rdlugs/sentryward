@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { api, workspaceHeaders } from "@/lib/api"
+import { api, ApiError, workspaceHeaders } from "@/lib/api"
 import { isActive, type JobStatus, type OpenChange, type ReviewDetail, type ReviewListItem, type ReviewStats, type Trigger, type Verdict } from "./types"
 
 // While anything is queued or running, poll; otherwise stay quiet.
@@ -96,6 +96,12 @@ export function useReview(id: string) {
 
 // A pasted link, or a change picked from a repository's open ones.
 export type CreateReviewInput = { url: string } | { repoId: string; number: number }
+
+// Why a pasted link was refused: the server's message for the url field when
+// there is one. Shared by the review URL form and the command palette.
+export function reviewUrlErrorMessage(err: unknown) {
+  return err instanceof ApiError ? (err.fieldErrors?.url?.[0] ?? err.message) : "Could not queue the review"
+}
 
 export function useCreateReview() {
   const queryClient = useQueryClient()

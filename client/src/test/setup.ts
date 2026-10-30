@@ -28,8 +28,10 @@ Object.defineProperty(window, "matchMedia", {
   }),
 })
 
-// jsdom lacks the pointer capture and scrolling APIs Radix Select calls when it opens
+// jsdom lacks the pointer capture and scrolling APIs Radix Select calls when it
+// opens, and that sonner calls when a toast's button is pressed
 Element.prototype.hasPointerCapture ??= () => false
+Element.prototype.setPointerCapture ??= () => {}
 Element.prototype.releasePointerCapture ??= () => {}
 Element.prototype.scrollIntoView ??= () => {}
 

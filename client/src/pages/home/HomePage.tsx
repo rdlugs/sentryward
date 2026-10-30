@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import type { ReactNode } from "react"
 import { Link } from "react-router"
 import { BookOpen, FolderGit2, GitPullRequest, KeyRound, SlidersHorizontal, Zap, type LucideIcon } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { useGlobalConfig } from "@/features/config/api"
 import { useConnections } from "@/features/forge/api"
 import { useReviews } from "@/features/reviews/api"
-import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
+import { useStartManualReview } from "@/features/reviews/useStartManualReview"
 import { ConnectionsPanel } from "./ConnectionsPanel"
 import { HomeMetrics } from "./HomeMetrics"
 import { RecentReviewsTimeline } from "./RecentReviewsTimeline"
@@ -66,7 +66,7 @@ function capitalize(text: string) {
 }
 
 export function HomePage() {
-  const [reviewOpen, setReviewOpen] = useState(false)
+  const startReview = useStartManualReview()
   const connections = useConnections().data?.connections ?? []
   const config = useGlobalConfig().data?.config
   const setup = useSetupProgress()
@@ -93,7 +93,7 @@ export function HomePage() {
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem] compact:gap-8 spacious:gap-12">
         <div className="flex flex-col gap-8 compact:gap-6 spacious:gap-10">
           {anyReviews && <HomeMetrics />}
-          <SetupChecklist steps={setup.steps} isPending={setup.isPending} onReview={() => setReviewOpen(true)} />
+          <SetupChecklist steps={setup.steps} isPending={setup.isPending} onReview={startReview} />
 
           <section className="flex flex-col gap-4 compact:gap-3 spacious:gap-5">
             <SectionLabel>From your codebase</SectionLabel>
@@ -130,7 +130,7 @@ export function HomePage() {
                 </Link>
               )}
               {showReview && (
-                <button type="button" className={actionRow} onClick={() => setReviewOpen(true)}>
+                <button type="button" className={actionRow} onClick={startReview}>
                   <IconTile icon={GitPullRequest} />
                   <ActionText title="Review a change" text="Pick an open pull request or paste a link to review it now." />
                 </button>
@@ -162,8 +162,6 @@ export function HomePage() {
           </a>
         </aside>
       </div>
-
-      <ManualReviewSheet open={reviewOpen} onOpenChange={setReviewOpen} />
     </PageShell>
   )
 }

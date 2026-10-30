@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 // Each entry is a list of alternative combos; each combo is the keys pressed together.
 const SHORTCUTS: { combos: string[][]; label: string }[] = [
   { combos: [["Ctrl", "J"]], label: "Next finding" },
-  { combos: [["Ctrl", "K"]], label: "Previous finding" },
+  { combos: [["Ctrl", "U"]], label: "Previous finding" },
   { combos: [["Ctrl", "O"], ["Enter"]], label: "Expand or collapse the focused finding" },
   { combos: [["Ctrl", "C"]], label: "Copy the agent prompt for the focused finding" },
   { combos: [["Ctrl", "?"]], label: "Show these shortcuts" },

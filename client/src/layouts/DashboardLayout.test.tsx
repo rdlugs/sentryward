@@ -1,12 +1,13 @@
 import { lazy, type ReactElement } from "react"
 import { describe, expect, it, vi } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { Route, Routes } from "react-router"
+import { Route, Routes, useLocation } from "react-router"
 import { DashboardLayout } from "./DashboardLayout"
 import { useConnections, useConnectionStatuses } from "@/features/forge/api"
 import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
-import { mockApi } from "@/test/apiRoutes"
+import { mockApi, testUser } from "@/test/apiRoutes"
+import { listItem } from "@/test/fixtures"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 
 const Broken = lazy(() => Promise.reject(new Error("Failed to fetch dynamically imported module")))
@@ -181,6 +182,168 @@ describe("DashboardLayout", () => {
       await screen.findByText("Page")
       await new Promise((resolve) => setTimeout(resolve, 50))
       expect(screen.queryByRole("link", { name: /failed review/ })).not.toBeInTheDocument()
+    })
+  })
+
+  describe("command palette", () => {
+    const repo = {
+      id: "r1",
+      connectionId: "c1",
+      account: { login: "acme", provider: "github", host: "github.com" },
+      externalId: "1",
+      fullPath: "acme/web",
+      defaultBranch: "main",
+      webUrl: "https://github.com/acme/web",
+      enabled: true,
+      settings: {},
+      followGlobal: true,
+    }
+
+    function Where() {
+      const { pathname, search } = useLocation()
+      return <p>At {pathname + search}</p>
+    }
+
+    function renderLayout(routes: Record<string, unknown> = {}) {
+      mockApi({ "GET /api/repos": { repos: [repo] }, ...routes })
+      renderWithProviders(
+        <Routes>
+          <Route element={<DashboardLayout />}>
+            <Route path="*" element={<Where />} />
+          </Route>
+        </Routes>,
+        { route: "/usage" },
+      )
+    }
+
+    async function openPalette(shortcut = "{Control>}k{/Control}") {
+      await screen.findByText("At /usage")
+      await userEvent.keyboard(shortcut)
+      return screen.findByRole("dialog", { name: "Command palette" })
+    }
+
+    it("opens with Ctrl+K or Cmd+K and goes to a page", async () => {
+      renderLayout()
+
+      const palette = await openPalette("{Meta>}k{/Meta}")
+      await userEvent.keyboard("{Escape}")
+      expect(palette).not.toBeInTheDocument()
+
+      await openPalette()
+      await userEvent.type(screen.getByRole("combobox", { name: "Search pages and repositories" }), "findings")
+      await userEvent.keyboard("{Enter}")
+
+      expect(await screen.findByText("At /findings")).toBeInTheDocument()
+      expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument()
+    })
+
+    it("closes with the same shortcut", async () => {
+      renderLayout()
+      const palette = await openPalette()
+      await userEvent.keyboard("{Control>}k{/Control}")
+      await waitFor(() => expect(palette).not.toBeInTheDocument())
+    })
+
+    it("uses Cmd+K on macOS and leaves Ctrl+K to text fields", async () => {
+      const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel")
+      try {
+        renderLayout()
+        await screen.findByText("At /usage")
+        expect(screen.getByRole("button", { name: "Search" })).toHaveAttribute("aria-keyshortcuts", "Meta+K")
+        expect(fireEvent.keyDown(document.body, { key: "k", ctrlKey: true })).toBe(true)
+        expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument()
+        await openPalette("{Meta>}k{/Meta}")
+      } finally {
+        platform.mockRestore()
+      }
+    })
+
+    it("does not open over another dialog", async () => {
+      renderLayout()
+      await screen.findByText("At /usage")
+      await userEvent.click(screen.getByRole("button", { name: "Review a PR" }))
+      await screen.findByRole("dialog", { name: "Manual review" })
+
+      await userEvent.keyboard("{Control>}k{/Control}")
+      expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument()
+    })
+
+    it("explains a repository search while repositories could not be loaded", async () => {
+      renderLayout({ "GET /api/repos": () => jsonResponse(500, { message: "Boom" }) })
+      const palette = await openPalette()
+      await userEvent.type(screen.getByRole("combobox", { name: "Search pages and repositories" }), "acme/web")
+
+      expect(await within(palette).findByText("Could not load repositories.")).toBeInTheDocument()
+    })
+
+    it("hides admin pages from members", async () => {
+      renderLayout()
+      const palette = await openPalette()
+      expect(within(palette).getByRole("option", { name: "Usage" })).toBeInTheDocument()
+      expect(within(palette).queryByRole("option", { name: "Instance settings" })).not.toBeInTheDocument()
+    })
+
+    it("lists admin pages for an admin", async () => {
+      renderLayout({ "GET /api/auth/me": { user: { ...testUser, role: "admin" }, workspaces: [] } })
+      const palette = await openPalette()
+      expect(within(palette).getByRole("option", { name: "Users" })).toBeInTheDocument()
+      expect(within(palette).getByRole("option", { name: "Instance settings" })).toBeInTheDocument()
+    })
+
+    it("opens a repository's reviews", async () => {
+      renderLayout()
+      const palette = await openPalette()
+      await userEvent.click(await within(palette).findByRole("option", { name: /acme\/web/ }))
+
+      expect(await screen.findByText("At /reviews?repo=r1")).toBeInTheDocument()
+    })
+
+    it("queues a review for a pasted link", async () => {
+      const create = vi.fn((_init?: RequestInit) => jsonResponse(201, { review: listItem }))
+      renderLayout({ "POST /api/reviews": create })
+      await openPalette()
+      await userEvent.type(
+        screen.getByRole("combobox", { name: "Search pages and repositories" }),
+        "https://github.com/acme/web/pull/42",
+      )
+      await userEvent.keyboard("{Enter}")
+
+      expect(await screen.findByText(`At /reviews/${listItem.id}`)).toBeInTheDocument()
+      expect(JSON.parse(String(create.mock.calls[0]![0]?.body))).toEqual({ url: "https://github.com/acme/web/pull/42" })
+    })
+
+    it("stays put when closed before a pasted link is queued", async () => {
+      let respond!: (response: Response) => void
+      const pending = new Promise<Response>((resolve) => {
+        respond = resolve
+      })
+      renderLayout({ "POST /api/reviews": () => pending as unknown as Response })
+      await openPalette()
+      await userEvent.type(
+        screen.getByRole("combobox", { name: "Search pages and repositories" }),
+        "https://github.com/acme/web/pull/42",
+      )
+      await userEvent.keyboard("{Enter}")
+      await userEvent.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument())
+
+      respond(jsonResponse(201, { review: listItem }))
+      expect(await screen.findByText("Review queued")).toBeInTheDocument()
+      expect(screen.getByText("At /usage")).toBeInTheDocument()
+      await userEvent.click(await screen.findByRole("button", { name: "Open" }))
+      expect(await screen.findByText(`At /reviews/${listItem.id}`)).toBeInTheDocument()
+    })
+
+    it("starts a manual review from the palette or the top bar", async () => {
+      renderLayout()
+      const palette = await openPalette()
+      await userEvent.click(within(palette).getByRole("option", { name: "Start manual review" }))
+      expect(await screen.findByRole("dialog", { name: "Manual review" })).toBeInTheDocument()
+      await userEvent.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Manual review" })).not.toBeInTheDocument())
+
+      await userEvent.click(screen.getByRole("button", { name: "Review a PR" }))
+      expect(await screen.findByRole("dialog", { name: "Manual review" })).toBeInTheDocument()
     })
   })
 })

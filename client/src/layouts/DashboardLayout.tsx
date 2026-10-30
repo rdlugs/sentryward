@@ -1,4 +1,4 @@
-import { Suspense } from "react"
+import { Suspense, useState } from "react"
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import {
   Bell,
@@ -12,6 +12,7 @@ import {
   House,
   KeyRound,
   LogOut,
+  Search,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
@@ -23,6 +24,7 @@ import { DensityToggle } from "@/components/density-toggle"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ModeToggle } from "@/components/mode-toggle"
 import { UserAvatar } from "@/components/UserAvatar"
+import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,11 +51,15 @@ import {
 } from "@/components/ui/sidebar"
 import { FullPageSpinner } from "@/features/auth/FullPageSpinner"
 import { useAuth } from "@/features/auth/useAuth"
+import { ManualReviewProvider } from "@/features/reviews/ManualReviewProvider"
+import { useStartManualReview } from "@/features/reviews/useStartManualReview"
 import { WorkspaceSwitcher } from "@/features/workspaces/WorkspaceSwitcher"
+import { isMac } from "@/lib/platform"
+import { CommandPalette } from "./CommandPalette"
 import { useNavAttention, type NavAttention } from "./useNavAttention"
 
-type NavItem = { to: string; label: string; icon: typeof House }
-type NavGroup = { label?: string; adminOnly?: boolean; items: NavItem[] }
+export type NavItem = { to: string; label: string; icon: typeof House }
+export type NavGroup = { label?: string; adminOnly?: boolean; items: NavItem[] }
 
 // Grouped by what you come to do: follow reviews, read the numbers, set the
 // workspace up (in the order a new workspace needs it), run the instance.
@@ -94,6 +100,11 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
 ]
+
+// The top bar's hint for the palette: Cmd+K on macOS, Ctrl+K elsewhere.
+function paletteShortcut() {
+  return isMac() ? { label: "⌘K", aria: "Meta+K" } : { label: "Ctrl K", aria: "Control+K" }
+}
 
 // Where you are, for the top bar; each page renders its own h1. Groups have no
 // page of their own, so they are plain text rather than links.
@@ -164,11 +175,23 @@ function NavItems({
   )
 }
 
+function ReviewButton() {
+  const startReview = useStartManualReview()
+  return (
+    <Button size="sm" onClick={startReview} aria-label="Review a PR">
+      <GitPullRequest />
+      <span className="hidden sm:inline">Review a PR</span>
+    </Button>
+  )
+}
+
 export function DashboardLayout() {
   const { user, workspace, logout } = useAuth()
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const attention = useNavAttention(pathname)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const shortcut = paletteShortcut()
 
   async function handleLogout() {
     try {
@@ -185,101 +208,120 @@ export function DashboardLayout() {
   const groups = NAV_GROUPS.filter((group) => !group.adminOnly || user.role === "admin")
 
   return (
-    <SidebarProvider>
-      <Sidebar collapsible="icon">
-        <SidebarHeader>
-          <WorkspaceSwitcher />
-        </SidebarHeader>
-        <SidebarContent>
-          {/* Collapsed to icons the labels hide, leaving the groups as
-              spaced clusters. */}
-          {groups.map((group) => (
-            <SidebarGroup key={group.label ?? "main"}>
-              {group.label && <SidebarGroupLabel>{group.label}</SidebarGroupLabel>}
-              <NavItems items={group.items} pathname={pathname} attention={attention} />
-            </SidebarGroup>
-          ))}
-        </SidebarContent>
-        <SidebarFooter>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <SidebarMenuButton
-                    size="lg"
-                    className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-                  >
-                    <UserAvatar user={user} className="size-8 rounded-lg after:rounded-lg" fallbackClassName="rounded-lg" />
-                    <div className="grid flex-1 text-left text-sm leading-tight">
-                      <span className="truncate font-medium">{user.name}</span>
-                      <span className="truncate text-xs text-muted-foreground">{user.email}</span>
-                    </div>
-                    <ChevronsUpDown className="ml-auto size-4" />
-                  </SidebarMenuButton>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start" className="min-w-56">
-                  <DropdownMenuLabel className="font-normal">
-                    <div className="grid text-sm leading-tight">
-                      <span className="truncate font-medium">{user.name}</span>
-                      <span className="truncate text-xs text-muted-foreground">{user.email}</span>
-                    </div>
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem asChild>
-                    <Link to="/settings">
-                      <Settings />
-                      Settings
-                    </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={handleLogout}>
-                    <LogOut />
-                    Log out
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarFooter>
-      </Sidebar>
-      {/* min-w-0 lets wide content (code blocks, tables) scroll inside the
-          page instead of stretching the whole layout past the viewport. */}
-      <SidebarInset className="min-w-0 bg-dots">
-        <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/95 px-4 backdrop-blur supports-backdrop-filter:bg-background/80 lg:px-6">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-          <nav aria-label="Breadcrumb" className="min-w-0">
-            <ol className="flex items-center gap-1.5 text-sm text-muted-foreground">
-              {breadcrumb(pathname).map((crumb, i) => (
-                <li key={crumb.label} className="flex min-w-0 items-center gap-1.5">
-                  {i > 0 && <ChevronRight className="size-3.5 shrink-0" aria-hidden />}
-                  {crumb.to ? (
-                    <Link to={crumb.to} className="transition-colors hover:text-foreground">
-                      {crumb.label}
-                    </Link>
-                  ) : (
-                    <span aria-current="page" className="truncate font-medium text-foreground">
-                      {crumb.label}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ol>
-          </nav>
-          <div className="ml-auto flex items-center gap-1">
-            <DensityToggle />
-            <ModeToggle />
-          </div>
-        </header>
-        {/* Pages are lazy (see App.tsx); these boundaries keep the sidebar and
-            top bar up while a page's chunk loads or if it fails to. Keying the
-            error boundary on the path clears a failure once you navigate away.
-            Remounting on a switch resets page state along with the cleared cache. */}
-        <ErrorBoundary key={pathname} fallback={<ChunkLoadError className="min-h-0 flex-1 py-24" />}>
-          <Suspense fallback={<FullPageSpinner className="min-h-0 flex-1 py-24" />}>
-            <Outlet key={workspace?.id} />
-          </Suspense>
-        </ErrorBoundary>
-      </SidebarInset>
-    </SidebarProvider>
+    // Here rather than on a page, so a manual review can be started from anywhere.
+    <ManualReviewProvider>
+      <SidebarProvider>
+        <Sidebar collapsible="icon">
+          <SidebarHeader>
+            <WorkspaceSwitcher />
+          </SidebarHeader>
+          <SidebarContent>
+            {/* Collapsed to icons the labels hide, leaving the groups as
+                spaced clusters. */}
+            {groups.map((group) => (
+              <SidebarGroup key={group.label ?? "main"}>
+                {group.label && <SidebarGroupLabel>{group.label}</SidebarGroupLabel>}
+                <NavItems items={group.items} pathname={pathname} attention={attention} />
+              </SidebarGroup>
+            ))}
+          </SidebarContent>
+          <SidebarFooter>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <SidebarMenuButton
+                      size="lg"
+                      className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+                    >
+                      <UserAvatar user={user} className="size-8 rounded-lg after:rounded-lg" fallbackClassName="rounded-lg" />
+                      <div className="grid flex-1 text-left text-sm leading-tight">
+                        <span className="truncate font-medium">{user.name}</span>
+                        <span className="truncate text-xs text-muted-foreground">{user.email}</span>
+                      </div>
+                      <ChevronsUpDown className="ml-auto size-4" />
+                    </SidebarMenuButton>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent side="top" align="start" className="min-w-56">
+                    <DropdownMenuLabel className="font-normal">
+                      <div className="grid text-sm leading-tight">
+                        <span className="truncate font-medium">{user.name}</span>
+                        <span className="truncate text-xs text-muted-foreground">{user.email}</span>
+                      </div>
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem asChild>
+                      <Link to="/settings">
+                        <Settings />
+                        Settings
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={handleLogout}>
+                      <LogOut />
+                      Log out
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        </Sidebar>
+        {/* min-w-0 lets wide content (code blocks, tables) scroll inside the
+            page instead of stretching the whole layout past the viewport. */}
+        <SidebarInset className="min-w-0 bg-dots">
+          <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/95 px-4 backdrop-blur supports-backdrop-filter:bg-background/80 lg:px-6">
+            <SidebarTrigger className="-ml-1" />
+            <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
+            <nav aria-label="Breadcrumb" className="min-w-0">
+              <ol className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                {breadcrumb(pathname).map((crumb, i) => (
+                  <li key={crumb.label} className="flex min-w-0 items-center gap-1.5">
+                    {i > 0 && <ChevronRight className="size-3.5 shrink-0" aria-hidden />}
+                    {crumb.to ? (
+                      <Link to={crumb.to} className="transition-colors hover:text-foreground">
+                        {crumb.label}
+                      </Link>
+                    ) : (
+                      <span aria-current="page" className="truncate font-medium text-foreground">
+                        {crumb.label}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </nav>
+            <div className="ml-auto flex items-center gap-1">
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={() => setPaletteOpen(true)}
+                aria-label="Search"
+                aria-keyshortcuts={shortcut.aria}
+              >
+                <Search />
+                <span className="hidden sm:inline">Search</span>
+                <kbd className="ml-2 hidden rounded border bg-muted px-1 font-mono text-[0.7rem] sm:inline">
+                  {shortcut.label}
+                </kbd>
+              </Button>
+              <ReviewButton />
+              <DensityToggle />
+              <ModeToggle />
+            </div>
+          </header>
+          {/* Pages are lazy (see App.tsx); these boundaries keep the sidebar and
+              top bar up while a page's chunk loads or if it fails to. Keying the
+              error boundary on the path clears a failure once you navigate away.
+              Remounting on a switch resets page state along with the cleared cache. */}
+          <ErrorBoundary key={pathname} fallback={<ChunkLoadError className="min-h-0 flex-1 py-24" />}>
+            <Suspense fallback={<FullPageSpinner className="min-h-0 flex-1 py-24" />}>
+              <Outlet key={workspace?.id} />
+            </Suspense>
+          </ErrorBoundary>
+          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} groups={groups} />
+        </SidebarInset>
+      </SidebarProvider>
+    </ManualReviewProvider>
   )
 }

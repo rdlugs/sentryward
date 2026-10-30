@@ -849,7 +849,7 @@ describe("Review detail page", () => {
   // Holds Ctrl for every key in the sequence, e.g. ctrl("jj") is Ctrl+J twice.
   const ctrl = (keys: string) => `{Control>}${keys}{/Control}`
 
-  it("moves between findings in display order with Ctrl+J and Ctrl+K and toggles them with Ctrl+O and Enter", async () => {
+  it("moves between findings in display order with Ctrl+J and Ctrl+U and toggles them with Ctrl+O and Enter", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
@@ -862,7 +862,7 @@ describe("Review detail page", () => {
     // Stops at the last finding instead of wrapping.
     await user.keyboard(ctrl("j"))
     expect(findingTrigger("Rename c")).toHaveFocus()
-    await user.keyboard(ctrl("k"))
+    await user.keyboard(ctrl("u"))
     expect(findingTrigger("Caller ignores result")).toHaveFocus()
 
     const caller = findingTrigger("Caller ignores result")
@@ -871,6 +871,18 @@ describe("Review detail page", () => {
     expect(caller).toHaveAttribute("aria-expanded", "true")
     await user.keyboard("{Enter}")
     expect(caller).toHaveAttribute("aria-expanded", "false")
+  })
+
+  it("leaves Ctrl+K to the command palette", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail }, "GET /api/repos": { repos: [] } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    // From a finding with one before it, where Ctrl+K used to move back.
+    await user.keyboard(ctrl("jj"))
+    await user.keyboard(ctrl("k"))
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument()
   })
 
   it("ignores the shortcut letters without Ctrl", async () => {
@@ -1007,6 +1019,18 @@ describe("Review detail page", () => {
     expect(fireEvent.keyDown(document.body, { key: "c", ctrlKey: true })).toBe(true)
     await user.keyboard(ctrl("j"))
     expect(fireEvent.keyDown(document.activeElement!, { key: "o", ctrlKey: true })).toBe(false)
+  })
+
+  it("never lets Ctrl+U open view source, even on the first finding", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard(ctrl("j"))
+    const first = document.activeElement!
+    expect(fireEvent.keyDown(first, { key: "u", ctrlKey: true })).toBe(false)
+    expect(first).toHaveFocus()
   })
 
   it("leaves Ctrl+J to the browser on a review with no findings", async () => {
