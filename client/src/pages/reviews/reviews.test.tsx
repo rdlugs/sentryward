@@ -1028,6 +1028,10 @@ describe("Review detail page", () => {
     // Ctrl+Shift+- (zoom out) on a German layout is the US slash key.
     expect(fireEvent.keyDown(document.body, { key: "_", code: "Slash", ctrlKey: true, shiftKey: true })).toBe(true)
     expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument()
+
+    // Chrome can report Ctrl+Shift+/ as "/" with Shift held rather than "?".
+    expect(fireEvent.keyDown(document.body, { key: "/", code: "Slash", ctrlKey: true, shiftKey: true })).toBe(false)
+    expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument()
   })
 
   it("keeps the focus ring on a finding reached by a mouse-started jump until focus moves on", async () => {

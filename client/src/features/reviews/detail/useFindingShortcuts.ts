@@ -18,10 +18,11 @@ function ownsKeys(target: EventTarget | null) {
   return target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null
 }
 
-// Matched on the produced character, not the physical key: on other layouts the
-// US slash key is something else (Ctrl+Shift+- is zoom out on a German one).
+// Ctrl+? is Ctrl+Shift+/, which Chrome can report as "/" with Shift held.
+// Matched on the character, not the physical key: on other layouts the US
+// slash key is something else (Ctrl+Shift+- is zoom out on a German one).
 function isHelp(event: KeyboardEvent) {
-  return event.key === "?"
+  return event.key === "?" || (event.key === "/" && event.shiftKey)
 }
 
 function hasSelection() {
