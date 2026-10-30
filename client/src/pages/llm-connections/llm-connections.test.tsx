@@ -32,10 +32,13 @@ function calls(fetchSpy: ReturnType<typeof mockApi>, method: string, path: strin
   return fetchSpy.mock.calls.filter(([url, init]) => String(url) === path && (init?.method ?? "GET") === method)
 }
 
-async function chooseFilter(label: string, option: string) {
-  await userEvent.click(screen.getByRole("button", { name: "Filters" }))
-  await userEvent.click(await screen.findByRole("combobox", { name: label }))
-  await userEvent.click(screen.getByRole("option", { name: option }))
+function card(name: string) {
+  return screen.getByRole("listitem", { name })
+}
+
+async function openFromMenu(provider: string, item: string) {
+  await userEvent.click(await screen.findByRole("button", { name: `Actions for ${provider}` }))
+  await userEvent.click(await screen.findByRole("menuitem", { name: item }))
 }
 
 describe("LLM Connections page", () => {
@@ -46,14 +49,14 @@ describe("LLM Connections page", () => {
     await userEvent.click(await screen.findByRole("link", { name: "LLM Connections" }))
 
     expect(await screen.findByRole("heading", { name: "LLM Connections" })).toBeInTheDocument()
-    expect(await screen.findByText("No API keys yet")).toBeInTheDocument()
+    expect(await screen.findByRole("list", { name: "LLM providers" })).toBeInTheDocument()
   })
 
   it("redirects the old settings tab", async () => {
     mockApi({ "GET /api/settings/api-keys": noKeys })
     renderWithProviders(<App />, { route: "/settings?tab=api-keys" })
 
-    expect(await screen.findByText("No API keys yet")).toBeInTheDocument()
+    expect(await screen.findByRole("list", { name: "LLM providers" })).toBeInTheDocument()
     expect(screen.queryByRole("tab", { name: "Profile" })).not.toBeInTheDocument()
   })
 
@@ -67,28 +70,42 @@ describe("LLM Connections page", () => {
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    expect(await screen.findByText("No API keys yet")).toBeInTheDocument()
+    expect(await screen.findByRole("list", { name: "LLM providers" })).toBeInTheDocument()
     expect(screen.queryByRole("table", { name: "Model prices" })).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole("tab", { name: "Model prices" }))
 
     expect(await screen.findByRole("table", { name: "Model prices" })).toBeInTheDocument()
-    expect(screen.queryByText("No API keys yet")).not.toBeInTheDocument()
+    expect(screen.queryByRole("list", { name: "LLM providers" })).not.toBeInTheDocument()
   })
 
-  it("shows one add button and an empty state when no key is stored", async () => {
-    mockApi({ "GET /api/settings/api-keys": noKeys })
+  it("shows every provider, connected or not, and what its reviews use", async () => {
+    const fetchSpy = mockApi({ "GET /api/settings/api-keys": noKeys })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    expect(await screen.findByText("No API keys yet")).toBeInTheDocument()
-    expect(screen.getByText(/reviews use the server's key for OpenAI/)).toBeInTheDocument()
-    expect(screen.getAllByRole("button", { name: "Add Connection" })).toHaveLength(1)
+    const list = await screen.findByRole("list", { name: "LLM providers" })
+    expect(within(list).getAllByRole("listitem").map((item) => item.getAttribute("aria-label"))).toEqual([
+      "Anthropic",
+      "OpenAI",
+      "Google",
+      "Ollama",
+    ])
+    expect(within(card("Anthropic")).getByText("Not connected")).toBeInTheDocument()
+    expect(within(card("Anthropic")).getByRole("button", { name: "Connect" })).toBeEnabled()
+    expect(within(card("OpenAI")).getByText("Server key")).toBeInTheDocument()
+    expect(within(card("OpenAI")).getByText(/Reviews use the server's OpenAI key/)).toBeInTheDocument()
+    expect(within(card("OpenAI")).getByRole("button", { name: "Use my own key" })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /Actions for/ })).not.toBeInTheDocument()
+    expect(screen.getByText("0 of 4 providers connected")).toBeInTheDocument()
+    // Nothing is stored, so there is nothing to check with a provider.
+    expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith("/status"))).toHaveLength(0)
   })
 
-  it("adds a key for the provider picked in the sheet", async () => {
+  it("connects the provider of the card it was opened from", async () => {
     let keys: { keys: object[] } = noKeys
     const fetchSpy = mockApi({
       "GET /api/settings/api-keys": () => jsonResponse(200, keys),
+      "GET /api/settings/api-keys/anthropic/status": { status: "active" },
       "PUT /api/settings/api-keys/anthropic": () => {
         keys = { keys: [storedAnthropic, ...noKeys.keys.slice(1)] }
         return jsonResponse(200, { key: storedAnthropic })
@@ -96,21 +113,22 @@ describe("LLM Connections page", () => {
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Add Connection" }))
+    await screen.findByRole("list", { name: "LLM providers" })
+    await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Connect" }))
     const sheet = await screen.findByRole("dialog")
-    await userEvent.click(within(sheet).getByRole("combobox", { name: "Provider" }))
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
-      "Anthropic",
-      "OpenAI",
-      "Google",
-      "Ollama",
-    ])
-    await userEvent.click(screen.getByRole("option", { name: "Anthropic" }))
+    expect(within(sheet).getByRole("heading", { name: "Connect Anthropic" })).toBeInTheDocument()
+    expect(within(sheet).queryByRole("combobox", { name: "Provider" })).not.toBeInTheDocument()
+    expect(within(sheet).getByRole("link", { name: "console.anthropic.com" })).toHaveAttribute(
+      "href",
+      "https://console.anthropic.com",
+    )
     await userEvent.type(within(sheet).getByLabelText("Anthropic API key"), "sk-ant-secret-1234")
     await userEvent.click(within(sheet).getByRole("button", { name: "Check and save" }))
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
-    expect(await screen.findByText("••••1234")).toBeInTheDocument()
+    expect(await within(card("Anthropic")).findByText("••••1234")).toBeInTheDocument()
+    expect(await within(card("Anthropic")).findByText("Active")).toBeInTheDocument()
+    expect(screen.getByText("1 of 4 providers connected")).toBeInTheDocument()
     expect(bodyOf(calls(fetchSpy, "PUT", "/api/settings/api-keys/anthropic")[0]![1])).toEqual({
       apiKey: "sk-ant-secret-1234",
     })
@@ -132,10 +150,9 @@ describe("LLM Connections page", () => {
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Add Connection" }))
+    await screen.findByRole("list", { name: "LLM providers" })
+    await userEvent.click(within(card("Ollama")).getByRole("button", { name: "Connect" }))
     const sheet = await screen.findByRole("dialog")
-    await userEvent.click(within(sheet).getByRole("combobox", { name: "Provider" }))
-    await userEvent.click(screen.getByRole("option", { name: "Ollama" }))
 
     expect(within(sheet).getByLabelText("API base URL")).toHaveValue("http://host.docker.internal:11434/v1")
     expect(within(sheet).getByLabelText("Ollama API key (optional)")).toHaveValue("")
@@ -147,15 +164,18 @@ describe("LLM Connections page", () => {
     })
   })
 
-  it("sends a custom host with a cloud provider key", async () => {
+  it("sends a custom host set under Advanced with a cloud provider key", async () => {
     const fetchSpy = mockApi({
       "GET /api/settings/api-keys": noKeys,
       "PUT /api/settings/api-keys/anthropic": { key: storedAnthropic },
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Add Connection" }))
+    await screen.findByRole("list", { name: "LLM providers" })
+    await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Connect" }))
     const sheet = await screen.findByRole("dialog")
+    expect(within(sheet).queryByRole("switch", { name: "Use custom host" })).not.toBeInTheDocument()
+    await userEvent.click(within(sheet).getByRole("button", { name: "Advanced" }))
     await userEvent.click(within(sheet).getByRole("switch", { name: "Use custom host" }))
     await userEvent.type(within(sheet).getByLabelText("API base URL"), "https://anthropic.example/v1")
     await userEvent.type(within(sheet).getByLabelText("Anthropic API key"), "sk-ant-secret")
@@ -176,7 +196,8 @@ describe("LLM Connections page", () => {
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Add Connection" }))
+    await screen.findByRole("list", { name: "LLM providers" })
+    await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Connect" }))
     const sheet = await screen.findByRole("dialog")
     await userEvent.type(within(sheet).getByLabelText("Anthropic API key"), "sk-ant-invalid")
     await userEvent.click(within(sheet).getByRole("button", { name: "Check and save" }))
@@ -185,25 +206,30 @@ describe("LLM Connections page", () => {
     expect(sheet).toBeInTheDocument()
   })
 
-  it("opens the stored provider and rechecks its status after replacement", async () => {
+  it("offers to replace a rejected key and rechecks its status after replacement", async () => {
+    let status = "revoked"
     const fetchSpy = mockApi({
       "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1)] },
-      "GET /api/settings/api-keys/anthropic/status": { status: "active" },
-      "PUT /api/settings/api-keys/anthropic": { key: storedAnthropic },
+      "GET /api/settings/api-keys/anthropic/status": () => jsonResponse(200, { status }),
+      "PUT /api/settings/api-keys/anthropic": () => {
+        status = "active"
+        return jsonResponse(200, { key: storedAnthropic })
+      },
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    expect(await screen.findByText("Active")).toBeInTheDocument()
+    expect(await screen.findByText("Key rejected")).toBeInTheDocument()
     expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(1)
     expect(calls(fetchSpy, "GET", "/api/settings/api-keys/openai/status")).toHaveLength(0)
-    const row = screen.getByRole("row", { name: /Anthropic/ })
-    expect(within(row).getByText("••••1234")).toBeInTheDocument()
-    expect(within(row).getByText("Default")).toBeInTheDocument()
-    await userEvent.click(within(row).getByRole("button", { name: "Actions for Anthropic" }))
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Replace" }))
+    const anthropic = card("Anthropic")
+    expect(within(anthropic).getByText("••••1234")).toBeInTheDocument()
+    expect(within(anthropic).getByText("Official API")).toBeInTheDocument()
+    expect(within(anthropic).getByText(/The provider rejected the stored key/)).toBeInTheDocument()
+    expect(screen.getByText("1 of 4 providers connected · 1 needs attention")).toBeInTheDocument()
+    await userEvent.click(within(anthropic).getByRole("button", { name: "Replace key" }))
     const sheet = await screen.findByRole("dialog")
 
-    expect(within(sheet).getByRole("combobox", { name: "Provider" })).toHaveTextContent("Anthropic")
+    expect(within(sheet).getByRole("heading", { name: "Replace Anthropic key" })).toBeInTheDocument()
     expect(within(sheet).getByText(/A key ending in 1234 is stored/)).toBeInTheDocument()
     await userEvent.type(within(sheet).getByLabelText("Anthropic API key"), "sk-ant-replacement")
     await userEvent.click(within(sheet).getByRole("button", { name: "Check and replace" }))
@@ -212,33 +238,57 @@ describe("LLM Connections page", () => {
     await waitFor(() =>
       expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(2),
     )
+    expect(await within(card("Anthropic")).findByText("Active")).toBeInTheDocument()
+    expect(screen.getByText("1 of 4 providers connected")).toBeInTheDocument()
   })
 
-  it("lists a key the server can no longer decrypt so it can be replaced or removed", async () => {
+  it("shows a key the server can no longer decrypt so it can be replaced or removed", async () => {
     const unreadable = { ...storedAnthropic, last4: null, undecryptable: true }
     const fetchSpy = mockApi({
       "GET /api/settings/api-keys": { keys: [unreadable, ...noKeys.keys.slice(1)] },
+      "GET /api/settings/api-keys/anthropic/capabilities": { capabilities: [] },
       "DELETE /api/settings/api-keys/anthropic": () => jsonResponse(204),
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    const row = await screen.findByRole("row", { name: /Anthropic/ })
-    expect(within(row).getByText("Unreadable")).toBeInTheDocument()
-    expect(within(row).getByText("Re-enter key")).toBeInTheDocument()
+    await screen.findByRole("list", { name: "LLM providers" })
+    const anthropic = card("Anthropic")
+    expect(within(anthropic).getByText("Unreadable")).toBeInTheDocument()
+    expect(within(anthropic).getByText("Re-enter key")).toBeInTheDocument()
     expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(0)
 
-    await userEvent.click(within(row).getByRole("button", { name: "Actions for Anthropic" }))
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Replace" }))
+    await userEvent.click(within(anthropic).getByRole("button", { name: "Replace key" }))
     const sheet = await screen.findByRole("dialog")
     expect(within(sheet).getByText(/The stored key can't be decrypted/)).toBeInTheDocument()
     await userEvent.keyboard("{Escape}")
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
 
-    await userEvent.click(within(row).getByRole("button", { name: "Actions for Anthropic" }))
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Remove" }))
+    await userEvent.click(within(anthropic).getByRole("button", { name: "Details" }))
+    const details = await screen.findByRole("dialog")
+    expect(within(details).getByText(/Replace the key to test models/)).toBeInTheDocument()
+    expect(within(details).queryByRole("button", { name: "Run test" })).not.toBeInTheDocument()
+    await userEvent.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+    await openFromMenu("Anthropic", "Remove")
     await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove connection" }))
 
     await waitFor(() => expect(calls(fetchSpy, "DELETE", "/api/settings/api-keys/anthropic")).toHaveLength(1))
+  })
+
+  it("points a provider the privacy policy blocks to the policy instead of connecting it", async () => {
+    mockApi({
+      "GET /api/settings/api-keys": {
+        keys: noKeys.keys.map((key) => ({ ...key, blocked: key.provider === "google" })),
+      },
+    })
+    renderWithProviders(<App />, { route: "/llm-connections" })
+
+    await screen.findByRole("list", { name: "LLM providers" })
+    const google = card("Google")
+    expect(within(google).getByText("Blocked by policy")).toBeInTheDocument()
+    expect(within(google).getByRole("button", { name: "Connect" })).toBeDisabled()
+    expect(within(google).getByRole("link", { name: "Review policy" })).toHaveAttribute("href", "/privacy")
   })
 
   it("removes a stored key after confirming", async () => {
@@ -248,8 +298,7 @@ describe("LLM Connections page", () => {
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Actions for Anthropic" }))
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Remove" }))
+    await openFromMenu("Anthropic", "Remove")
     const dialog = await screen.findByRole("dialog")
     expect(within(dialog).getByText("Remove Anthropic connection?")).toBeInTheDocument()
     expect(calls(fetchSpy, "DELETE", "/api/settings/api-keys/anthropic")).toHaveLength(0)
@@ -258,45 +307,24 @@ describe("LLM Connections page", () => {
     await waitFor(() => expect(calls(fetchSpy, "DELETE", "/api/settings/api-keys/anthropic")).toHaveLength(1))
   })
 
-  it("searches and filters the stored connections", async () => {
-    const storedOllama = {
-      provider: "ollama",
-      stored: true,
-      last4: null,
-      undecryptable: false,
-      baseUrl: "http://ollama.internal:11434/v1",
-      updatedAt: "2026-10-02T00:00:00.000Z",
-      serverDefault: false,
-    }
-    mockApi({
-      "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1, 3), storedOllama] },
-      "GET /api/settings/api-keys/anthropic/status": { status: "active" },
-      "GET /api/settings/api-keys/ollama/status": { status: "unreachable" },
+  it("checks a connection again on request and says when it last did", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1)] },
+      "GET /api/settings/api-keys/anthropic/status": { status: "unreachable" },
     })
     renderWithProviders(<App />, { route: "/llm-connections" })
-    const providers = () => screen.getAllByRole("row").slice(1).map((row) => row.querySelector("td")?.textContent)
-    await screen.findByText("••••1234")
-    expect(providers()).toEqual(["Anthropic", "Ollama"])
 
-    const search = screen.getByRole("searchbox", { name: "Search connections" })
-    await userEvent.type(search, "ollama.internal")
-    expect(providers()).toEqual(["Ollama"])
-    await userEvent.type(search, "-nothing")
-    expect(screen.getByText("No connections match your filters.")).toBeInTheDocument()
-    await userEvent.clear(search)
-    expect(providers()).toEqual(["Anthropic", "Ollama"])
+    expect(await screen.findByText("Couldn't verify")).toBeInTheDocument()
+    expect(within(card("Anthropic")).getByText("checked just now")).toBeInTheDocument()
+    await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Check again" }))
+    await waitFor(() =>
+      expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(2),
+    )
 
-    await chooseFilter("Provider", "Anthropic")
-    expect(providers()).toEqual(["Anthropic"])
-    await userEvent.keyboard("{Escape}")
-    const chip = screen.getByRole("button", { name: "Remove Provider filter" })
-    expect(chip.parentElement).toHaveTextContent("Provider: Anthropic")
-    await userEvent.click(chip)
-    expect(providers()).toEqual(["Anthropic", "Ollama"])
-
-    await screen.findByText("Unknown")
-    await chooseFilter("Status", "Unknown")
-    expect(providers()).toEqual(["Ollama"])
+    await openFromMenu("Anthropic", "Check again")
+    await waitFor(() =>
+      expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(3),
+    )
   })
 
   describe("testing a model", () => {
@@ -304,12 +332,13 @@ describe("LLM Connections page", () => {
       "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1)] },
       "GET /api/settings/api-keys/anthropic/status": { status: "active" },
       "GET /api/settings/api-keys/anthropic/models": { models: ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5"] },
+      "GET /api/settings/api-keys/anthropic/capabilities": { capabilities: [] },
       "POST /api/settings/api-keys/anthropic/test": result,
     })
 
     async function openTest() {
-      await userEvent.click(await screen.findByRole("button", { name: "Actions for Anthropic" }))
-      await userEvent.click(await screen.findByRole("menuitem", { name: "Test model" }))
+      await screen.findByRole("list", { name: "LLM providers" })
+      await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Details" }))
       return screen.findByRole("dialog")
     }
 
@@ -398,11 +427,11 @@ describe("LLM Connections page", () => {
       "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1)] },
       "GET /api/settings/api-keys/anthropic/status": { status: "active" },
       "GET /api/settings/api-keys/anthropic/capabilities": { capabilities },
+      "GET /api/settings/api-keys/anthropic/models": { models: [] },
     })
 
     async function openCapabilities() {
-      await userEvent.click(await screen.findByRole("button", { name: "Actions for Anthropic" }))
-      await userEvent.click(await screen.findByRole("menuitem", { name: "Capabilities" }))
+      await openFromMenu("Anthropic", "Details")
       return screen.findByRole("dialog")
     }
 

@@ -10,8 +10,8 @@ export type LlmConnectionStatus = "active" | "revoked" | "unreachable" | "blocke
 // Shared with the status filter and the status badge so both read the same.
 export const STATUS_LABELS: Record<LlmConnectionStatus, string> = {
   active: "Active",
-  revoked: "Inactive",
-  unreachable: "Unknown",
+  revoked: "Key rejected",
+  unreachable: "Couldn't verify",
   blocked: "Blocked by policy",
 }
 
@@ -62,6 +62,15 @@ export function useApiKeyStatuses(
         ]),
       ),
   })
+}
+
+// One provider's check, for a card or details sheet that shows when it last ran
+// and can run it again. Shares its cache entry with useApiKeyStatuses.
+export function useApiKeyStatus(provider: LlmProvider, { enabled = true }: { enabled?: boolean } = {}) {
+  const query = useQuery({ ...apiKeyStatusQuery(provider), enabled })
+  const status: LlmConnectionStatus | undefined = query.isError ? "unreachable" : query.data?.status
+  const checkedAt = Math.max(query.dataUpdatedAt, query.errorUpdatedAt) || null
+  return { status, checkedAt, isFetching: query.isFetching, refetch: query.refetch }
 }
 
 // Feeds the model pickers. Saving or deleting a key invalidates the api-keys

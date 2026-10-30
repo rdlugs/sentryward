@@ -374,6 +374,21 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   from this tab, replaced by the saved drag order; it shows 24 cards at a
   time with a "Show more" button. Turning reviews on or off now only locks
   that repository's switch while it saves, not every switch.
+- LLM Connections shows every provider as a card, connected or not, instead
+  of a table of stored keys with search, filters, sorting and pagination. Each
+  card states what its reviews use (your key, the server's key, or nothing),
+  explains a problem in visible text and offers the action that fixes it:
+  "Replace key" for a rejected or unreadable key, "Check again" for one that
+  could not be verified, and a link to the privacy policy (with "Connect"
+  disabled) for a provider it blocks. "Connect", "Use my own key" and
+  "Replace key" open a sheet for that card's provider (no provider picker),
+  with a link to where the key is created and the custom host under
+  "Advanced". Testing a model and the capability list move into one Details
+  sheet per connection. Cards show when the status was last checked and can
+  check it again, the page header sums up how many providers are connected
+  and how many need attention, and the page shows placeholders while loading
+  and a retry on error. The "Inactive" and "Unknown" statuses read "Key
+  rejected" and "Couldn't verify".
 - Redesigned login, sign-up, password reset and invite pages. On wide screens
   they split into a product panel (what Sentryward does, light or dark with
   the theme) beside the form; on phones only the form shows, under the logo.
