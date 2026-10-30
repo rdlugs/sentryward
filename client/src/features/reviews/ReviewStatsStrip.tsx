@@ -8,16 +8,19 @@ import { USAGE_PERIODS, type UsagePeriod } from "@/features/usage/types"
 import { useReviewStats } from "./api"
 import { costUnknown, formatCost, formatTokens } from "./cost"
 
-// With `to`, the whole tile links to the page that breaks the figure down.
+// With `to`, the whole tile links to the page that breaks the figure down;
+// `linkLabel` names that page for screen readers.
 export function Stat({
   label,
   icon: Icon,
   to,
+  linkLabel = "open usage",
   children,
 }: {
   label: string
   icon?: LucideIcon
   to?: string
+  linkLabel?: string
   children: ReactNode
 }) {
   const card = (
@@ -32,7 +35,7 @@ export function Stat({
     </Card>
   )
   return to ? (
-    <Link to={to} aria-label={`${label}: open usage`} className="rounded-xl focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+    <Link to={to} aria-label={`${label}: ${linkLabel}`} className="rounded-xl focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
       {card}
     </Link>
   ) : (

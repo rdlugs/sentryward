@@ -37,6 +37,23 @@ const globalConfig = (review: string) => ({
   config: { profile: "balanced", review: { blockOn: "major" }, triggers: { review } },
 })
 
+const reviewStats = {
+  days: 7,
+  runs: 12,
+  blocked: 3,
+  passed: 7,
+  failed: 2,
+  duration: { median: 60_000, max: 120_000 },
+  tokens: { calls: 10, unpricedCalls: 0, inputTokens: 1000, outputTokens: 500 },
+  cost: { usd: 0.5 },
+}
+
+const findingStats = { days: 30, open: 9, openBySeverity: { critical: 1, major: 4, minor: 3, info: 1 } }
+
+const usage = { period: "30d", totals: { reviews: 40, calls: 80, unpricedCalls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, cost: { usd: 4.2 } } }
+
+const fail = () => jsonResponse(500, { message: "Internal Server Error" })
+
 const apiKey = { provider: "anthropic", stored: true, last4: "abcd", undecryptable: false, baseUrl: null, updatedAt: null, serverDefault: false, blocked: false }
 
 // Defaults to a fully set up account with automatic reviews on.
@@ -49,6 +66,7 @@ function stubHome({
   keyStatuses = { anthropic: "active" },
   keysFail = false,
   connectionsFail = false,
+  statsFail = false,
 }: {
   connections?: unknown[]
   repos?: unknown[]
@@ -58,6 +76,7 @@ function stubHome({
   keyStatuses?: Record<string, string>
   keysFail?: boolean
   connectionsFail?: boolean
+  statsFail?: boolean
 } = {}) {
   const completed = (reviews as { status?: string }[]).filter((r) => r.status === "completed")
   mockApi({
@@ -72,6 +91,9 @@ function stubHome({
     ),
     "GET /api/reviews?limit=5": { reviews, total: reviews.length, page: 1, limit: 5 },
     "GET /api/reviews?status=completed&limit=1": { reviews: completed.slice(0, 1), total: completed.length, page: 1, limit: 1 },
+    "GET /api/reviews/stats": statsFail ? fail : reviewStats,
+    "GET /api/findings/stats": findingStats,
+    "GET /api/usage?period=30d": usage,
   })
   renderWithProviders(<App />, { route: "/home" })
 }
@@ -258,5 +280,46 @@ describe("Home page", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Review a change/ }))
 
     expect(await screen.findByRole("dialog", { name: "Manual review" })).toBeInTheDocument()
+  })
+
+  it("shows key metrics linking to their lists once a review exists", async () => {
+    stubHome()
+
+    const metrics = await screen.findByRole("region", { name: "Key metrics" })
+    const findings = await within(metrics).findByRole("link", { name: "Open critical/major: open findings" })
+    expect(findings).toHaveAttribute("href", "/findings?state=open&sort=severity&dir=desc")
+    expect(findings).toHaveTextContent("5")
+    expect(findings).toHaveTextContent("1 critical, 4 major")
+    const reviews = await within(metrics).findByRole("link", { name: "Reviews, last 7 days: open reviews" })
+    expect(reviews).toHaveAttribute("href", "/reviews?view=runs")
+    expect(reviews).toHaveTextContent("12")
+    const failed = within(metrics).getByRole("link", { name: "Failed, last 7 days: open failed reviews" })
+    expect(failed).toHaveAttribute("href", "/reviews?view=runs&status=failed")
+    expect(failed).toHaveTextContent("2")
+    const spend = await within(metrics).findByRole("link", { name: "Spend, last 30 days: open usage" })
+    expect(spend).toHaveAttribute("href", "/usage?period=30d")
+    expect(spend).toHaveTextContent("~$4.20 est.")
+  })
+
+  it("counts a failed run as a review for the metrics", async () => {
+    stubHome({ reviews: [{ ...listItem, status: "failed" }] })
+
+    expect(await screen.findByRole("region", { name: "Key metrics" })).toBeInTheDocument()
+  })
+
+  it("hides the metrics before the first review", async () => {
+    stubHome({ reviews: [] })
+
+    await nextStep()
+    expect(screen.queryByRole("region", { name: "Key metrics" })).not.toBeInTheDocument()
+  })
+
+  it("blanks only the figures whose stats fail to load", async () => {
+    stubHome({ statsFail: true })
+
+    const metrics = await screen.findByRole("region", { name: "Key metrics" })
+    expect(await within(metrics).findByRole("link", { name: "Reviews, last 7 days: open reviews" })).toHaveTextContent("-")
+    expect(within(metrics).getByRole("link", { name: "Failed, last 7 days: open failed reviews" })).toHaveTextContent("-")
+    expect(await within(metrics).findByRole("link", { name: "Open critical/major: open findings" })).toHaveTextContent("5")
   })
 })

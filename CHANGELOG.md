@@ -10,6 +10,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Key metrics on Home (#154). Once the workspace has a review, Home shows
+  four tiles above the setup checklist: open critical/major findings, reviews
+  and failed runs in the last 7 days, and estimated spend over the last 30
+  days. Each links to the matching list (open findings sorted worst first,
+  runs, failed runs, Usage on the 30-day window), loads with its own skeleton,
+  and shows "-" if its stats fail to load. `Stat` takes a `linkLabel` so a
+  linked tile can name the page it opens.
 - Progress for running reviews (#156). The worker records the current stage
   on the job (new `progress` column on `review_jobs`): fetching the change,
   preparing, reviewing (with `n of m` passes, and planning, context and
