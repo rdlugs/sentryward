@@ -10,6 +10,20 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Keyboard navigation and severity jump for findings on the review page
+  (#157). `Ctrl+J`/`Ctrl+K` move between findings in display order, `Ctrl+O`
+  or `Enter` expands or collapses the focused one, `Ctrl+C` copies its agent
+  prompt (or the selected text, when there is a selection), and `Ctrl+?` opens
+  a dialog listing the shortcuts. Shortcuts are ignored while typing in a
+  field and inside menus and dialogs, and `Cmd` is left to the browser. A sticky
+  "Jump to" bar under the header shows per-severity counts of the visible
+  findings and focuses the first finding of a severity; it also opens the
+  shortcuts dialog. Focus from the keyboard, a jump, Tab or a click shares one
+  position, and the focus ring stays visible after a mouse-started jump.
+  `Ctrl+O` and `Ctrl+C` only act while a finding has focus, a shortcut with
+  nothing to act on is left to the browser (so its own `Ctrl+J`, `Ctrl+K` and
+  `Ctrl+O` still work), `Ctrl+?` follows the active keyboard layout, and a
+  jump clears the bar even when it wraps on narrow screens.
 - Key metrics on Home (#154). Once the workspace has a review, Home shows
   four tiles above the setup checklist: open critical/major findings, reviews
   and failed runs in the last 7 days, and estimated spend over the last 30
