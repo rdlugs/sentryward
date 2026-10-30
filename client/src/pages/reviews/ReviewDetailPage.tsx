@@ -1,11 +1,29 @@
 import { useState } from "react"
 import { Link, useLocation, useNavigate, useParams } from "react-router"
-import { AlertTriangle, ArrowLeft, Bot, Copy, Download, ExternalLink, History, Loader2, OctagonX, RotateCw } from "lucide-react"
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  ChevronDown,
+  Copy,
+  Download,
+  ExternalLink,
+  History,
+  Loader2,
+  OctagonX,
+  RotateCw,
+} from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
 import { PageShell } from "@/components/PageShell"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Skeleton } from "@/components/ui/skeleton"
 import { allFindingsPrompt } from "@/features/reviews/agentPrompt"
 import { useCancelReview, useRerunReview, useReview } from "@/features/reviews/api"
@@ -146,22 +164,33 @@ export function ReviewDetailPage() {
         }
         actions={
           <>
-            <Button
-              variant="outline"
-              onClick={() => result && copyToClipboard(allFindingsPrompt(result.findings), "Agent prompt")}
-              disabled={!result?.findings.length}
-            >
-              <Bot />
-              Copy prompt for all findings
-            </Button>
-            <Button variant="outline" onClick={markdown.copy} disabled={!result || markdown.copying}>
-              {markdown.copying ? <Loader2 className="animate-spin" /> : <Copy />}
-              Copy markdown
-            </Button>
-            <Button variant="outline" onClick={markdown.download} disabled={!result || markdown.downloading}>
-              {markdown.downloading ? <Loader2 className="animate-spin" /> : <Download />}
-              Download markdown
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline">
+                  {/* Selecting an item closes the menu, so the trigger shows that an export is still running. */}
+                  {markdown.copying || markdown.downloading ? <Loader2 className="animate-spin" /> : <Download />}
+                  Export
+                  <ChevronDown />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-max whitespace-nowrap">
+                <DropdownMenuItem
+                  onSelect={() => result && copyToClipboard(allFindingsPrompt(result.findings), "Agent prompt")}
+                  disabled={!result?.findings.length}
+                >
+                  <Bot />
+                  Copy prompt for all findings
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={markdown.copy} disabled={!result || markdown.copying}>
+                  {markdown.copying ? <Loader2 className="animate-spin" /> : <Copy />}
+                  Copy markdown
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={markdown.download} disabled={!result || markdown.downloading}>
+                  {markdown.downloading ? <Loader2 className="animate-spin" /> : <Download />}
+                  Download markdown
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button variant="outline" onClick={runAgain} disabled={rerun.isPending || isActive(review.status)}>
               {rerun.isPending ? <Loader2 className="animate-spin" /> : <RotateCw />}
               Re-run
