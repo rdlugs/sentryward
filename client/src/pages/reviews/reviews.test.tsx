@@ -248,6 +248,8 @@ describe("Reviews page rows, filters and stats", () => {
 
     expect(await screen.findByText("Markdown copied")).toBeInTheDocument()
     expect(writeText).toHaveBeenCalledWith(markdown)
+    // The menu is portaled, so its clicks bubble to the row; they must not open the review.
+    expect(screen.queryByRole("link", { name: "Back to reviews" })).not.toBeInTheDocument()
   })
 
   it("does not re-run when the confirmation is cancelled", async () => {
@@ -370,6 +372,19 @@ describe("Reviews page rows, filters and stats", () => {
     expect(screen.getByRole("link", { name: "Back to reviews" })).toHaveAttribute("href", "/reviews?status=failed")
   })
 
+  it("opens the review from anywhere on its row", async () => {
+    mockApi({
+      "GET /api/reviews?status=failed&view=changes&page=1&limit=10": firstPage([listItem]),
+      [`GET /api/reviews/${listItem.id}`]: { review: detail },
+    })
+    renderWithProviders(<App />, { route: "/reviews?status=failed" })
+
+    const row = (await screen.findByRole("link", { name: "Add b and c" })).closest("tr")!
+    await userEvent.click(within(row).getByText("Blocked"))
+
+    expect(await screen.findByRole("link", { name: "Back to reviews" })).toHaveAttribute("href", "/reviews?status=failed")
+  })
+
   it("expands a change to show its earlier runs", async () => {
     const earlier = { ...listItem, id: "earlier", headSha: "0123456789", status: "superseded", verdict: null }
     mockApi({
@@ -381,6 +396,7 @@ describe("Reviews page rows, filters and stats", () => {
     await userEvent.click(await screen.findByRole("button", { name: "2 runs" }))
 
     const history = await screen.findByRole("list", { name: "Earlier runs of Add b and c" })
+    expect(screen.queryByRole("link", { name: "Back to reviews" })).not.toBeInTheDocument()
     expect(within(history).getByText("0123456")).toBeInTheDocument()
     expect(within(history).getByText("Superseded")).toBeInTheDocument()
     expect(within(history).queryByText("abcdef1")).not.toBeInTheDocument()

@@ -282,6 +282,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- Rows in the Reviews and Findings tables open on a click anywhere outside
+  their controls (#160), not just on the title. The title stays a real link
+  (or button), so middle-click and Cmd-click still open a new tab, and the
+  runs toggle, forge link and row menu do not open the row. Modified clicks
+  and clicks that end a text selection are left alone.
 - The Reviews and Findings lists keep their filters, search, view and sort in
   the URL (#159), so Back from a review restores the list and a copied link
   reproduces it. Values the page does not know fall back to defaults. Each

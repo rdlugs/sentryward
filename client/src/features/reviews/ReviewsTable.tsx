@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react"
-import { Link, useLocation } from "react-router"
+import { Link, useLocation, useNavigate } from "react-router"
 import { ChevronRight, Copy, ExternalLink, MoreHorizontal, OctagonX, RotateCw } from "lucide-react"
 import { toast } from "sonner"
 import { NoMatchesRow } from "@/components/TableFilters"
@@ -13,6 +13,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { PROVIDERS } from "@/features/forge/providers"
+import { rowClick } from "@/lib/rowClick"
 import { formatDuration, timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import { useCancelReview, useRerunReview, useReviews } from "./api"
@@ -208,6 +209,7 @@ export function ReviewsTable({
 }) {
   const now = useNow(reviews.some((review) => review.status === "running"))
   const location = useLocation()
+  const navigate = useNavigate()
   const from = location.pathname + location.search
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const colSpan = 5 + Number(actions)
@@ -241,7 +243,10 @@ export function ReviewsTable({
           const webUrl = review.summary?.webUrl
           return (
             <Fragment key={review.id}>
-              <TableRow>
+              <TableRow
+                onClick={rowClick(() => navigate(`/reviews/${review.id}`, { state: { from } }))}
+                className="cursor-pointer"
+              >
                 <TableCell className="max-w-md">
                   <div className="flex items-center gap-1.5">
                     <ReviewLink id={review.id} from={from} className="truncate font-medium hover:underline">
