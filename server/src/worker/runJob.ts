@@ -435,8 +435,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
           guard,
         )
       : undefined;
-  // Files at the head sha never change, so they share the config file's cache
-  // key shape. Code search results are not fixed by a sha and stay uncached.
+  // Files and directory listings at the head sha never change, so they share
+  // the config file's cache key shape. Code search results are not fixed by a
+  // sha and stay uncached.
   const fileCache = cacheFor(config.review.disableCache);
   const context: ContextSource = {
     readFile: (path) =>
@@ -444,6 +445,10 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
         forge.getFileAtRef(repo.fullPath, path, ref.headSha),
       ),
     searchCode: (term) => forge.searchCode(repo.fullPath, term, ref.headSha),
+    listDir: (path) =>
+      cached(fileCache, cacheKey("dir", forge.host, repo.fullPath, path, ref.headSha), () =>
+        forge.listDirAtRef(repo.fullPath, path, ref.headSha),
+      ),
   };
   // Findings this team dismissed as false positives or deliberate: never repost
   // them on this change, and tell the model what the repo has recently rejected.

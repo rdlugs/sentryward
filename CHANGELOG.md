@@ -10,6 +10,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- `list_dir` tool for agentic review passes (#144). With
+  `review.context: agentic`, a pass can now list a directory at the change's
+  head revision on GitHub and GitLab, e.g. to find a changed file's tests or
+  siblings. Paths follow `read_file`'s rules (relative, no `..`), directories
+  end in `/` and symlinks in `@`, a listing shows at most 50 entries, and its
+  output is marked as untrusted and counted against the pass's tool budget.
+  A directory larger than the forge returns in one request (100 entries on
+  GitLab, 1000 on GitHub) is reported as incomplete rather than given a wrong
+  count. Listings are cached by head sha like file reads.
 - Phone layout for the Reviews and Findings lists (#165). Below 640px wide
   (phones, or high browser zoom) each review and finding is a stacked card
   instead of a table row, so the lists reflow at 320px without scrolling

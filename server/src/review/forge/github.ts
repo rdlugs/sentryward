@@ -1,3 +1,4 @@
+import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
 import type { ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
@@ -79,6 +80,14 @@ interface GhComparison {
   files?: Pick<GhFile, "filename" | "previous_filename">[];
 }
 
+interface GhContentEntry {
+  name: string;
+  type: "file" | "dir" | "symlink" | "submodule";
+}
+
+// The contents endpoint returns at most this many entries of a directory.
+const GITHUB_DIR_LIMIT = 1000;
+
 // GitHub caps the files endpoint at 3000 files, 100 per page.
 const MAX_FILE_PAGES = 30;
 
@@ -106,8 +115,13 @@ function changeTypeOf(status: GhFile["status"]): ChangeType {
   }
 }
 
+// Encodes each segment, keeping the "/" between them.
+function encodePath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
 function repoApiPath(project: string): string {
-  return `/repos/${project.split("/").map(encodeURIComponent).join("/")}`;
+  return `/repos/${encodePath(project)}`;
 }
 
 function toRepo(repo: GhRepo): ForgeRepo {
@@ -309,7 +323,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   }
 
   async getFileAtRef(project: string, path: string, ref: string): Promise<string | null> {
-    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    const encodedPath = encodePath(path);
     try {
       const res = await this.http.request(
         `${repoApiPath(project)}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`,
@@ -322,6 +336,29 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       }
       throw err;
     }
+  }
+
+  // The contents endpoint answers a directory with an array of its entries
+  // (up to GITHUB_DIR_LIMIT, with no sign of how many more) and a file with a
+  // single object.
+  async listDirAtRef(project: string, path: string, ref: string): Promise<DirListing | null> {
+    const encodedPath = path ? `/${encodePath(path)}` : "";
+    let body: GhContentEntry[] | GhContentEntry;
+    try {
+      body = await this.http.json<GhContentEntry[] | GhContentEntry>(
+        `${repoApiPath(project)}/contents${encodedPath}?ref=${encodeURIComponent(ref)}`,
+      );
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+    if (!Array.isArray(body)) return null;
+    return {
+      entries: body.map((entry) =>
+        entry.type === "dir" ? `${entry.name}/` : entry.type === "symlink" ? `${entry.name}@` : entry.name,
+      ),
+      truncated: body.length >= GITHUB_DIR_LIMIT,
+    };
   }
 
   async getLinkedIssues(change: ChangeSet): Promise<IssueContext[]> {

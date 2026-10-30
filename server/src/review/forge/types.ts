@@ -1,3 +1,4 @@
+import type { DirListing } from "../context/gather.ts";
 import type { ChangeSet, ForgeProvider, ForgeRef, IssueContext } from "../core/models.ts";
 import type { ForgeCache } from "./cache.ts";
 import type { ToolResults } from "./toolResults.ts";
@@ -58,6 +59,9 @@ export interface ForgeAdapter {
   listOpenChanges(project: string): Promise<ChangeSummary[]>;
   // Raw file content at a ref, or null when the file does not exist there.
   getFileAtRef(project: string, path: string, ref: string): Promise<string | null>;
+  // Entries of a directory at a ref ("" is the root, see DirListing), or null
+  // when the path does not exist there or is not a directory.
+  listDirAtRef(project: string, path: string, ref: string): Promise<DirListing | null>;
   // Issues the change says it closes, at most MAX_LINKED_ISSUES (issues.ts).
   getLinkedIssues(change: ChangeSet): Promise<IssueContext[]>;
   // Issues matching any of the terms, at most MAX_CANDIDATE_ISSUES.
