@@ -17,7 +17,9 @@ import { userLimiter } from "../middleware/apiLimiter.ts";
 
 export const authRouter = Router();
 
-authRouter.get("/registration", authLimiter, registration);
+// Read on every auth page load and checks no password, so it must not spend
+// the login allowance: a 429 here hides the sign-up link.
+authRouter.get("/registration", userLimiter, registration);
 authRouter.get("/invites/:token", authLimiter, showInvite);
 authRouter.post("/invites/:token/accept", userLimiter, requireAuth, acceptInvite);
 authRouter.post("/register", authLimiter, register);
