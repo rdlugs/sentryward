@@ -30,6 +30,10 @@ export interface ContextSource {
   // Paths of files mentioning `term`, best match first. May search another
   // revision than the head: GitHub only indexes the default branch.
   searchCode(term: string): Promise<string[]>;
+  // Entries of a directory at the head revision ("" is the root), directories
+  // ending in "/", or null when the path is missing or not a directory. Only
+  // agentic passes list directories, so a source may leave it out.
+  listDir?(path: string): Promise<string[] | null>;
 }
 
 export interface GatherInput {

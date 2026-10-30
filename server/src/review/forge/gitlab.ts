@@ -88,6 +88,11 @@ interface GlComparison {
   compare_timeout?: boolean;
 }
 
+interface GlTreeEntry {
+  name: string;
+  type: "tree" | "blob" | "commit";
+}
+
 interface GlPipeline {
   id: number;
   sha: string;
@@ -321,6 +326,22 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       }
       throw err;
     }
+  }
+
+  // One page is enough: a pass is shown far fewer entries than that. GitLab
+  // answers a file's path with an empty list rather than a 404, and git keeps
+  // no empty directories, so an empty list means "not a directory".
+  async listDirAtRef(project: string, path: string, ref: string): Promise<string[] | null> {
+    const query = `${path ? `path=${encodeURIComponent(path)}&` : ""}ref=${encodeURIComponent(ref)}&per_page=100`;
+    let entries: GlTreeEntry[];
+    try {
+      entries = await this.http.json<GlTreeEntry[]>(`${this.project(project)}/repository/tree?${query}`);
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+    if (entries.length === 0) return null;
+    return entries.map((entry) => (entry.type === "tree" ? `${entry.name}/` : entry.name));
   }
 
   // GitLab already knows which issues an MR closes, from the same keywords.

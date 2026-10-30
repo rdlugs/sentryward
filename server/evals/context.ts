@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { ContextSource } from "../src/review/context/gather.ts";
 
@@ -26,6 +26,12 @@ export function caseContext(caseDir: string): ContextSource | undefined {
     },
     async searchCode(term) {
       return files.filter((path) => readFileSync(join(root, path), "utf8").includes(term));
+    },
+    async listDir(path) {
+      const absolute = resolve(root, path);
+      if ((absolute !== root && !absolute.startsWith(root + sep)) || !existsSync(absolute)) return null;
+      if (!statSync(absolute).isDirectory()) return null;
+      return readdirSync(absolute, { withFileTypes: true }).map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name));
     },
   };
 }

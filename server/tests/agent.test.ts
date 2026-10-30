@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { BUDGET_SPENT, MAX_READ_LINES, agentTools, readsContext, safePath, searchBudget } from "../src/review/agent/tools.ts";
+import { BUDGET_SPENT, MAX_DIR_ENTRIES, MAX_READ_LINES, agentTools, readsContext, safePath, searchBudget } from "../src/review/agent/tools.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { Config, ConfigOverride } from "../src/review/config/schema.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
@@ -72,6 +72,54 @@ describe("agent tools", () => {
 
     expect(await run(tools.read_file, { path: "../x" })).toMatch(/^Refused/);
     expect(await run(tools.read_file, { path: "missing.ts" })).toMatch(/does not exist/);
+  });
+
+  it("lists directories at the head revision, capped, wrapped as untrusted", async () => {
+    const dirs: Record<string, string[]> = {
+      "": ["README.md", "src/"],
+      src: ["helper.ts", "users/", "helper.test.ts"],
+      big: Array.from({ length: MAX_DIR_ENTRIES + 5 }, (_, i) => `f${String(i).padStart(2, "0")}.ts`),
+    };
+    const listed: string[] = [];
+    const context: ContextSource = {
+      ...source().context,
+      listDir: async (path) => {
+        listed.push(path);
+        return dirs[path] ?? null;
+      },
+    };
+    const { tools } = agentTools({ source: context, searches: searchBudget(5), maxToolTokens: 30_000 });
+
+    // Directories first, then files.
+    expect(await run(tools.list_dir, { path: "./src/" })).toBe(
+      "<untrusted>\nEntries of src/:\nusers/\nhelper.test.ts\nhelper.ts\n</untrusted>",
+    );
+    expect(await run(tools.list_dir, { path: "" })).toContain("Entries of the repository root:\nsrc/\nREADME.md");
+    const big = await run(tools.list_dir, { path: "big" });
+    expect(big).toContain(`f${MAX_DIR_ENTRIES - 1}.ts`);
+    expect(big).not.toContain(`f${MAX_DIR_ENTRIES}.ts`);
+    expect(big).toContain("(5 more not shown)");
+
+    for (const path of ["../x", "/etc", "src/../../x", "~"]) {
+      expect(await run(tools.list_dir, { path })).toMatch(/^Refused/);
+    }
+    expect(await run(tools.list_dir, { path: "missing" })).toBe("missing is not a directory at the head revision.");
+    expect(listed).toEqual(["src", "", "big", "missing"]);
+  });
+
+  it("counts listings against the pass's budget", async () => {
+    const context: ContextSource = {
+      ...source().context,
+      listDir: async () => Array.from({ length: MAX_DIR_ENTRIES }, (_, i) => `a-rather-long-file-name-${i}.ts`),
+    };
+    const { tools } = agentTools({ source: context, searches: searchBudget(5), maxToolTokens: 600 });
+
+    expect(await run(tools.list_dir, { path: "src" })).toMatch(/^<untrusted>/);
+    expect(await run(tools.list_dir, { path: "src" })).toBe(BUDGET_SPENT);
+  });
+
+  it("offers list_dir only when the source can list directories", () => {
+    expect(agentTools({ source: source().context, searches: searchBudget(5), maxToolTokens: 30_000 }).tools).not.toHaveProperty("list_dir");
   });
 
   it("stops returning code once the pass's budget is spent", async () => {

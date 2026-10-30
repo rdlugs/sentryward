@@ -58,6 +58,9 @@ export interface ForgeAdapter {
   listOpenChanges(project: string): Promise<ChangeSummary[]>;
   // Raw file content at a ref, or null when the file does not exist there.
   getFileAtRef(project: string, path: string, ref: string): Promise<string | null>;
+  // Entries of a directory at a ref ("" is the root), directories ending in
+  // "/", or null when the path does not exist there or is not a directory.
+  listDirAtRef(project: string, path: string, ref: string): Promise<string[] | null>;
   // Issues the change says it closes, at most MAX_LINKED_ISSUES (issues.ts).
   getLinkedIssues(change: ChangeSet): Promise<IssueContext[]>;
   // Issues matching any of the terms, at most MAX_CANDIDATE_ISSUES.

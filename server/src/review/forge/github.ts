@@ -79,6 +79,11 @@ interface GhComparison {
   files?: Pick<GhFile, "filename" | "previous_filename">[];
 }
 
+interface GhContentEntry {
+  name: string;
+  type: "file" | "dir" | "symlink" | "submodule";
+}
+
 // GitHub caps the files endpoint at 3000 files, 100 per page.
 const MAX_FILE_PAGES = 30;
 
@@ -322,6 +327,23 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       }
       throw err;
     }
+  }
+
+  // The contents endpoint answers a directory with an array of its entries
+  // (up to 1000) and a file with a single object.
+  async listDirAtRef(project: string, path: string, ref: string): Promise<string[] | null> {
+    const encodedPath = path ? `/${path.split("/").map(encodeURIComponent).join("/")}` : "";
+    let body: GhContentEntry[] | GhContentEntry;
+    try {
+      body = await this.http.json<GhContentEntry[] | GhContentEntry>(
+        `${repoApiPath(project)}/contents${encodedPath}?ref=${encodeURIComponent(ref)}`,
+      );
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+    if (!Array.isArray(body)) return null;
+    return body.map((entry) => (entry.type === "dir" ? `${entry.name}/` : entry.name));
   }
 
   async getLinkedIssues(change: ChangeSet): Promise<IssueContext[]> {
