@@ -213,8 +213,11 @@ export interface Publication {
   errors: string[]
 }
 
-// Where a running review is (worker/progress.ts on the server). Planning,
-// context and walkthrough are details of the reviewing step.
+// Where a running review is (worker/progress.ts on the server), mirroring
+// reviewStepSchema and reviewStageSchema in server/src/review/core/models.ts.
+// Planning, context and walkthrough are details of the reviewing step. A
+// newer server can send a stage this list lacks; ReviewProgress shows a plain
+// running line for it.
 export type ReviewStep = "fetching" | "preparing" | "reviewing" | "verifying" | "publishing"
 export type ReviewStage = ReviewStep | "planning" | "context" | "walkthrough"
 export interface ReviewProgress {

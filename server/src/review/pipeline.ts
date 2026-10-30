@@ -29,7 +29,7 @@ import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/provide
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
 import { compareFindings, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
-import { verifyFindings } from "./validate/verify.ts";
+import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkPatternRules } from "./rules.ts";
 
 export interface ReviewDeps {
@@ -181,28 +181,28 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const diffRisks = riskyAreas(reviewable);
   // The walkthrough runs alongside, so it is a stage only while the review
   // is left waiting for it.
-  let walkthroughSettled = false;
-  const walkthroughTask: Promise<Walkthrough | undefined> =
-    config.output.walkthrough && reviewable.length > 0
-      ? generateWalkthrough(deps.generate, changeSet, reviewable, config, input.issues, diffRisks)
-          .then(
-            ({ walkthrough, usage: callUsage, failedUsage: failed }) => {
-              usage.push(...failed, callUsage);
-              return walkthrough;
-            },
-            (err: unknown) => {
-              // A failed walkthrough still spent what its models billed.
-              usage.push(...failedUsage(spentBy(err), "walkthrough"));
-              warnings.push(`Walkthrough failed: ${errorMessage(err)}`);
-              return undefined;
-            },
-          )
-          .finally(() => {
-            walkthroughSettled = true;
-          })
-      : Promise.resolve(undefined);
+  const wantsWalkthrough = config.output.walkthrough && reviewable.length > 0;
+  let walkthroughSettled = !wantsWalkthrough;
+  const walkthroughTask: Promise<Walkthrough | undefined> = wantsWalkthrough
+    ? generateWalkthrough(deps.generate, changeSet, reviewable, config, input.issues, diffRisks)
+        .then(
+          ({ walkthrough, usage: callUsage, failedUsage: failed }) => {
+            usage.push(...failed, callUsage);
+            return walkthrough;
+          },
+          (err: unknown) => {
+            // A failed walkthrough still spent what its models billed.
+            usage.push(...failedUsage(spentBy(err), "walkthrough"));
+            warnings.push(`Walkthrough failed: ${errorMessage(err)}`);
+            return undefined;
+          },
+        )
+        .finally(() => {
+          walkthroughSettled = true;
+        })
+    : Promise.resolve(undefined);
   const awaitWalkthrough = () => {
-    if (!walkthroughSettled && config.output.walkthrough && reviewable.length > 0) report({ stage: "walkthrough" });
+    if (!walkthroughSettled) report({ stage: "walkthrough" });
     return walkthroughTask;
   };
 
@@ -282,7 +282,10 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     }
   };
   let passesDone = 0;
-  const reportPasses = () => report({ stage: "reviewing", passes: { done: passesDone, total: chunks.length } });
+  // With nothing planned there are no passes to count.
+  const reportPasses = () => {
+    if (chunks.length > 0) report({ stage: "reviewing", passes: { done: passesDone, total: chunks.length } });
+  };
   reportPasses();
   const outcomes = await mapLimit(chunks, deps.concurrency ?? 3, async (chunk): Promise<PassOutcome> => {
     try {
@@ -339,7 +342,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   );
   // After validation, so only findings that would be published are checked,
   // and before the verdict, so a refuted blocker cannot fail the status.
-  if (config.review.verify !== "off") report({ stage: "verifying" });
+  if (verifies(config)) report({ stage: "verifying" });
   const verified = await verifyFindings({
     findings: validation.findings,
     changeSet,

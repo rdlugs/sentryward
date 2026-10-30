@@ -110,7 +110,7 @@ describe("Reviews page", () => {
     mockApi({
       "GET /api/reviews?view=changes&page=1&limit=10": { reviews: [], total: 0, page: 1, limit: 10 },
       "POST /api/reviews": () => jsonResponse(202, { review: { ...listItem, status: "queued", verdict: null } }),
-      [`GET /api/reviews/${listItem.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null } },
+      [`GET /api/reviews/${listItem.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null, attempts: 0 } },
     })
     renderWithProviders(<App />, { route: "/reviews" })
 
@@ -133,7 +133,7 @@ describe("Reviews page", () => {
         changes: [openChange(4, "Add search"), openChange(5, "Fix login", { isDraft: true })],
       },
       "POST /api/reviews": queued,
-      [`GET /api/reviews/${listItem.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null } },
+      [`GET /api/reviews/${listItem.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null, attempts: 0 } },
     })
     renderWithProviders(<App />, { route: "/reviews" })
 
@@ -359,7 +359,7 @@ describe("Reviews page rows, filters and stats", () => {
       [`GET /api/reviews/${listItem.id}`]: { review: failed },
       [`POST /api/reviews/${listItem.id}/rerun`]: () =>
         jsonResponse(202, { review: { ...listItem, id: "new", status: "queued" } }),
-      "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null } },
+      "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null, attempts: 0 } },
     })
     renderWithProviders(<App />, { route: "/reviews?status=failed" })
 
@@ -466,7 +466,7 @@ describe("Review detail page", () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "walkthrough" } } } })
     const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
-    expect(await screen.findByText("· Finishing the walkthrough")).toBeInTheDocument()
+    expect(await screen.findByText("· Writing the walkthrough")).toBeInTheDocument()
     unmount()
 
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: running } })
@@ -477,12 +477,53 @@ describe("Review detail page", () => {
   })
 
   it("shows how long a queued review has waited", async () => {
-    const queued = { ...detail, status: "queued", verdict: null, result: null, createdAt: new Date(Date.now() - 30_000).toISOString() }
+    const queued = { ...detail, status: "queued", verdict: null, result: null, attempts: 0, createdAt: new Date(Date.now() - 30_000).toISOString() }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: queued } })
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
     expect(await screen.findByText("Waiting for a worker...")).toBeInTheDocument()
     expect(screen.getByText(/Queued for 3[01]s/)).toBeInTheDocument()
+  })
+
+  it("shows no wait time for a job requeued after its worker stopped", async () => {
+    const queued = { ...detail, status: "queued", verdict: null, result: null, attempts: 1 }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: queued } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("Waiting for a worker to retry...")).toBeInTheDocument()
+    expect(screen.queryByText(/Queued for/)).not.toBeInTheDocument()
+  })
+
+  it("lists only the current step until the run's steps are known", async () => {
+    const running = { ...detail, status: "running", verdict: null, result: null, startedAt: new Date().toISOString() }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "fetching" } } } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const steps = await screen.findByRole("list", { name: "Review progress" })
+    const items = within(steps).getAllByRole("listitem")
+    expect(items.map((item) => item.textContent)).toEqual(["Fetching the change"])
+    expect(items[0]).toHaveAttribute("aria-current", "step")
+  })
+
+  it("shows no pass count when no passes were planned, and a plain line for a stage it does not know", async () => {
+    const running = { ...detail, status: "running", verdict: null, result: null, startedAt: new Date().toISOString() }
+    const steps = ["fetching", "preparing", "reviewing"]
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: { ...running, progress: { stage: "reviewing", steps, passes: { done: 0, total: 0 } } },
+      },
+    })
+    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const list = await screen.findByRole("list", { name: "Review progress" })
+    expect(within(list).getAllByRole("listitem")[2]).toHaveTextContent(/^Reviewing$/)
+    unmount()
+
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "tools", steps } } } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("Reviewing the change...")).toBeInTheDocument()
+    expect(screen.queryByRole("list", { name: "Review progress" })).not.toBeInTheDocument()
   })
 
   it("shows the run's recorded cost, or a dash for a run from before costs were recorded", async () => {
@@ -985,7 +1026,7 @@ describe("Review detail page", () => {
         },
       },
       [`POST /api/reviews/${detail.id}/rerun`]: rerun,
-      "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null } },
+      "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null, attempts: 0 } },
     })
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
@@ -1115,7 +1156,7 @@ describe("Review detail page", () => {
   it("cancels a queued review from the header", async () => {
     const cancel = vi.fn(() => jsonResponse(200, { review: { ...detail, status: "cancelled" } }))
     mockApi({
-      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null } },
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null, attempts: 0 } },
       [`POST /api/reviews/${detail.id}/cancel`]: cancel,
     })
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })

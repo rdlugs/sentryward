@@ -1,6 +1,7 @@
 import type { Config } from "../review/config/schema.ts";
 import type { LlmUsage } from "../review/core/models.ts";
 import { effectiveCapabilities } from "../review/llm/capabilities.ts";
+import { verifies } from "../review/validate/verify.ts";
 import {
   callUsage,
   errorMessage,
@@ -19,7 +20,7 @@ export type Probe = typeof probeModel;
 function needs(config: Config) {
   const verifyLevel = config.llm.verifyThinking ?? config.llm.thinking;
   return {
-    thinking: config.llm.thinking !== "off" || (config.review.verify !== "off" && verifyLevel !== "off"),
+    thinking: config.llm.thinking !== "off" || (verifies(config) && verifyLevel !== "off"),
     tools: config.review.context === "agentic",
   };
 }

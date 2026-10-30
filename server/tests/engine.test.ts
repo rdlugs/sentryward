@@ -586,6 +586,18 @@ describe("runReview", () => {
     ]);
   });
 
+  it("reports no pass count when every file is ignored", async () => {
+    const { generate } = fakeModel({});
+    const stages: unknown[] = [];
+
+    await runReview(
+      { changeSet: makeChangeSet(), config: config({ ignorePaths: ["**"], review: { verify: "off" } }) },
+      { generate, now, onProgress: (progress) => stages.push(progress) },
+    );
+
+    expect(stages).toEqual([{ stage: "planning" }]);
+  });
+
   it("still lists the files to every pass when the walkthrough fails", async () => {
     const { generate, requests } = fakeModel({ code_review: { findings: [] }, walkthrough: new Error("nope") });
 

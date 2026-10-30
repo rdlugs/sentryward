@@ -15,6 +15,7 @@ import {
   recordProgress,
 } from "../src/worker/queue.ts";
 import { runJob, skipReason, walkthroughEnabled, type RunJobDeps } from "../src/worker/runJob.ts";
+import { reviewSteps } from "../src/worker/progress.ts";
 import { DEFAULT_CONFIG } from "../src/review/config/schema.ts";
 import { fingerprint } from "../src/review/core/fingerprint.ts";
 import type { FileDiffInput } from "../src/review/diff/parse.ts";
@@ -1267,6 +1268,22 @@ describe("walkthroughEnabled", () => {
   });
 });
 
+describe("reviewSteps", () => {
+  const withSettings = (verify: "off" | "blocking", publish: boolean) => ({
+    ...DEFAULT_CONFIG,
+    review: { ...DEFAULT_CONFIG.review, verify },
+    output: publish
+      ? DEFAULT_CONFIG.output
+      : { ...DEFAULT_CONFIG.output, postInline: false, postSummary: false, postCheck: false, walkthrough: false, blastRadiusLabel: false, effortLabel: false },
+  });
+
+  it("lists verifying and publishing only when the run does them", () => {
+    expect(reviewSteps(withSettings("blocking", true))).toEqual(["fetching", "preparing", "reviewing", "verifying", "publishing"]);
+    expect(reviewSteps(withSettings("off", true))).toEqual(["fetching", "preparing", "reviewing", "publishing"]);
+    expect(reviewSteps(withSettings("blocking", false))).toEqual(["fetching", "preparing", "reviewing", "verifying"]);
+  });
+});
+
 describe("runJob with automatic triggers", () => {
   it("records a skipped webhook job without calling the model or the forge", async () => {
     await enqueue({ repositoryId, number: 42, headSha: "oldhead", trigger: "webhook" });
@@ -1281,6 +1298,24 @@ describe("runJob with automatic triggers", () => {
     expect(stored.error).toMatch(/turned off/);
     expect(model.requests).toHaveLength(0);
     expect(published).toEqual({ inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] });
+  });
+
+  it("waits for a progress write still in flight before a skipped run returns", async () => {
+    await enqueue({ repositoryId, number: 42, headSha: "oldhead", trigger: "webhook" });
+    const job = (await claimNext())!;
+    const { runDeps } = deps({ "base:.sentryward.yaml": "triggers:\n  on_push: false\n" }, {});
+    let pending = 0;
+    runDeps.recordProgress = async () => {
+      pending += 1;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      pending -= 1;
+    };
+
+    await runJob(job, runDeps);
+
+    expect(pending).toBe(0);
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("skipped");
   });
 });
 

@@ -1,4 +1,7 @@
+import type { Config } from "../review/config/schema.ts";
 import type { PipelineProgress, ReviewProgress, ReviewStep } from "../review/core/models.ts";
+import { publishes } from "../review/publish/publisher.ts";
+import { verifies } from "../review/validate/verify.ts";
 import { recordProgress } from "./queue.ts";
 
 export type WriteProgress = (id: string, attempts: number, progress: ReviewProgress) => Promise<void>;
@@ -9,6 +12,18 @@ export interface ProgressRecorder {
   plan(steps: ReviewStep[]): void;
   // Waits for the writes already asked for, so none lands after the job finishes.
   flush(): Promise<void>;
+}
+
+// The steps a run with this config goes through, from the same checks that
+// decide whether the pipeline and runJob report verifying and publishing.
+export function reviewSteps(config: Config): ReviewStep[] {
+  return [
+    "fetching",
+    "preparing",
+    "reviewing",
+    ...(verifies(config) ? (["verifying"] as const) : []),
+    ...(publishes(config) ? (["publishing"] as const) : []),
+  ];
 }
 
 // Progress is best effort: a failed write is logged and never fails the

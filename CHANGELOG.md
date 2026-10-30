@@ -16,9 +16,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   walkthrough as details), checking findings and publishing, listing only the
   steps the run's config turns on. `GET /api/reviews/:id` returns it, and the
   review page shows a step list with elapsed time instead of a single spinner
-  line (queued reviews show how long they have waited). Writes are best
-  effort, coalesced, and only made by the attempt that holds the job; a new
-  claim clears them.
+  line (queued reviews show how long they have waited, and a job requeued
+  after its worker stopped says it is waiting to retry). Until the run's
+  config is known only the current step is listed, so the list only grows.
+  Writes are best effort, coalesced, and only made by the attempt that holds
+  the job; a new claim clears them, and every run waits for its last write
+  before returning.
 - Privacy controls (#109). A new "Privacy and data" section of the README
   lists what Sentryward stores, what is sent to model providers and forges,
   and how long it is kept. Instance admins get an Instance settings page

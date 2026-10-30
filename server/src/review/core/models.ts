@@ -274,8 +274,12 @@ export type ReviewStatus = z.infer<typeof reviewStatusSchema>;
 // Where a running review is, stored on the job while it runs. Coarse on
 // purpose: planning, context and walkthrough are details of the reviewing
 // step, which is all `steps` lists.
-export type ReviewStep = "fetching" | "preparing" | "reviewing" | "verifying" | "publishing";
-export type ReviewStage = ReviewStep | "planning" | "context" | "walkthrough";
+// The client mirrors both enums (client/src/features/reviews/types.ts) and
+// shows a plain running line for a stage it does not know.
+export const reviewStepSchema = z.enum(["fetching", "preparing", "reviewing", "verifying", "publishing"]);
+export type ReviewStep = z.infer<typeof reviewStepSchema>;
+export const reviewStageSchema = z.enum([...reviewStepSchema.options, "planning", "context", "walkthrough"]);
+export type ReviewStage = z.infer<typeof reviewStageSchema>;
 export interface ReviewProgress {
   stage: ReviewStage;
   // The steps this run goes through, known once its config is.

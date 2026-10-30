@@ -13,9 +13,6 @@ const STEP_LABELS: Record<ReviewStep, string> = {
   publishing: "Publishing",
 }
 
-// Until the worker knows the run's config it cannot say which steps are off.
-const DEFAULT_STEPS: ReviewStep[] = ["fetching", "preparing", "reviewing", "verifying", "publishing"]
-
 function stepOf(stage: ReviewStage): ReviewStep {
   return stage === "planning" || stage === "context" || stage === "walkthrough" ? "reviewing" : stage
 }
@@ -27,9 +24,9 @@ function detailOf(progress: Progress): string | null {
     case "context":
       return "Reading surrounding code"
     case "walkthrough":
-      return "Finishing the walkthrough"
+      return "Writing the walkthrough"
     case "reviewing":
-      return progress.passes ? `${progress.passes.done} of ${progress.passes.total} passes` : null
+      return progress.passes?.total ? `${progress.passes.done} of ${progress.passes.total} passes` : null
     default:
       return null
   }
@@ -56,12 +53,15 @@ function Elapsed({ label, since }: { label: string; since: string }) {
 
 export function ReviewProgress({ review }: { review: ReviewDetail }) {
   if (review.status === "queued") {
+    // A job requeued after its worker stopped keeps its original createdAt and
+    // records no requeue time, so a retry shows no wait it cannot measure.
+    const retry = review.attempts > 0
     return (
       <Card>
         <CardContent className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" />
-          <span>Waiting for a worker...</span>
-          <Elapsed label="Queued for" since={review.createdAt} />
+          <span>{retry ? "Waiting for a worker to retry..." : "Waiting for a worker..."}</span>
+          {!retry && <Elapsed label="Queued for" since={review.createdAt} />}
         </CardContent>
       </Card>
     )
@@ -69,8 +69,14 @@ export function ReviewProgress({ review }: { review: ReviewDetail }) {
 
   const since = review.startedAt ?? review.createdAt
   const { progress } = review
-  // A worker from before progress was recorded, or one that has not written yet.
-  if (!progress) {
+  // Until the worker knows the run's config it cannot say which steps are off,
+  // so only the current one is listed: the list grows once the steps are
+  // known and never drops one.
+  const steps = progress && (progress.steps ?? [stepOf(progress.stage)])
+  const current = progress && steps ? steps.indexOf(stepOf(progress.stage)) : -1
+  // A worker from before progress was recorded, one that has not written yet,
+  // or a stage this client does not know.
+  if (!progress || !steps || current === -1) {
     return (
       <Card>
         <CardContent className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
@@ -82,8 +88,6 @@ export function ReviewProgress({ review }: { review: ReviewDetail }) {
     )
   }
 
-  const steps = progress.steps ?? DEFAULT_STEPS
-  const current = steps.indexOf(stepOf(progress.stage))
   const detail = detailOf(progress)
   return (
     <Card>

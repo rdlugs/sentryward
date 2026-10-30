@@ -99,6 +99,12 @@ function verifySizing(config: Config): Config {
   };
 }
 
+// Whether a run verifies at all. Shared with the worker's step list, so the
+// dashboard lists the step exactly when the pipeline reports it.
+export function verifies(config: Config): boolean {
+  return config.review.verify !== "off";
+}
+
 // A second, independent look at the findings that matter. Verification only
 // ever weakens a finding: a refuted one is dropped, an uncertain one demoted,
 // and a failed call keeps the finding as the review reported it.
