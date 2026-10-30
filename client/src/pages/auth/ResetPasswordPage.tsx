@@ -1,14 +1,14 @@
-import { useForm } from "react-hook-form"
+import { useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { Link, useNavigate, useParams } from "react-router"
-import { Loader2 } from "lucide-react"
+import { KeyRound, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Field, FieldDescription, FieldGroup } from "@/components/ui/field"
-import { AuthLayout } from "@/layouts/AuthLayout"
+import { AuthHeader, AuthLayout } from "@/layouts/AuthLayout"
 import { useAuth } from "@/features/auth/useAuth"
-import { TextField } from "@/features/auth/TextField"
+import { PasswordField } from "@/features/auth/PasswordField"
+import { PasswordMatch, PasswordStrength } from "@/features/auth/PasswordStrength"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
 import { usePasswordReset } from "@/features/auth/passwordReset"
 import { resetPasswordSchema, type ResetPasswordInput } from "@/features/auth/schemas"
@@ -24,6 +24,7 @@ export function ResetPasswordPage() {
     resolver: zodResolver(resetPasswordSchema),
     defaultValues: { password: "", confirmPassword: "" },
   })
+  const [password, confirmPassword] = useWatch({ control: form.control, name: ["password", "confirmPassword"] })
 
   async function onSubmit(values: ResetPasswordInput) {
     try {
@@ -48,46 +49,46 @@ export function ResetPasswordPage() {
 
   return (
     <AuthLayout>
-      <Card>
-        <CardHeader className="text-center">
-          <CardTitle className="text-xl">{title}</CardTitle>
-          <CardDescription>{description}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {isLoading && <Loader2 className="mx-auto block animate-spin text-muted-foreground" />}
-          {!isLoading && !reset && (
-            <FieldDescription className="text-center">
-              <Link to="/forgot-password">Request a new link</Link> or <Link to="/login">log in</Link>
-            </FieldDescription>
-          )}
-          {reset && (
-            <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
-              <FieldGroup>
-                <TextField
-                  control={form.control}
-                  name="password"
-                  label="New password"
-                  type="password"
-                  autoComplete="new-password"
-                />
-                <TextField
-                  control={form.control}
-                  name="confirmPassword"
-                  label="Confirm new password"
-                  type="password"
-                  autoComplete="new-password"
-                />
-                <Field>
-                  <Button type="submit" disabled={form.formState.isSubmitting}>
-                    {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
-                    Set password
-                  </Button>
-                </Field>
-              </FieldGroup>
-            </form>
-          )}
-        </CardContent>
-      </Card>
+      <AuthHeader icon={KeyRound} title={title} description={description} />
+      <div>
+        {isLoading && <Loader2 className="mx-auto block animate-spin text-muted-foreground" />}
+        {!isLoading && !reset && (
+          <FieldDescription className="text-center">
+            <Link to="/forgot-password">Request a new link</Link> or <Link to="/login">log in</Link>
+          </FieldDescription>
+        )}
+        {reset && (
+          <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+            <FieldGroup>
+              <PasswordField
+                control={form.control}
+                name="password"
+                label="New password"
+                autoComplete="new-password"
+                autoFocus
+              >
+                <PasswordStrength password={password} />
+              </PasswordField>
+              <PasswordField
+                control={form.control}
+                name="confirmPassword"
+                label="Confirm new password"
+                autoComplete="new-password"
+              >
+                {!form.formState.errors.confirmPassword && (
+                  <PasswordMatch password={password} confirm={confirmPassword} />
+                )}
+              </PasswordField>
+              <Field>
+                <Button type="submit" disabled={form.formState.isSubmitting}>
+                  {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
+                  Set password
+                </Button>
+              </Field>
+            </FieldGroup>
+          </form>
+        )}
+      </div>
     </AuthLayout>
   )
 }
