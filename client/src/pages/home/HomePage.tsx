@@ -6,8 +6,10 @@ import { PageShell } from "@/components/PageShell"
 import { Card, CardContent } from "@/components/ui/card"
 import { useGlobalConfig } from "@/features/config/api"
 import { useConnections } from "@/features/forge/api"
+import { useReviews } from "@/features/reviews/api"
 import { ManualReviewSheet } from "@/features/reviews/ManualReviewSheet"
 import { ConnectionsPanel } from "./ConnectionsPanel"
+import { HomeMetrics } from "./HomeMetrics"
 import { RecentReviewsTimeline } from "./RecentReviewsTimeline"
 import { SetupChecklist } from "./SetupChecklist"
 import { useSetupProgress } from "./useSetupProgress"
@@ -68,6 +70,10 @@ export function HomePage() {
   const connections = useConnections().data?.connections ?? []
   const config = useGlobalConfig().data?.config
   const setup = useSetupProgress()
+  // Same query as the recent reviews timeline. Any run counts, failed ones
+  // included, since failures are one of the figures; nothing shows until it
+  // loads, so a new workspace never flashes empty tiles.
+  const anyReviews = (useReviews({ limit: 5 }).data?.total ?? 0) > 0
 
   const { enabledRepos } = setup
   const blockOn = config?.review.blockOn
@@ -86,6 +92,7 @@ export function HomePage() {
       <PageHeader title="Overview" description="Your review setup at a glance, and what to do next." />
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem] compact:gap-8 spacious:gap-12">
         <div className="flex flex-col gap-8 compact:gap-6 spacious:gap-10">
+          {anyReviews && <HomeMetrics />}
           <SetupChecklist steps={setup.steps} isPending={setup.isPending} onReview={() => setReviewOpen(true)} />
 
           <section className="flex flex-col gap-4 compact:gap-3 spacious:gap-5">
