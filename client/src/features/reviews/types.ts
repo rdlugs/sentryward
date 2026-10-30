@@ -213,6 +213,20 @@ export interface Publication {
   errors: string[]
 }
 
+// Where a running review is (worker/progress.ts on the server), mirroring
+// reviewStepSchema and reviewStageSchema in server/src/review/core/models.ts.
+// Planning, context and walkthrough are details of the reviewing step. A
+// newer server can send a stage this list lacks; ReviewProgress shows a plain
+// running line for it.
+export type ReviewStep = "fetching" | "preparing" | "reviewing" | "verifying" | "publishing"
+export type ReviewStage = ReviewStep | "planning" | "context" | "walkthrough"
+export interface ReviewProgress {
+  stage: ReviewStage
+  // Known once the run's config is.
+  steps?: ReviewStep[]
+  passes?: { done: number; total: number }
+}
+
 export interface ReviewDetail extends ReviewListItem {
   baseSha: string | null
   attempts: number
@@ -220,6 +234,8 @@ export interface ReviewDetail extends ReviewListItem {
   publication: Publication | null
   // Set once the server's retention setting cleared the full result.
   resultExpiredAt: string | null
+  // Null until the worker records a stage, and stale once the run ends.
+  progress: ReviewProgress | null
   // What `error` is about, so the page can link to the fix (null when unknown).
   errorKind: ReviewErrorKind | null
   // The config the run used, with the layer each field came from. Cleared by

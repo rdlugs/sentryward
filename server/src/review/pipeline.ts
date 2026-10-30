@@ -7,6 +7,7 @@ import {
   type LlmUsage,
   type Omission,
   type OmissionReason,
+  type PipelineProgress,
   type RejectedFinding,
   type ReviewResult,
   type ReviewStatus,
@@ -28,7 +29,7 @@ import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/provide
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
 import { compareFindings, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
-import { verifyFindings } from "./validate/verify.ts";
+import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkPatternRules } from "./rules.ts";
 
 export interface ReviewDeps {
@@ -42,6 +43,8 @@ export interface ReviewDeps {
   // Passes that may call tools, when review.context is agentic. Needs
   // `context` as well, which the tools read through.
   generateAgentic?: GenerateAgentic;
+  // Told each time the review moves on, for the dashboard; never awaited.
+  onProgress?: (progress: PipelineProgress) => void;
 }
 
 export interface RunReviewInput {
@@ -143,6 +146,8 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const errors: string[] = [];
   const warnings = [...(input.warnings ?? [])];
   const usage: LlmUsage[] = [];
+  const report = deps.onProgress ?? (() => undefined);
+  report({ stage: "planning" });
 
   const { reviewable, omissions: classified } = classifyFiles(changeSet.files, config.ignorePaths);
   // An incremental review plans passes over the files changed since the last
@@ -174,9 +179,13 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   // What the diff alone shows is ready now, so the walkthrough can weigh it
   // without waiting for context; callers traced below are added after.
   const diffRisks = riskyAreas(reviewable);
-  const walkthroughTask: Promise<Walkthrough | undefined> =
-    config.output.walkthrough && reviewable.length > 0
-      ? generateWalkthrough(deps.generate, changeSet, reviewable, config, input.issues, diffRisks).then(
+  // The walkthrough runs alongside, so it is a stage only while the review
+  // is left waiting for it.
+  const wantsWalkthrough = config.output.walkthrough && reviewable.length > 0;
+  let walkthroughSettled = !wantsWalkthrough;
+  const walkthroughTask: Promise<Walkthrough | undefined> = wantsWalkthrough
+    ? generateWalkthrough(deps.generate, changeSet, reviewable, config, input.issues, diffRisks)
+        .then(
           ({ walkthrough, usage: callUsage, failedUsage: failed }) => {
             usage.push(...failed, callUsage);
             return walkthrough;
@@ -188,13 +197,21 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
             return undefined;
           },
         )
-      : Promise.resolve(undefined);
+        .finally(() => {
+          walkthroughSettled = true;
+        })
+    : Promise.resolve(undefined);
+  const awaitWalkthrough = () => {
+    if (!walkthroughSettled) report({ stage: "walkthrough" });
+    return walkthroughTask;
+  };
 
   // Gathered after planning, into whatever budget each pass has left, so it
   // can never cost the diff a hunk.
   let chunks: Chunk[] = plan.chunks;
   let reach: ReachedCaller[] = [];
   if (config.review.fileContext && deps.context && chunks.length > 0) {
+    report({ stage: "context" });
     try {
       const gathered = await gatherContext({
         chunks,
@@ -217,7 +234,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   // walkthrough still leaves the file list.
   let manifest: ManifestEntry[] | undefined;
   if (multiPass) {
-    const summaries = new Map(((await walkthroughTask)?.fileSummaries ?? []).map((entry) => [entry.path, entry.summary]));
+    const summaries = new Map(((await awaitWalkthrough())?.fileSummaries ?? []).map((entry) => [entry.path, entry.summary]));
     const paths = new Set(reviewable.map((file) => file.path));
     manifest = lineCounts(changeSet)
       .filter((file) => paths.has(file.path))
@@ -264,11 +281,20 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       };
     }
   };
+  let passesDone = 0;
+  // With nothing planned there are no passes to count.
+  const reportPasses = () => {
+    if (chunks.length > 0) report({ stage: "reviewing", passes: { done: passesDone, total: chunks.length } });
+  };
+  reportPasses();
   const outcomes = await mapLimit(chunks, deps.concurrency ?? 3, async (chunk): Promise<PassOutcome> => {
     try {
       return await reviewPass(chunk);
     } catch (err) {
       return { chunk, error: errorMessage(err), spent: failedUsage(spentBy(err), "review", chunk.index) };
+    } finally {
+      passesDone += 1;
+      reportPasses();
     }
   });
   for (const outcome of outcomes) {
@@ -286,7 +312,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       omissions.push({ path: part.file.path, reason: "chunk_failed", detail: `pass ${outcome.chunk.index}` });
     }
   }
-  const generated = await walkthroughTask;
+  const generated = await awaitWalkthrough();
   // The floor is applied here rather than left to the model, so a removed
   // auth check or a route the change reaches is never reported as small.
   // The areas themselves are part of the blast radius, so its setting keeps
@@ -316,6 +342,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   );
   // After validation, so only findings that would be published are checked,
   // and before the verdict, so a refuted blocker cannot fail the status.
+  if (verifies(config)) report({ stage: "verifying" });
   const verified = await verifyFindings({
     findings: validation.findings,
     changeSet,

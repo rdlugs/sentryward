@@ -377,6 +377,10 @@ model ReviewJob {
   title           String?
   // What was posted to the forge: inline comments, summary, commit status.
   publication     Json?
+  // The running attempt's current stage and pass counts (worker/progress.ts),
+  // so a long review shows it is moving. Cleared on claim, so a retried job
+  // never shows where the attempt before it got to.
+  progress        Json?
   error           String?
   attempts        Int            @default(0)
   lockedAt        DateTime?      @map("locked_at") @db.Timestamptz

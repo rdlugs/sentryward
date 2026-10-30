@@ -28,6 +28,7 @@ import {
 } from "../review/llm/agentic.ts";
 import type { WalkthroughIssues } from "../review/llm/walkthrough.ts";
 import { runReview } from "../review/pipeline.ts";
+import { verifies } from "../review/validate/verify.ts";
 import { publishes, publishReview, resolvesThreads } from "../review/publish/publisher.ts";
 import { pendingStatus } from "../review/publish/status.ts";
 import { summarize } from "../review/render/json.ts";
@@ -49,6 +50,7 @@ import { prepareCapabilities, type Probe } from "./capabilities.ts";
 import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
 import { incrementFor } from "./incremental.ts";
+import { progressRecorder, reviewSteps, type ProgressRecorder, type WriteProgress } from "./progress.ts";
 import {
   ACCESS_LOST_REASON,
   claimState,
@@ -86,6 +88,8 @@ export interface RunJobDeps {
   // mode checks hosts with.
   policyFor?: (workspaceId: string) => Promise<EffectivePolicy>;
   resolveHost?: Resolve;
+  // Where the dashboard's progress is written; absent means the job row.
+  recordProgress?: WriteProgress;
 }
 
 const defaultDeps: RunJobDeps = {
@@ -182,6 +186,17 @@ function connectionRefused(connection: ForgeConnection, deps: RunJobDeps): Promi
 // nothing has been posted yet. Problems inside the review or while publishing
 // are recorded instead.
 export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Promise<void> {
+  const progress = progressRecorder(job, deps.recordProgress);
+  try {
+    await runClaimedJob(job, deps, progress);
+  } finally {
+    // However the run ends, no progress write outlives it. One that lands
+    // after the result changes nothing: recordProgress only writes running jobs.
+    await progress.flush();
+  }
+}
+
+async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: ProgressRecorder): Promise<void> {
   const repo = await prisma.repository.findUnique({
     where: { id: job.repositoryId },
     include: { connection: { include: { workspace: { select: { reviewSettings: true, name: true } } } } },
@@ -206,6 +221,7 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     return;
   }
 
+  progress.set({ stage: "fetching" });
   const forge = deps.adapterFor(repo.connection);
   const saved = {
     globalSettings: repo.connection.workspace.reviewSettings,
@@ -265,12 +281,14 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     return;
   }
 
+  progress.plan(reviewSteps(config));
+  progress.set({ stage: "preparing" });
   const walkthrough = walkthroughEnabled(job.trigger, config, changeSet.isDraft);
   // Only the models this review will call are checked, so a walkthrough or
   // verify model left set while that pass is off does not fail the job.
   const primary = [modelChain(config.llm, "review")[0]];
   if (walkthrough) primary.push(modelChain(config.llm, "walkthrough")[0]);
-  if (config.review.verify !== "off") primary.push(modelChain(config.llm, "verify")[0]);
+  if (verifies(config)) primary.push(modelChain(config.llm, "verify")[0]);
   const models = [...new Set(primary)];
 
   // Prices are loaded before any model call, so a failed lookup ends the job
@@ -483,6 +501,7 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
       {
         generate: abortableGenerate(generate, watch.signal),
         context,
+        onProgress: progress.set,
         ...(generateAgentic ? { generateAgentic: abortableGenerateAgentic(generateAgentic, watch.signal) } : {}),
       },
     );
@@ -520,6 +539,7 @@ export async function runJob(job: ReviewJob, deps: RunJobDeps = defaultDeps): Pr
     // The same transitions syncFindings writes after the job is stored, plus
     // thread updates an earlier run could not make.
     const threads = threadOperations(findings, findingTransitions(findings, result));
+    progress.set({ stage: "publishing" });
     publication = await publishReview({
       publisher: forge,
       changeSet,

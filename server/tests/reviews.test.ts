@@ -485,6 +485,16 @@ describe("GET /api/reviews/:id and /markdown", () => {
     expect(res.body.review.result.usage[0].cost.total).toBe(0.0004);
   });
 
+  it("serves a running review's progress", async () => {
+    const job = await completedJob();
+    const progress = { stage: "reviewing", steps: ["fetching", "preparing", "reviewing"], passes: { done: 1, total: 3 } };
+    await prisma.reviewJob.update({ where: { id: job.id }, data: { status: "running", progress } });
+
+    const res = await request(app).get(`/api/reviews/${job.id}`).set("Cookie", cookie);
+
+    expect(res.body.review.progress).toEqual(progress);
+  });
+
   it("serves exactly the document toMarkdown renders", async () => {
     const job = await completedJob();
 
