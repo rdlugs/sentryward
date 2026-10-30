@@ -334,6 +334,22 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- Redesigned login, sign-up, password reset and invite pages. On wide screens
+  they split into a product panel (what Sentryward does, light or dark with
+  the theme) beside the form; on phones only the form shows, under the logo.
+  Password fields get a show/hide toggle, sign-up and reset show a live
+  strength meter and a "Passwords match" check (advisory, the 8-character
+  minimum is still the only rule), inputs carry icons, and the first field
+  is focused. Errors that aren't about a field, like wrong credentials,
+  appear as an alert in the form instead of a toast, and the first user's
+  "you will be admin" note is an info alert. The product panel plays an
+  example review on a loop: a small diff gets an inline finding (severity,
+  title typed in, explanation and a suggested change), then the
+  `sentryward/review` status turns into a verdict, across three examples.
+  Behind it, a slow brand-blue waveform drawn as dithered vertical bars
+  (wider where it is brighter) drifts across the right of the panel, fading
+  out under the text. Both only run while the panel is on screen and the tab
+  is visible, and hold still with reduced motion.
 - The review page header groups "Copy prompt for all findings", "Copy
   markdown" and "Download markdown" into an Export menu (#155), leaving Re-run
   (and Cancel while the review is active) as the only buttons. Items keep
@@ -420,6 +436,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- The "Sign up" link could disappear from the login page.
+  `GET /api/auth/registration` shared the login rate limit (20 per 15
+  minutes), and every auth page load reads it, so reloading those pages
+  could exhaust the allowance; it now uses the general API rate limit.
 - The home status no longer says "Reviews are on" when the workspace has no
   usable LLM connection: it asks for one first. A server-provided key counts
   as usable unless the workspace stored its own key for that provider (reviews

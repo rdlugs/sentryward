@@ -1,32 +1,29 @@
-import { useForm } from "react-hook-form"
+import { useState } from "react"
+import { useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { Link, useNavigate, useSearchParams } from "react-router"
-import { Loader2 } from "lucide-react"
+import { Loader2, Lock, Mail, ShieldCheck, User, UserPlus, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Field, FieldDescription, FieldGroup } from "@/components/ui/field"
-import { AuthLayout } from "@/layouts/AuthLayout"
+import { AuthHeader, AuthLayout } from "@/layouts/AuthLayout"
 import { useAuth } from "@/features/auth/useAuth"
 import { TextField } from "@/features/auth/TextField"
+import { PasswordField } from "@/features/auth/PasswordField"
+import { PasswordMatch, PasswordStrength } from "@/features/auth/PasswordStrength"
+import { FormAlert } from "@/features/auth/FormAlert"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
 import { registerSchema, type RegisterInput } from "@/features/auth/schemas"
 import { useRegistration } from "@/features/auth/registration"
 
-function RegistrationUnavailable({ title, description }: { title: string; description: string }) {
+function RegistrationUnavailable({ icon, title, description }: { icon: LucideIcon; title: string; description: string }) {
   return (
     <AuthLayout>
-      <Card>
-        <CardHeader className="text-center">
-          <CardTitle className="text-xl">{title}</CardTitle>
-          <CardDescription>{description}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <FieldDescription className="text-center">
-            Already have an account? <Link to="/login">Log in</Link>
-          </FieldDescription>
-        </CardContent>
-      </Card>
+      <AuthHeader icon={icon} title={title} description={description} />
+      <FieldDescription className="text-center">
+        Already have an account? <Link to="/login">Log in</Link>
+      </FieldDescription>
     </AuthLayout>
   )
 }
@@ -39,19 +36,22 @@ export function RegisterPage() {
   // The form stays usable while this loads or if it fails: the server enforces
   // the mode either way, this only explains it up front.
   const { data: registration } = useRegistration()
+  const [formError, setFormError] = useState<string | null>(null)
 
   const form = useForm<RegisterInput>({
     resolver: zodResolver(registerSchema),
     defaultValues: { name: "", email: "", password: "", confirmPassword: "", inviteToken },
   })
+  const [password, confirmPassword] = useWatch({ control: form.control, name: ["password", "confirmPassword"] })
 
   async function onSubmit(values: RegisterInput) {
+    setFormError(null)
     try {
       const user = await register(values)
       toast.success(`Welcome, ${user.name}!`)
       navigate("/home", { replace: true })
     } catch (error) {
-      applyServerErrors(error, form.setError)
+      applyServerErrors(error, form.setError, setFormError)
     }
   }
 
@@ -59,6 +59,7 @@ export function RegisterPage() {
     if (registration.mode === "closed") {
       return (
         <RegistrationUnavailable
+          icon={Lock}
           title="Registration is closed"
           description="This Sentryward instance is not accepting new accounts. Ask an admin for access."
         />
@@ -67,6 +68,7 @@ export function RegisterPage() {
     if (registration.mode === "invite" && !inviteToken) {
       return (
         <RegistrationUnavailable
+          icon={Mail}
           title="Invite required"
           description="Accounts on this Sentryward instance are created from invite links. Ask an admin to invite you."
         />
@@ -76,58 +78,61 @@ export function RegisterPage() {
 
   return (
     <AuthLayout>
-      <Card>
-        <CardHeader className="text-center">
-          <CardTitle className="text-xl">Create an account</CardTitle>
-          <CardDescription>
-            {registration?.firstUser ? "You are the first user, so you will be this instance's admin" : "Get started with Sentryward"}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
-            <FieldGroup>
-              <TextField
-                control={form.control}
-                name="name"
-                label="Name"
-                autoComplete="name"
-                placeholder="Jane Doe"
-              />
-              <TextField
-                control={form.control}
-                name="email"
-                label="Email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-              />
-              <TextField
-                control={form.control}
-                name="password"
-                label="Password"
-                type="password"
-                autoComplete="new-password"
-              />
-              <TextField
-                control={form.control}
-                name="confirmPassword"
-                label="Confirm password"
-                type="password"
-                autoComplete="new-password"
-              />
-              <Field>
-                <Button type="submit" disabled={form.formState.isSubmitting}>
-                  {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
-                  Create account
-                </Button>
-                <FieldDescription className="text-center">
-                  Already have an account? <Link to="/login">Log in</Link>
-                </FieldDescription>
-              </Field>
-            </FieldGroup>
-          </form>
-        </CardContent>
-      </Card>
+      <AuthHeader icon={UserPlus} title="Create an account" description="Get started with Sentryward" />
+      <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+        <FieldGroup>
+          <FormAlert message={formError} />
+          {registration?.firstUser && (
+            <Alert>
+              <ShieldCheck />
+              <AlertDescription>You are the first user, so you will be this instance's admin.</AlertDescription>
+            </Alert>
+          )}
+          <TextField
+            control={form.control}
+            name="name"
+            label="Name"
+            autoComplete="name"
+            autoFocus
+            placeholder="Jane Doe"
+            icon={User}
+          />
+          <TextField
+            control={form.control}
+            name="email"
+            label="Email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@example.com"
+            icon={Mail}
+          />
+          <PasswordField
+            control={form.control}
+            name="password"
+            label="Password"
+            autoComplete="new-password"
+          >
+            <PasswordStrength password={password} />
+          </PasswordField>
+          <PasswordField
+            control={form.control}
+            name="confirmPassword"
+            label="Confirm password"
+            autoComplete="new-password"
+          >
+            {!form.formState.errors.confirmPassword && <PasswordMatch password={password} confirm={confirmPassword} />}
+          </PasswordField>
+          <Field>
+            <Button type="submit" disabled={form.formState.isSubmitting}>
+              {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
+              Create account
+            </Button>
+            <FieldDescription className="text-center">
+              Already have an account? <Link to="/login">Log in</Link>
+            </FieldDescription>
+          </Field>
+        </FieldGroup>
+      </form>
     </AuthLayout>
   )
 }

@@ -2,11 +2,10 @@ import type { ReactNode } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { Link } from "react-router"
-import { Loader2 } from "lucide-react"
+import { KeyRound, Loader2, Mail } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Field, FieldDescription, FieldGroup } from "@/components/ui/field"
-import { AuthLayout } from "@/layouts/AuthLayout"
+import { AuthHeader, AuthLayout } from "@/layouts/AuthLayout"
 import { TextField } from "@/features/auth/TextField"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
 import { useRequestPasswordReset } from "@/features/auth/passwordReset"
@@ -75,7 +74,9 @@ export function ForgotPasswordPage() {
             label="Email"
             type="email"
             autoComplete="email"
+            autoFocus
             placeholder="you@example.com"
+            icon={Mail}
           />
           <Field>
             <Button type="submit" disabled={form.formState.isSubmitting}>
@@ -91,13 +92,8 @@ export function ForgotPasswordPage() {
 
   return (
     <AuthLayout>
-      <Card>
-        <CardHeader className="text-center">
-          <CardTitle className="text-xl">Reset your password</CardTitle>
-          <CardDescription>{description}</CardDescription>
-        </CardHeader>
-        <CardContent>{content}</CardContent>
-      </Card>
+      <AuthHeader icon={KeyRound} title="Reset your password" description={description} />
+      {content}
     </AuthLayout>
   )
 }

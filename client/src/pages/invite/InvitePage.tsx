@@ -1,10 +1,9 @@
 import { Link, useNavigate, useParams } from "react-router"
-import { Loader2 } from "lucide-react"
+import { Loader2, MailOpen } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { FieldDescription, FieldError } from "@/components/ui/field"
-import { AuthLayout } from "@/layouts/AuthLayout"
+import { AuthHeader, AuthLayout } from "@/layouts/AuthLayout"
 import { useAuth } from "@/features/auth/useAuth"
 import { useAcceptInvite, useInvite } from "@/features/auth/registration"
 
@@ -57,44 +56,39 @@ export function InvitePage() {
 
   return (
     <AuthLayout>
-      <Card>
-        <CardHeader className="text-center">
-          <CardTitle className="text-xl">{title}</CardTitle>
-          <CardDescription>{description}</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {isLoading && <Loader2 className="mx-auto animate-spin text-muted-foreground" />}
-          {invite &&
-            (user ? (
-              team ? (
-                <>
-                  <Button onClick={join} disabled={accept.isPending}>
-                    {accept.isPending && <Loader2 className="animate-spin" />}
-                    Join {team.name}
-                  </Button>
-                  {accept.error && <FieldError className="text-center">{accept.error.message}</FieldError>}
-                  <FieldDescription className="text-center">
-                    You're signed in as {user.email}. <Link to="/home">Not now</Link>
-                  </FieldDescription>
-                </>
-              ) : (
+      <AuthHeader icon={MailOpen} title={title} description={description} />
+      <div className="flex flex-col gap-4">
+        {isLoading && <Loader2 className="mx-auto animate-spin text-muted-foreground" />}
+        {invite &&
+          (user ? (
+            team ? (
+              <>
+                <Button onClick={join} disabled={accept.isPending}>
+                  {accept.isPending && <Loader2 className="animate-spin" />}
+                  Join {team.name}
+                </Button>
+                {accept.error && <FieldError className="text-center">{accept.error.message}</FieldError>}
                 <FieldDescription className="text-center">
-                  You're signed in as {user.email}. Log out first to create a new account with this invite.
+                  You're signed in as {user.email}. <Link to="/home">Not now</Link>
                 </FieldDescription>
-              )
+              </>
             ) : (
-              <Button asChild>
-                <Link to={`/register?invite=${encodeURIComponent(token)}`}>Create account</Link>
-              </Button>
-            ))}
-          {!user && (
-            <FieldDescription className="text-center">
-              Already have an account? {loginLink}
-              {team && " to join with it."}
-            </FieldDescription>
-          )}
-        </CardContent>
-      </Card>
+              <FieldDescription className="text-center">
+                You're signed in as {user.email}. Log out first to create a new account with this invite.
+              </FieldDescription>
+            )
+          ) : (
+            <Button asChild>
+              <Link to={`/register?invite=${encodeURIComponent(token)}`}>Create account</Link>
+            </Button>
+          ))}
+        {!user && (
+          <FieldDescription className="text-center">
+            Already have an account? {loginLink}
+            {team && " to join with it."}
+          </FieldDescription>
+        )}
+      </div>
     </AuthLayout>
   )
 }
