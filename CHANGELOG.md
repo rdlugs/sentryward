@@ -289,6 +289,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- The review page header groups "Copy prompt for all findings", "Copy
+  markdown" and "Download markdown" into an Export menu (#155), leaving Re-run
+  (and Cancel while the review is active) as the only buttons. Items keep
+  their disabled states, and the Export button shows a spinner while a
+  markdown copy or download is still running.
 - Rows in the Reviews and Findings tables open on a click anywhere outside
   their controls (#160), not just on the title. The title stays a real link
   (or button), so middle-click and Cmd-click still open a new tab, and the

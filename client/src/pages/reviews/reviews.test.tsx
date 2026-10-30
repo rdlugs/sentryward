@@ -844,6 +844,23 @@ describe("Review detail page", () => {
     expect(writeText.mock.calls[0][0]).toContain("Suggested replacement for those lines:\n\ndb.query(sql, [q])")
   })
 
+  // The export actions live in the header's Export menu, which closes after each pick.
+  async function exportItem(name: string, user: Pick<typeof userEvent, "click"> = userEvent) {
+    await user.click(await screen.findByRole("button", { name: "Export" }))
+    return screen.findByRole("menuitem", { name })
+  }
+
+  it("copies an agent prompt for all findings from the Export menu", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    await user.click(await exportItem("Copy prompt for all findings", user))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("SQL injection in search")))
+  })
+
   it("keeps markdown copying pending until the clipboard write finishes", async () => {
     const markdown = "# Sentryward review\n"
     let resolveMarkdown!: (value: string) => void
@@ -865,23 +882,27 @@ describe("Review detail page", () => {
     )
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
-    const button = await screen.findByRole("button", { name: "Copy markdown" })
-    await user.click(button)
+    await user.click(await exportItem("Copy markdown", user))
+    const trigger = screen.getByRole("button", { name: "Export" })
+    expect(trigger.querySelector(".animate-spin")).toBeInTheDocument()
 
-    expect(button).toBeDisabled()
-    expect(button.querySelector(".animate-spin")).toBeInTheDocument()
-    await user.click(button)
+    // Reopened while pending, the item shows its spinner and ignores another pick.
+    const item = await exportItem("Copy markdown", user)
+    expect(item).toHaveAttribute("aria-disabled", "true")
+    expect(item.querySelector(".animate-spin")).toBeInTheDocument()
+    await user.click(item)
     expect(fetchMarkdown).toHaveBeenCalledOnce()
     expect(writeText).not.toHaveBeenCalled()
 
     resolveMarkdown(markdown)
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
-    expect(button).toBeDisabled()
+    expect(item).toHaveAttribute("aria-disabled", "true")
 
     finishCopy()
     expect(await screen.findByText("Markdown copied")).toBeInTheDocument()
-    expect(button).toBeEnabled()
-    expect(button.querySelector(".animate-spin")).not.toBeInTheDocument()
+    expect(item).not.toHaveAttribute("aria-disabled")
+    expect(item.querySelector(".animate-spin")).not.toBeInTheDocument()
+    expect(trigger.querySelector(".animate-spin")).not.toBeInTheDocument()
   })
 
   it.each(["Copy", "Download"])("keeps %s markdown pending and recovers from a failed request", async (action) => {
@@ -898,18 +919,21 @@ describe("Review detail page", () => {
     })
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
-    const button = await screen.findByRole("button", { name: `${action} markdown` })
-    await userEvent.click(button)
+    await userEvent.click(await exportItem(`${action} markdown`))
+    const trigger = screen.getByRole("button", { name: "Export" })
+    expect(trigger.querySelector(".animate-spin")).toBeInTheDocument()
 
-    expect(button).toBeDisabled()
-    expect(button.querySelector(".animate-spin")).toBeInTheDocument()
-    await userEvent.click(button)
+    const item = await exportItem(`${action} markdown`)
+    expect(item).toHaveAttribute("aria-disabled", "true")
+    expect(item.querySelector(".animate-spin")).toBeInTheDocument()
+    await userEvent.click(item)
     expect(fetchMarkdown).toHaveBeenCalledOnce()
 
     rejectMarkdown(new Error("Connection lost"))
     await waitFor(() => expect(showError).toHaveBeenCalledWith(`Could not ${action.toLowerCase()} the markdown`))
-    expect(button).toBeEnabled()
-    expect(button.querySelector(".animate-spin")).not.toBeInTheDocument()
+    expect(item).not.toHaveAttribute("aria-disabled")
+    expect(item.querySelector(".animate-spin")).not.toBeInTheDocument()
+    expect(trigger.querySelector(".animate-spin")).not.toBeInTheDocument()
   })
 
   // Keep downloads from creating real object URLs or navigating on the anchor click.
@@ -933,12 +957,15 @@ describe("Review detail page", () => {
     const { blobs, click } = stubDownload()
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Download markdown" }))
+    await userEvent.click(await exportItem("Download markdown"))
 
     await waitFor(() => expect(click).toHaveBeenCalledOnce())
     expect((click.mock.contexts[0] as HTMLAnchorElement).download).toBe(`sentryward-review-${detail.id}.md`)
     expect(await blobs[0].text()).toBe(markdown)
-    await waitFor(() => expect(screen.getByRole("button", { name: "Download markdown" })).toBeEnabled())
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Export" }).querySelector(".animate-spin")).not.toBeInTheDocument(),
+    )
+    expect(await exportItem("Download markdown")).not.toHaveAttribute("aria-disabled")
   })
 
   it("offers no markdown download without a result", async () => {
@@ -947,7 +974,12 @@ describe("Review detail page", () => {
     })
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
-    expect(await screen.findByRole("button", { name: "Download markdown" })).toBeDisabled()
+    expect(await exportItem("Download markdown")).toHaveAttribute("aria-disabled", "true")
+    expect(screen.getByRole("menuitem", { name: "Copy markdown" })).toHaveAttribute("aria-disabled", "true")
+    expect(screen.getByRole("menuitem", { name: "Copy prompt for all findings" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    )
   })
 
   it("says when the full result has expired under retention", async () => {
@@ -960,8 +992,8 @@ describe("Review detail page", () => {
 
     expect(await screen.findByText("The full result has expired")).toBeInTheDocument()
     expect(screen.queryByText("The review did not run")).not.toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Copy markdown" })).toBeDisabled()
-    expect(screen.getByRole("button", { name: "Download markdown" })).toBeDisabled()
+    expect(await exportItem("Copy markdown")).toHaveAttribute("aria-disabled", "true")
+    expect(screen.getByRole("menuitem", { name: "Download markdown" })).toHaveAttribute("aria-disabled", "true")
   })
 
   it("keeps the error of an expired failed review", async () => {
@@ -993,11 +1025,11 @@ describe("Review detail page", () => {
     const { click } = stubDownload()
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Download markdown" }))
+    await userEvent.click(await exportItem("Download markdown"))
 
     expect(await screen.findByText("Could not download the markdown")).toBeInTheDocument()
     expect(click).not.toHaveBeenCalled()
-    expect(screen.getByRole("button", { name: "Download markdown" })).toBeEnabled()
+    expect(await exportItem("Download markdown")).not.toHaveAttribute("aria-disabled")
   })
 
   it.each([
