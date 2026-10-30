@@ -708,13 +708,16 @@ so scripts written before workspaces keep working. Routes under
 | POST   | `/api/auth/logout`   | Clears the auth cookie |
 | GET    | `/api/auth/me`       | Current user, or 401 |
 | GET    | `/api/connections`   | The workspace's forge connections, which browser connect flows are configured, and the GitLab OAuth host |
+| PUT    | `/api/connections/order` | Admins: `{ ids }`, every connection in the workspace in the order to list them; 409 if the set has changed. Connections added later are listed after |
 | POST   | `/api/connections/gitlab` | `{ host?, token }`, validates the token against GitLab and stores it encrypted |
 | GET    | `/api/connections/github/install?workspace=` | Session only: redirects to the GitHub App's install page; the installation is added to that workspace |
 | GET    | `/api/connections/github/callback` | Session only: GitHub's return URL after installing the app |
 | GET    | `/api/connections/gitlab/oauth/start?workspace=` | Session only: redirects to GitLab's OAuth authorize page with a single-use state (PKCE) |
 | GET    | `/api/connections/gitlab/oauth/callback` | Session only: GitLab's OAuth redirect URI; validates the state, exchanges the code and stores the connection |
 | DELETE | `/api/connections/:id` | Removes a connection and its repositories |
-| GET    | `/api/repos?connectionId=` | Repositories the connection can see, with their enabled flag |
+| GET    | `/api/repos?connectionId=` | Repositories the connection can see, by path, with their enabled flag and `position` (the Repositories tab's saved order, or null) |
+| GET    | `/api/repos/last-reviews` | `{ lastReviews }`, each added repository's newest run that wasn't skipped or superseded, by repository id; repositories with none are left out |
+| PUT    | `/api/repos/order`   | Admins: `{ ids }`, every added repository in the workspace in the order to show them; 409 if the set has changed |
 | POST   | `/api/repos`         | `{ connectionId, externalId }`, enables a repository for review |
 | PATCH  | `/api/repos/:id`     | `{ enabled?, settings?, followGlobal? }`; `settings` replaces the saved review overrides, `followGlobal` makes the repository ignore them and use only the global config |
 | GET    | `/api/repos/:id/config` | The effective review config for the default branch, where each value came from, and any repository-file warnings |

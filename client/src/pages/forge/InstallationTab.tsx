@@ -1,28 +1,21 @@
 import { useEffect, useMemo, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { Link, useSearchParams } from "react-router"
-import { FolderGit2, Info, Loader2, MoreHorizontal, Plug, Plus, Trash2 } from "lucide-react"
+import { useSearchParams } from "react-router"
+import { Loader2, Plug, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
 import { SearchableSelect } from "@/components/SearchableSelect"
-import { SortableHead } from "@/components/SortableHead"
-import { TablePagination } from "@/components/TablePagination"
 import {
   ActiveFilterChips,
   FilterPopover,
   FilterSelect,
   FilterToolbar,
-  NoMatchesRow,
   SearchInput,
   type ActiveFilter,
 } from "@/components/TableFilters"
 import { ALL, matchesQuery, selectedLabel } from "@/lib/filters"
-import { paginate, usePagination } from "@/hooks/use-pagination"
-import { useSort } from "@/hooks/use-sort"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -34,36 +27,31 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Separator } from "@/components/ui/separator"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Skeleton } from "@/components/ui/skeleton"
 import { TextField } from "@/features/auth/TextField"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
+import { useAuth } from "@/features/auth/useAuth"
 import {
-  statusRank,
   STATUS_OPTIONS,
   useConnectionStatuses,
   useConnectToken,
   useConnections,
   useDeleteConnection,
+  useReorderConnections,
   type Connection,
   type ConnectionStatus,
   type TokenConnectInput,
 } from "@/features/forge/api"
-import { FORGE_KIND_OPTIONS, forgeKey, kindLabel } from "@/features/forge/forgeKind"
+import { FORGE_KIND_OPTIONS, forgeKey } from "@/features/forge/forgeKind"
+import { ConnectionCard } from "@/features/forge/ConnectionCard"
 import { ConnectionDetailsSheet } from "@/features/forge/ConnectionDetailsSheet"
-import { ConnectionStatusBadge } from "@/features/forge/ConnectionStatusBadge"
+import { SortableGrid } from "@/features/forge/SortableGrid"
 import { isProvider, offersOAuth, PROVIDER_IDS, PROVIDERS, type TokenMethod } from "@/features/forge/providers"
 import type { Provider } from "@/features/reviews/types"
-import { apiWorkspace } from "@/lib/api"
+import { ApiError, apiWorkspace } from "@/lib/api"
 
 // The install (or OAuth sign-in) starts with a browser navigation, which cannot carry the
 // workspace header, so a team workspace goes in the query instead.
@@ -111,10 +99,12 @@ function useReturnToast() {
 function TokenForm({
   provider,
   method,
+  initialHost,
   onConnected,
 }: {
   provider: Provider
   method: TokenMethod
+  initialHost?: string
   onConnected?: () => void
 }) {
   const connect = useConnectToken(provider)
@@ -123,7 +113,7 @@ function TokenForm({
   const form = useForm<TokenConnectInput>({
     resolver: zodResolver(tokenSchema(method)),
     defaultValues: {
-      host: method.fixedHost ?? "",
+      host: method.fixedHost ?? initialHost ?? "",
       token: "",
       ...Object.fromEntries(extraFields.map((field) => [field.name, ""])),
     },
@@ -176,184 +166,80 @@ function TokenForm({
   )
 }
 
-type SortKey = "account" | "forge" | "host" | "repositories" | "active" | "addedBy" | "createdAt"
-
-function compareConnections(
-  a: Connection,
-  b: Connection,
-  key: SortKey,
-  statuses: Record<string, ConnectionStatus | undefined>,
-) {
-  switch (key) {
-    case "account":
-      return a.accountLogin.localeCompare(b.accountLogin)
-    case "forge":
-      return kindLabel(a).localeCompare(kindLabel(b))
-    case "host":
-      return a.host.localeCompare(b.host)
-    case "repositories":
-      return a.repositoryCount - b.repositoryCount
-    case "active":
-      return statusRank(statuses[a.id]) - statusRank(statuses[b.id])
-    case "addedBy":
-      return (a.createdBy?.name ?? "").localeCompare(b.createdBy?.name ?? "")
-    case "createdAt":
-      return Date.parse(a.createdAt) - Date.parse(b.createdAt)
-  }
-}
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleDateString(undefined, { dateStyle: "medium" })
-}
-
-function ConnectionsTable({
+function ConnectionGrid({
   connections,
   statuses,
+  reorderable,
+  onReconnect,
 }: {
   connections: Connection[]
   statuses: Record<string, ConnectionStatus | undefined>
+  reorderable: boolean
+  onReconnect: (connection: Connection) => void
 }) {
-  // Unsorted keeps the API order (oldest first).
-  const { sort, onSort } = useSort<SortKey>()
+  const reorder = useReorderConnections()
   const [selected, setSelected] = useState<Connection | null>(null)
   const [removing, setRemoving] = useState<Connection | null>(null)
 
-  const sorted = useMemo(() => {
-    if (!sort) return connections
-    const direction = sort.dir === "asc" ? 1 : -1
-    return [...connections].sort(
-      (a, b) =>
-        direction * compareConnections(a, b, sort.key, statuses) || a.accountLogin.localeCompare(b.accountLogin),
-    )
-  }, [connections, sort, statuses])
-  const pagination = usePagination()
-  const page = paginate(sorted, pagination.page, pagination.size)
+  function onReorder(ids: string[]) {
+    reorder.mutate(ids, {
+      // A 409 says the list changed under the user, which a generic message would hide.
+      onError: (err) =>
+        toast.error(err instanceof ApiError && err.status === 409 ? err.message : "Could not save the new order"),
+    })
+  }
 
-  const head = { sort, onSort }
   return (
     <>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <SortableHead label="Account" sortKey="account" {...head} />
-            <SortableHead label="Forge" sortKey="forge" {...head} />
-            <SortableHead label="Host" sortKey="host" {...head} />
-            <SortableHead label="Repositories" sortKey="repositories" {...head} />
-            <SortableHead label="Active" sortKey="active" {...head} />
-            <SortableHead label="Added by" sortKey="addedBy" {...head} />
-            <SortableHead label="Created" sortKey="createdAt" {...head} />
-            <TableHead />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {!sorted.length && <NoMatchesRow colSpan={8}>No connections match your filters.</NoMatchesRow>}
-          {page.rows.map((connection) => {
-            const provider = PROVIDERS[connection.provider]
-            return (
-              <TableRow key={connection.id}>
-                <TableCell className="font-medium">{connection.accountLogin}</TableCell>
-                <TableCell>
-                  <Badge variant="outline">
-                    <provider.icon />
-                    {kindLabel(connection)}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-muted-foreground">{connection.host}</TableCell>
-                <TableCell className="text-muted-foreground tabular-nums">{connection.repositoryCount}</TableCell>
-                <TableCell>
-                  <ConnectionStatusBadge status={statuses[connection.id]} />
-                </TableCell>
-                <TableCell className="text-muted-foreground" title={connection.createdBy?.email}>
-                  {connection.createdBy?.name ?? "Removed user"}
-                </TableCell>
-                <TableCell className="text-muted-foreground" title={new Date(connection.createdAt).toLocaleString()}>
-                  {formatDate(connection.createdAt)}
-                </TableCell>
-                <TableCell className="text-right">
-                  <ConnectionActions
-                    connection={connection}
-                    onDetails={() => setSelected(connection)}
-                    onRemove={() => setRemoving(connection)}
-                  />
-                </TableCell>
-              </TableRow>
-            )
-          })}
-        </TableBody>
-      </Table>
-      <TablePagination
-        page={page.page}
-        size={pagination.size}
-        total={page.total}
-        onPageChange={pagination.setPage}
-        onSizeChange={pagination.setSize}
-      />
+      {connections.length ? (
+        <SortableGrid ids={connections.map((connection) => connection.id)} label="Connections" onReorder={onReorder}>
+          {connections.map((connection) => (
+            <ConnectionCard
+              key={connection.id}
+              connection={connection}
+              status={statuses[connection.id]}
+              reorderable={reorderable}
+              onDetails={() => setSelected(connection)}
+              onRemove={() => setRemoving(connection)}
+              onReconnect={() => onReconnect(connection)}
+            />
+          ))}
+        </SortableGrid>
+      ) : (
+        <Empty className="border border-dashed">
+          <EmptyHeader>
+            <EmptyDescription>No connections match your filters.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
       <ConnectionDetailsSheet connection={selected} onOpenChange={(open) => !open && setSelected(null)} />
       <RemoveConnectionDialog connection={removing} onOpenChange={(open) => !open && setRemoving(null)} />
     </>
   )
 }
 
-function ConnectionActions({
-  connection,
-  onDetails,
-  onRemove,
+// The search and filters sit above the grid, so their state lives here and
+// the grid only shows what it is given.
+function ConnectedAccounts({
+  connections,
+  onAdd,
+  onReconnect,
 }: {
-  connection: Connection
-  onDetails: () => void
-  onRemove: () => void
+  connections: Connection[]
+  onAdd: () => void
+  onReconnect: (connection: Connection) => void
 }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="size-8" aria-label={`Actions for ${connection.accountLogin}`}>
-          <MoreHorizontal />
-        </Button>
-      </DropdownMenuTrigger>
-      {/* The shared menu matches its trigger's width, which is far too narrow for an icon button. */}
-      <DropdownMenuContent align="end" className="w-max whitespace-nowrap">
-        <DropdownMenuItem onSelect={onDetails}>
-          <Info />
-          Details
-        </DropdownMenuItem>
-        <DropdownMenuItem asChild>
-          <Link to={`/repositories?tab=repositories&account=${connection.id}`}>
-            <FolderGit2 />
-            Manage repositories
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onRemove}>
-          <Trash2 />
-          Remove
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-// The search and filters sit above the card, so their state lives here and
-// the table only sorts what it is given.
-function ConnectedAccounts({ connections, onAdd }: { connections: Connection[]; onAdd: () => void }) {
   const statuses = useConnectionStatuses(connections)
-  const { setPage } = usePagination()
+  const { workspace } = useAuth()
+  const canManage = workspace?.role === "owner" || workspace?.role === "admin"
   const [query, setQuery] = useState("")
   const [forge, setForge] = useState(ALL)
   const [status, setStatus] = useState(ALL)
   const filtering = forge !== ALL || status !== ALL
 
-  // A new filter or search starts over at the first page.
-  function filterBy<T>(set: (value: T) => void) {
-    return (value: T) => {
-      set(value)
-      setPage(1)
-    }
-  }
-
   function clearFilters() {
     setForge(ALL)
     setStatus(ALL)
-    setPage(1)
   }
 
   const filtered = useMemo(
@@ -375,25 +261,25 @@ function ConnectedAccounts({ connections, onAdd }: { connections: Connection[]; 
   )
 
   const activeFilters = [
-    { label: "Forge", value: selectedLabel(forge, FORGE_KIND_OPTIONS), onRemove: () => filterBy(setForge)(ALL) },
-    { label: "Status", value: selectedLabel(status, STATUS_OPTIONS), onRemove: () => filterBy(setStatus)(ALL) },
+    { label: "Forge", value: selectedLabel(forge, FORGE_KIND_OPTIONS), onRemove: () => setForge(ALL) },
+    { label: "Status", value: selectedLabel(status, STATUS_OPTIONS), onRemove: () => setStatus(ALL) },
   ].filter((filter): filter is ActiveFilter => filter.value !== null)
+
+  // The saved order is the whole list's, so a filtered subset cannot be reordered.
+  const narrowed = filtering || query.trim() !== ""
+  const reorderable = canManage && connections.length > 1 && !narrowed
 
   return (
     <>
-      <FilterToolbar>
-        <ActiveFilterChips filters={activeFilters} />
-        <Button size="sm" onClick={onAdd}>
-          <Plus />
-          Add connection
-        </Button>
-        <FilterPopover active={filtering} onClear={clearFilters}>
+      <FilterToolbar align="start">
+        <SearchInput label="Search connections" value={query} onChange={setQuery} />
+        <FilterPopover active={filtering} onClear={clearFilters} align="start">
           <FilterSelect
             id="connection-forge"
             label="Forge"
             allLabel="All forges"
             value={forge}
-            onValueChange={filterBy(setForge)}
+            onValueChange={setForge}
             options={FORGE_KIND_OPTIONS}
           />
           <FilterSelect
@@ -401,25 +287,28 @@ function ConnectedAccounts({ connections, onAdd }: { connections: Connection[]; 
             label="Status"
             allLabel="All statuses"
             value={status}
-            onValueChange={filterBy(setStatus)}
+            onValueChange={setStatus}
             options={STATUS_OPTIONS}
           />
         </FilterPopover>
-        <SearchInput label="Search connections" value={query} onChange={filterBy(setQuery)} />
+        <Button size="sm" onClick={onAdd}>
+          <Plus />
+          Add connection
+        </Button>
+        {/* Last, so applying a filter does not shift the controls. */}
+        <ActiveFilterChips filters={activeFilters} />
       </FilterToolbar>
-      <Card>
-        <CardHeader>
-          <CardTitle>Connected accounts</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ConnectionsTable connections={filtered} statuses={statuses} />
-        </CardContent>
-      </Card>
+      {canManage && connections.length > 1 && (
+        <p className="text-sm text-muted-foreground">
+          {narrowed ? "Clear search and filters to reorder." : "Drag cards by their handle to reorder them."}
+        </p>
+      )}
+      <ConnectionGrid connections={filtered} statuses={statuses} reorderable={reorderable} onReconnect={onReconnect} />
     </>
   )
 }
 
-// Rendered once beside the table rather than inside the row menu, which
+// Rendered once beside the grid rather than inside a card's menu, which
 // unmounts its items (and any dialog in them) as soon as it closes.
 function RemoveConnectionDialog({
   connection,
@@ -471,19 +360,31 @@ function RemoveConnectionDialog({
   )
 }
 
+// A connection is self-hosted unless it is on the provider's cloud host: the
+// fixed host of a token option, or the cloud app itself.
+function isSelfHosted(connection: Connection) {
+  const cloud = PROVIDERS[connection.provider].hosting.cloud.method
+  return cloud.type === "token" ? connection.host !== cloud.fixedHost : connection.kind !== "github_app"
+}
+
 function AddConnectionSheet({
   open,
   onOpenChange,
   availableApps,
   oauthHosts,
+  reconnect,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   availableApps: Provider[]
   oauthHosts: Partial<Record<Provider, string>>
+  // Presets the provider and host of a connection whose credentials were rejected.
+  reconnect?: Connection | null
 }) {
-  const [providerId, setProviderId] = useState<Provider>(PROVIDER_IDS[0]!)
-  const [selfHosted, setSelfHosted] = useState(false)
+  const initialProvider = reconnect?.provider ?? PROVIDER_IDS[0]!
+  const initialSelfHosted = reconnect ? isSelfHosted(reconnect) : false
+  const [providerId, setProviderId] = useState<Provider>(initialProvider)
+  const [selfHosted, setSelfHosted] = useState(initialSelfHosted)
 
   const provider = PROVIDERS[providerId]
   // The checkbox stays ticked across providers; one without a self-hosted
@@ -498,18 +399,26 @@ function AddConnectionSheet({
 
   function handleOpenChange(next: boolean) {
     if (!next) {
-      setProviderId(PROVIDER_IDS[0]!)
-      setSelfHosted(false)
+      setProviderId(initialProvider)
+      setSelfHosted(initialSelfHosted)
     }
     onOpenChange(next)
   }
+
+  // Only the reconnected connection's own option starts with its host filled in.
+  const presetHost =
+    reconnect && providerId === reconnect.provider && selfHosted === initialSelfHosted ? reconnect.host : undefined
 
   return (
     <Sheet open={open} onOpenChange={handleOpenChange}>
       <SheetContent className="overflow-y-auto data-[side=right]:sm:max-w-lg">
         <SheetHeader>
-          <SheetTitle>Add connection</SheetTitle>
-          <SheetDescription>Connect a code host to choose repositories to review.</SheetDescription>
+          <SheetTitle>{reconnect ? `Reconnect ${reconnect.accountLogin}` : "Add connection"}</SheetTitle>
+          <SheetDescription>
+            {reconnect
+              ? "Connect the same account again to resume automatic reviews. Its repositories and review history are kept."
+              : "Connect a code host to choose repositories to review."}
+          </SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-6 px-4 pb-4">
           <FieldGroup>
@@ -562,6 +471,7 @@ function AddConnectionSheet({
                   key={`${providerId}-${hosting === provider.hosting.selfHosted}`}
                   provider={providerId}
                   method={method}
+                  initialHost={presetHost}
                   onConnected={() => handleOpenChange(false)}
                 />
               </>
@@ -577,17 +487,35 @@ export function InstallationTab() {
   useReturnToast()
   const { data, isPending } = useConnections()
   const [adding, setAdding] = useState(false)
+  // Kept after the sheet closes so its closing animation still shows the same
+  // connection; replaced on the next open, which remounts the sheet by key.
+  const [reconnecting, setReconnecting] = useState<Connection | null>(null)
+
+  function openSheet(connection: Connection | null) {
+    setReconnecting(connection)
+    setAdding(true)
+  }
 
   const sheet = (
     <AddConnectionSheet
+      key={reconnecting?.id ?? "add"}
       open={adding}
       onOpenChange={setAdding}
       availableApps={data?.availableApps ?? []}
       oauthHosts={data?.oauthHosts ?? {}}
+      reconnect={reconnecting}
     />
   )
 
-  if (isPending) return null
+  if (isPending) {
+    return (
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true">
+        {[0, 1, 2].map((index) => (
+          <Skeleton key={index} className="h-44 rounded-xl" />
+        ))}
+      </div>
+    )
+  }
 
   if (!data?.connections.length) {
     return (
@@ -601,7 +529,7 @@ export function InstallationTab() {
             <EmptyDescription>Connect GitHub or GitLab to start reviewing.</EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
-            <Button onClick={() => setAdding(true)}>
+            <Button onClick={() => openSheet(null)}>
               <Plus />
               Add connection
             </Button>
@@ -614,7 +542,7 @@ export function InstallationTab() {
 
   return (
     <div className="flex flex-1 flex-col gap-4">
-      <ConnectedAccounts connections={data.connections} onAdd={() => setAdding(true)} />
+      <ConnectedAccounts connections={data.connections} onAdd={() => openSheet(null)} onReconnect={openSheet} />
       {sheet}
     </div>
   )

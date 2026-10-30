@@ -53,6 +53,14 @@ export const githubConnectSchema = z.object({
   token: z.string().trim().min(1, "Token is required"),
 });
 
+// Every connection in the workspace, in the order to show them.
+export const reorderConnectionsSchema = z.object({
+  ids: z
+    .array(z.uuid())
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, "Each connection may appear only once"),
+});
+
 export const githubInstallSchema = z.object({
   // Absent means the personal workspace.
   workspace: z.string().optional(),

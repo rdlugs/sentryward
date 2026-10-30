@@ -8,7 +8,7 @@ import { prisma } from "../src/lib/prisma.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { encryptWithOtherKey } from "./helpers/foreignKey.ts";
 import { gitlabAccessToken, ReconnectRequiredError } from "../src/services/gitlabOAuth.ts";
-import { addMember, createTeam, createUser } from "./helpers/users.ts";
+import { addMember, createTeam, createUser, inWorkspace } from "./helpers/users.ts";
 
 let cookie: string;
 let userId: string;
@@ -201,6 +201,65 @@ describe("GET /api/connections", () => {
       repositoryCount: 1,
     });
     expect(res.body.connections[0].encryptedToken).toBeUndefined();
+  });
+});
+
+describe("PUT /api/connections/order", () => {
+  const connection = (accountLogin: string, extra: { workspaceId?: string; createdAt?: Date } = {}) =>
+    prisma.forgeConnection.create({
+      data: { workspaceId, provider: "gitlab", host: "gitlab.com", kind: "token", accountLogin, ...extra },
+    });
+  const logins = async () =>
+    (await request(app).get("/api/connections").set("Cookie", cookie)).body.connections.map(
+      (c: { accountLogin: string }) => c.accountLogin,
+    );
+  const reorder = (ids: string[]) => request(app).put("/api/connections/order").set("Cookie", cookie).send({ ids });
+
+  it("saves the order the list returns, with later connections after it", async () => {
+    const a = await connection("a", { createdAt: new Date("2026-01-01") });
+    const b = await connection("b", { createdAt: new Date("2026-02-01") });
+    const c = await connection("c", { createdAt: new Date("2026-03-01") });
+    expect(await logins()).toEqual(["a", "b", "c"]);
+
+    expect((await reorder([c.id, a.id, b.id])).status).toBe(204);
+    expect(await logins()).toEqual(["c", "a", "b"]);
+
+    await connection("d", { createdAt: new Date("2026-04-01") });
+    expect(await logins()).toEqual(["c", "a", "b", "d"]);
+  });
+
+  it("409s unless the ids are exactly the workspace's connections", async () => {
+    const other = await createUser("other@example.com");
+    const a = await connection("a");
+    const b = await connection("b");
+    const theirs = await connection("them", { workspaceId: other.workspace.id });
+
+    expect((await reorder([a.id])).status).toBe(409);
+    expect((await reorder([a.id, b.id, theirs.id])).status).toBe(409);
+    expect((await reorder([a.id, theirs.id])).status).toBe(409);
+    const stored = await prisma.forgeConnection.findMany({ select: { position: true } });
+    expect(stored.every((row) => row.position === null)).toBe(true);
+  });
+
+  it("400s on a repeated id", async () => {
+    const a = await connection("a");
+    expect((await reorder([a.id, a.id])).status).toBe(400);
+  });
+
+  it("refuses workspace members who are not admins", async () => {
+    const owner = await createUser("owner@example.com");
+    const team = await createTeam(owner.user.id, "Acme");
+    await addMember(team.id, userId, "member");
+    const a = await connection("a", { workspaceId: team.id });
+
+    const res = await request(app)
+      .put("/api/connections/order")
+      .set("Cookie", cookie)
+      .set(...inWorkspace(team.id))
+      .send({ ids: [a.id] });
+
+    expect(res.status).toBe(403);
+    expect((await prisma.forgeConnection.findUniqueOrThrow({ where: { id: a.id } })).position).toBeNull();
   });
 });
 

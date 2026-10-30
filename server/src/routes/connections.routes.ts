@@ -9,6 +9,7 @@ import {
   gitlabOAuthCallback,
   gitlabOAuthStart,
   listConnections,
+  reorderConnections,
 } from "../controllers/connections.controller.ts";
 import { requireAuth, requireSession } from "../middleware/requireAuth.ts";
 import { requireWorkspace, requireWorkspaceRole } from "../middleware/requireWorkspace.ts";
@@ -26,6 +27,8 @@ connectionsRouter.get("/gitlab/oauth/start", requireSession, gitlabOAuthStart);
 connectionsRouter.get("/gitlab/oauth/callback", requireSession, gitlabOAuthCallback);
 connectionsRouter.use(requireWorkspace);
 connectionsRouter.get("/", listConnections);
+// Before the /:id routes, which would otherwise take "order" as an id.
+connectionsRouter.put("/order", requireWorkspaceRole("admin"), reorderConnections);
 connectionsRouter.get("/:id/status", connectionStatus);
 connectionsRouter.get("/:id", getConnection);
 connectionsRouter.post("/:provider", requireWorkspaceRole("admin"), connectWithToken);

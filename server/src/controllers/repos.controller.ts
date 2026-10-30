@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { Prisma, type ReviewStatus, type ReviewVerdict } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { loadReviewConfig, repoSettingsRuleIssues } from "../review/config/load.ts";
@@ -11,6 +12,7 @@ import {
   availableReposQuerySchema,
   enableRepoSchema,
   listReposQuerySchema,
+  reorderReposSchema,
   repoIdParamSchema,
   updateRepoSchema,
 } from "../schemas/repos.schema.ts";
@@ -40,6 +42,8 @@ export async function listRepos(req: Request, res: Response) {
   const stored = await prisma.repository.findMany({
     where: { connection: { workspaceId: req.workspaceId! }, ...(connectionId && { connectionId }) },
     include: { connection: { select: { accountLogin: true, provider: true, host: true } } },
+    // By path, for the pickers that share this list; the Repositories tab
+    // orders by `position` itself.
     orderBy: { fullPath: "asc" },
   });
   res.json({
@@ -54,8 +58,72 @@ export async function listRepos(req: Request, res: Response) {
       enabled: repo.enabled,
       settings: repo.settings,
       followGlobal: repo.followGlobal,
+      position: repo.position,
     })),
   });
+}
+
+interface LatestReviewRow {
+  id: string;
+  repository_id: string;
+  number: number;
+  status: ReviewStatus;
+  verdict: ReviewVerdict | null;
+  created_at: Date;
+}
+
+// Each repository's newest review in one query, rather than a nested include
+// that would load every job. Skipped runs reviewed nothing and superseded ones
+// were replaced by a newer run, so neither counts.
+async function latestReviews(repositoryIds: string[]) {
+  if (!repositoryIds.length) return new Map();
+  const rows = await prisma.$queryRaw<LatestReviewRow[]>(Prisma.sql`
+    SELECT DISTINCT ON (repository_id) id, repository_id, number, status, verdict, created_at
+    FROM review_jobs
+    WHERE repository_id = ANY(${repositoryIds}::uuid[]) AND status NOT IN ('skipped', 'superseded')
+    ORDER BY repository_id, created_at DESC`);
+  return new Map(
+    rows.map((row) => [
+      row.repository_id,
+      { id: row.id, number: row.number, status: row.status, verdict: row.verdict, createdAt: row.created_at },
+    ]),
+  );
+}
+
+// Separate from listRepos, which the pickers share: only the Repositories tab
+// shows these, so only it pays for the query.
+export async function listLastReviews(req: Request, res: Response) {
+  const stored = await prisma.repository.findMany({
+    where: { connection: { workspaceId: req.workspaceId! } },
+    select: { id: true },
+  });
+  const lastReviews = await latestReviews(stored.map((repo) => repo.id));
+  res.json({ lastReviews: Object.fromEntries(lastReviews) });
+}
+
+export async function reorderRepos(req: Request, res: Response) {
+  const { ids } = reorderReposSchema.parse(req.body);
+  await prisma.$transaction(async (tx) => {
+    // Locking every row up front, always by id, makes overlapping reorders
+    // wait for each other instead of deadlocking on rows taken in request
+    // order, and keeps the check below true until the writes commit.
+    const current = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT r.id FROM repositories r
+      JOIN forge_connections c ON c.id = r.connection_id
+      WHERE c.workspace_id = ${req.workspaceId!}::uuid
+      ORDER BY r.id
+      FOR UPDATE OF r`);
+    // The full set, not a subset: a repository added or removed since the page
+    // loaded would otherwise land somewhere nobody chose.
+    const known = new Set(current.map((repo) => repo.id));
+    if (ids.length !== known.size || !ids.every((id) => known.has(id))) {
+      throw new HttpError(409, "Repositories changed since the page loaded; reload and try again");
+    }
+    for (const [position, id] of ids.entries()) {
+      await tx.repository.update({ where: { id }, data: { position } });
+    }
+  });
+  res.status(204).end();
 }
 
 // Everything the account can see, for picking repositories to add. The forge

@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
-import { mockApi } from "@/test/apiRoutes"
+import { mockApi, testUser, testWorkspaces } from "@/test/apiRoutes"
 import { PROVIDER_IDS, PROVIDERS } from "@/features/forge/providers"
 
 const gitlabConnection = {
@@ -21,6 +21,20 @@ const gitlabConnection = {
 async function openAddConnection() {
   await userEvent.click(await screen.findByRole("button", { name: "Add connection" }))
 }
+
+// Each connection card is a list item named after its account.
+function card(account: string) {
+  return within(screen.getByRole("list", { name: "Connections" })).getByRole("listitem", { name: account })
+}
+
+async function findCard(account: string) {
+  return within(await screen.findByRole("list", { name: "Connections" })).findByRole("listitem", { name: account })
+}
+
+const accounts = () =>
+  within(screen.getByRole("list", { name: "Connections" }))
+    .queryAllByRole("listitem")
+    .map((item) => item.getAttribute("aria-label"))
 
 async function chooseFilter(label: string, option: string) {
   await userEvent.click(screen.getByRole("button", { name: "Filters" }))
@@ -174,7 +188,7 @@ describe("Connections page", () => {
   it("shows whether each connection is active, who added it and when", async () => {
     mockApi({
       "GET /api/connections": {
-        connections: [gitlabConnection, { ...gitlabConnection, id: "c2", accountLogin: "old" }],
+        connections: [gitlabConnection, { ...gitlabConnection, id: "c2", accountLogin: "old", repositoryCount: 1 }],
         availableApps: [],
       },
       "GET /api/connections/c1/status": { status: "active" },
@@ -182,7 +196,6 @@ describe("Connections page", () => {
     })
     renderWithProviders(<App />, { route: "/repositories?tab=installation" })
 
-    // By title, since the "Active" column header shares the badge's text.
     const active = await screen.findByTitle("The forge accepts the stored credentials")
     expect(active).toHaveTextContent("Active")
     expect(active).toHaveClass("text-emerald-700")
@@ -192,45 +205,143 @@ describe("Connections page", () => {
     const created = new Date(gitlabConnection.createdAt).toLocaleDateString(undefined, { dateStyle: "medium" })
     expect(screen.getAllByText(created)).toHaveLength(2)
     expect(screen.getAllByText("Dev")[0]).toHaveAttribute("title", "dev@example.com")
-    expect(screen.getByRole("columnheader", { name: "Repositories" })).toBeInTheDocument()
-    expect(screen.getAllByRole("cell", { name: "3" })).toHaveLength(2)
+    expect(within(card("dev")).getByText("3 repositories")).toBeInTheDocument()
+    expect(within(card("old")).getByText("1 repository")).toBeInTheDocument()
   })
 
-  it("sorts the table by the clicked column", async () => {
+  it("links a card to its repositories", async () => {
     mockApi({
-      "GET /api/connections": {
-        connections: [
-          { ...gitlabConnection, id: "c1", accountLogin: "bravo", createdAt: "2026-01-01T00:00:00.000Z", repositoryCount: 2 },
-          { ...gitlabConnection, id: "c2", accountLogin: "alpha", createdAt: "2026-02-01T00:00:00.000Z", repositoryCount: 0 },
-          { ...gitlabConnection, id: "c3", accountLogin: "charlie", createdAt: "2026-03-01T00:00:00.000Z", repositoryCount: 5 },
-        ],
-        availableApps: [],
-      },
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": { repos: [addedRepo("r1", "team/web")] },
+    })
+    renderWithProviders(<App />, { route: "/repositories?tab=installation" })
+
+    await screen.findByRole("list", { name: "Connections" })
+    await userEvent.click(within(card("dev")).getByRole("link", { name: "Manage repositories" }))
+
+    expect(await screen.findByRole("tab", { name: "Repositories", selected: true })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: "Remove Account filter" })).toBeInTheDocument()
+  })
+
+  describe("reordering", () => {
+    const three = {
+      connections: [
+        { ...gitlabConnection, id: "c1", accountLogin: "bravo" },
+        { ...gitlabConnection, id: "c2", accountLogin: "alpha" },
+        { ...gitlabConnection, id: "c3", accountLogin: "charlie" },
+      ],
+      availableApps: [],
+    }
+    const statuses = {
       "GET /api/connections/c1/status": { status: "active" },
       "GET /api/connections/c2/status": { status: "active" },
       "GET /api/connections/c3/status": { status: "active" },
+    }
+
+    // jsdom lays nothing out, so give each card a box in a row by its place in
+    // the list; the keyboard sensor moves toward the nearest box.
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+        const item = this.closest("li")
+        const index = item ? Array.from(item.parentElement!.children).indexOf(item) : -1
+        const left = index < 0 ? 0 : index * 300
+        return { x: left, y: 0, left, top: 0, right: left + 280, bottom: 200, width: 280, height: 200, toJSON() {} } as DOMRect
+      })
+    })
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    async function moveRight(account: string) {
+      screen.getByRole("button", { name: `Reorder ${account}` }).focus()
+      await userEvent.keyboard(" ")
+      await userEvent.keyboard("{ArrowRight}")
+      await userEvent.keyboard(" ")
+    }
+
+    it("shows the saved order and saves a card moved with the keyboard", async () => {
+      let saved: unknown
+      let finish: (response: Response) => void = () => {}
+      mockApi({
+        "GET /api/connections": three,
+        ...statuses,
+        "PUT /api/connections/order": (init?: RequestInit) => {
+          saved = JSON.parse(String(init?.body))
+          // Held open so the test can look before the server answers.
+          return new Promise<Response>((resolve) => {
+            finish = resolve
+          }) as unknown as Response
+        },
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=installation" })
+      await screen.findByRole("list", { name: "Connections" })
+      expect(accounts()).toEqual(["bravo", "alpha", "charlie"])
+
+      await moveRight("bravo")
+
+      await waitFor(() => expect(saved).toEqual({ ids: ["c2", "c1", "c3"] }))
+      // Moved before the server answers.
+      expect(accounts()).toEqual(["alpha", "bravo", "charlie"])
+      finish(new Response(null, { status: 204 }))
+    })
+
+    it("puts the cards back when the order cannot be saved", async () => {
+      mockApi({
+        "GET /api/connections": three,
+        ...statuses,
+        "PUT /api/connections/order": () => jsonResponse(409, { message: "Connections changed" }),
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=installation" })
+      await screen.findByRole("list", { name: "Connections" })
+
+      await moveRight("bravo")
+
+      expect(await screen.findByText("Connections changed")).toBeInTheDocument()
+      await waitFor(() => expect(accounts()).toEqual(["bravo", "alpha", "charlie"]))
+    })
+
+    it("offers no handle while searching or to members", async () => {
+      mockApi({ "GET /api/connections": three, ...statuses })
+      const { unmount } = renderWithProviders(<App />, { route: "/repositories?tab=installation" })
+      await screen.findByRole("list", { name: "Connections" })
+      expect(screen.getByRole("button", { name: "Reorder alpha" })).toBeInTheDocument()
+
+      await userEvent.type(screen.getByRole("searchbox", { name: "Search connections" }), "a")
+      expect(screen.queryByRole("button", { name: /^Reorder/ })).not.toBeInTheDocument()
+      expect(screen.getByText("Clear search and filters to reorder.")).toBeInTheDocument()
+      unmount()
+
+      const asMember = testWorkspaces.map((workspace) => ({ ...workspace, role: "member" }))
+      mockApi({
+        "GET /api/auth/me": { user: testUser, workspaces: asMember },
+        "GET /api/workspaces": { workspaces: asMember },
+        "GET /api/connections": three,
+        ...statuses,
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=installation" })
+      await screen.findByRole("list", { name: "Connections" })
+      expect(screen.queryByRole("button", { name: /^Reorder/ })).not.toBeInTheDocument()
+    })
+  })
+
+  it("reconnects a connection whose credentials were rejected", async () => {
+    mockApi({
+      "GET /api/connections": {
+        connections: [{ ...gitlabConnection, host: "gitlab.acme.com", credentialsRejectedAt: "2026-03-20T00:00:00.000Z" }],
+        availableApps: [],
+      },
+      "GET /api/connections/c1/status": { status: "revoked" },
     })
     renderWithProviders(<App />, { route: "/repositories?tab=installation" })
-    const accounts = () => screen.getAllByRole("row").slice(1).map((row) => row.querySelector("td")?.textContent)
 
-    await screen.findByText("alpha")
-    // Unsorted keeps the API order.
-    expect(accounts()).toEqual(["bravo", "alpha", "charlie"])
+    await userEvent.click(await within(await findCard("dev")).findByRole("button", { name: "Reconnect" }))
 
-    await userEvent.click(screen.getByRole("button", { name: "Account" }))
-    expect(accounts()).toEqual(["alpha", "bravo", "charlie"])
-    expect(screen.getByRole("columnheader", { name: "Account" })).toHaveAttribute("aria-sort", "ascending")
-
-    await userEvent.click(screen.getByRole("button", { name: "Account" }))
-    expect(accounts()).toEqual(["charlie", "bravo", "alpha"])
-
-    // A third click removes the sort.
-    await userEvent.click(screen.getByRole("button", { name: "Account" }))
-    expect(accounts()).toEqual(["bravo", "alpha", "charlie"])
-    expect(screen.getByRole("columnheader", { name: "Account" })).not.toHaveAttribute("aria-sort")
-
-    await userEvent.click(screen.getByRole("button", { name: "Repositories" }))
-    expect(accounts()).toEqual(["alpha", "bravo", "charlie"])
+    const sheet = await screen.findByRole("dialog")
+    expect(within(sheet).getByRole("heading", { name: "Reconnect dev" })).toBeInTheDocument()
+    expect(within(sheet).getByRole("combobox", { name: "Provider" })).toHaveTextContent("GitLab")
+    expect(within(sheet).getByRole("checkbox", { name: "Self-hosted" })).toBeChecked()
+    expect(within(sheet).getByRole("textbox", { name: "Host" })).toHaveValue("gitlab.acme.com")
   })
 
   it("shows a connection's details in a sheet", async () => {
@@ -395,7 +506,6 @@ describe("Connections page", () => {
       "GET /api/connections/c3/status": { status: "active" },
     })
     renderWithProviders(<App />, { route: "/repositories?tab=installation" })
-    const accounts = () => screen.getAllByRole("row").slice(1).map((row) => row.querySelector("td")?.textContent)
     await screen.findByText("acme")
 
     const search = screen.getByRole("searchbox", { name: "Search connections" })
@@ -431,6 +541,7 @@ const addedRepo = (id: string, fullPath: string, extra: Record<string, unknown> 
   webUrl: `https://gitlab.com/${fullPath}`,
   enabled: true,
   settings: {},
+  position: null,
   ...extra,
 })
 
@@ -468,7 +579,7 @@ describe("Repositories page", () => {
     expect(screen.queryByRole("link", { name: "Connections" })).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole("tab", { name: "Installation" }))
-    expect(await screen.findByText("Connected accounts")).toBeInTheDocument()
+    expect(await screen.findByRole("list", { name: "Connections" })).toBeInTheDocument()
   })
 
   it("sends the old /connections path to Installation and keeps the GitHub return toast", async () => {
@@ -612,8 +723,8 @@ describe("Repositories page", () => {
     })
     renderWithProviders(<App />, { route: "/repositories" })
 
-    const row = (await screen.findByRole("switch", { name: "Reviews for team/web" })).closest("tr")!
-    expect(within(row).getByText("dev (gitlab.com)")).toBeInTheDocument()
+    const row = (await screen.findByRole("switch", { name: "Reviews for team/web" })).closest("li")!
+    expect(within(row).getByText("dev")).toBeInTheDocument()
     // Review config is edited on the Review settings page, not here.
     expect(within(row).queryByRole("button", { name: "Settings" })).not.toBeInTheDocument()
     await userEvent.click(within(row).getByRole("switch"))
@@ -712,7 +823,7 @@ describe("Repositories page", () => {
     })
     renderWithProviders(<App />, { route: "/repositories" })
 
-    const row = (name: string) => screen.getByRole("link", { name }).closest("tr")!
+    const row = (name: string) => screen.getByRole("link", { name }).closest("li")!
     await waitFor(() => expect(within(row("team/web")).getByText("Active")).toBeInTheDocument())
     expect(within(row("old/api")).getByText("Inactive")).toBeInTheDocument()
   })
@@ -742,7 +853,7 @@ describe("Repositories page", () => {
     expect(alert).toHaveTextContent("Automatic reviews are paused")
     expect(alert).toHaveTextContent("old (gitlab.com)")
     expect(alert).not.toHaveTextContent("dev (gitlab.com)")
-    const row = screen.getByRole("link", { name: "old/api" }).closest("tr")!
+    const row = screen.getByRole("link", { name: "old/api" }).closest("li")!
     expect(within(row).getByText("Inactive")).toBeInTheDocument()
   })
 
@@ -757,33 +868,234 @@ describe("Repositories page", () => {
     })
     renderWithProviders(<App />, { route: "/repositories" })
 
-    const row = () => screen.getByRole("link", { name: "team/web" }).closest("tr")!
+    const row = () => screen.getByRole("link", { name: "team/web" }).closest("li")!
     await waitFor(() => expect(within(row()).getByText("Active")).toBeInTheDocument())
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()
   })
 
-  it("sorts the table by the clicked column", async () => {
+  describe("reordering", () => {
+    const routes = {
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": {
+        // The API lists by path; the cards follow position, unplaced ones last.
+        repos: [
+          addedRepo("r1", "team/api", { position: 1 }),
+          addedRepo("r2", "team/docs"),
+          addedRepo("r3", "team/web", { position: 0 }),
+        ],
+      },
+    }
+    const repoOrder = () =>
+      within(screen.getByRole("list", { name: "Repositories" }))
+        .getAllByRole("listitem")
+        .map((item) => item.getAttribute("aria-label"))
+
+    // Same layout stand-in as the Connections reordering tests.
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+        const item = this.closest("li")
+        const index = item ? Array.from(item.parentElement!.children).indexOf(item) : -1
+        const left = index < 0 ? 0 : index * 300
+        return { x: left, y: 0, left, top: 0, right: left + 280, bottom: 200, width: 280, height: 200, toJSON() {} } as DOMRect
+      })
+    })
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    async function moveRight(path: string) {
+      screen.getByRole("button", { name: `Reorder ${path}` }).focus()
+      await userEvent.keyboard(" ")
+      await userEvent.keyboard("{ArrowRight}")
+      await userEvent.keyboard(" ")
+    }
+
+    it("orders cards by position and saves a card moved with the keyboard", async () => {
+      let saved: unknown
+      let finish: (response: Response) => void = () => {}
+      mockApi({
+        ...routes,
+        "PUT /api/repos/order": (init?: RequestInit) => {
+          saved = JSON.parse(String(init?.body))
+          // Held open so the test can look before the server answers.
+          return new Promise<Response>((resolve) => {
+            finish = resolve
+          }) as unknown as Response
+        },
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+      expect(repoOrder()).toEqual(["team/web", "team/api", "team/docs"])
+
+      await moveRight("team/web")
+
+      await waitFor(() => expect(saved).toEqual({ ids: ["r1", "r3", "r2"] }))
+      expect(repoOrder()).toEqual(["team/api", "team/web", "team/docs"])
+      finish(new Response(null, { status: 204 }))
+    })
+
+    it("puts the cards back when the order cannot be saved", async () => {
+      mockApi({ ...routes, "PUT /api/repos/order": () => jsonResponse(409, { message: "Repositories changed" }) })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+
+      await moveRight("team/web")
+
+      // The server's explanation, not a generic failure.
+      expect(await screen.findByText("Repositories changed")).toBeInTheDocument()
+      await waitFor(() => expect(repoOrder()).toEqual(["team/web", "team/api", "team/docs"]))
+    })
+
+    it("falls back to a generic message for other failures", async () => {
+      mockApi({ ...routes, "PUT /api/repos/order": () => jsonResponse(500, { message: "boom" }) })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+
+      await moveRight("team/web")
+
+      expect(await screen.findByText("Could not save the repository order")).toBeInTheDocument()
+    })
+
+    it("saves quick moves one after the other and keeps the last order", async () => {
+      const saved: unknown[] = []
+      const finishers: ((response: Response) => void)[] = []
+      mockApi({
+        ...routes,
+        "PUT /api/repos/order": (init?: RequestInit) => {
+          saved.push(JSON.parse(String(init?.body)))
+          return new Promise<Response>((resolve) => finishers.push(resolve)) as unknown as Response
+        },
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+
+      await moveRight("team/web")
+      await moveRight("team/web")
+
+      // The second save waits for the first.
+      await waitFor(() => expect(saved).toHaveLength(1))
+      expect(repoOrder()).toEqual(["team/api", "team/docs", "team/web"])
+      finishers[0](new Response(null, { status: 204 }))
+      await waitFor(() => expect(saved).toEqual([{ ids: ["r1", "r3", "r2"] }, { ids: ["r1", "r2", "r3"] }]))
+      // The first save's refetch would bring back the old order; only the last one refetches.
+      expect(repoOrder()).toEqual(["team/api", "team/docs", "team/web"])
+      finishers[1](new Response(null, { status: 204 }))
+    })
+
+    it("offers no handle while searching or to members", async () => {
+      mockApi(routes)
+      const { unmount } = renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+      expect(screen.getByRole("button", { name: "Reorder team/api" })).toBeInTheDocument()
+
+      await userEvent.type(screen.getByRole("searchbox", { name: "Search repositories" }), "team")
+      expect(screen.queryByRole("button", { name: /^Reorder/ })).not.toBeInTheDocument()
+      expect(screen.getByText("Clear search and filters to reorder.")).toBeInTheDocument()
+      unmount()
+
+      const asMember = testWorkspaces.map((workspace) => ({ ...workspace, role: "member" }))
+      mockApi({
+        ...routes,
+        "GET /api/auth/me": { user: testUser, workspaces: asMember },
+        "GET /api/workspaces": { workspaces: asMember },
+      })
+      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+      await screen.findByRole("list", { name: "Repositories" })
+      expect(screen.queryByRole("button", { name: /^Reorder/ })).not.toBeInTheDocument()
+    })
+  })
+
+  it("shows each repository's last review", async () => {
     mockApi({
       "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
       "GET /api/connections/c1/status": { status: "active" },
       "GET /api/repos": {
-        repos: [addedRepo("r1", "team/api", { enabled: false }), addedRepo("r2", "team/web")],
+        repos: [addedRepo("r1", "team/api"), addedRepo("r2", "team/web"), addedRepo("r3", "team/docs")],
+      },
+      // Fetched apart from the list the pickers share; repositories with none are left out.
+      "GET /api/repos/last-reviews": {
+        lastReviews: {
+          r1: { id: "j1", number: 7, status: "completed", verdict: "pass", createdAt: "2026-03-15T12:00:00.000Z" },
+          r2: { id: "j2", number: 8, status: "running", verdict: null, createdAt: "2026-03-15T12:00:00.000Z" },
+        },
       },
     })
-    renderWithProviders(<App />, { route: "/repositories" })
+    renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+    const card = async (path: string) =>
+      within(await within(await screen.findByRole("list", { name: "Repositories" })).findByRole("listitem", { name: path }))
 
-    const paths = () => screen.getAllByRole("link", { name: /^team\// }).map((link) => link.textContent)
-    await screen.findByRole("link", { name: "team/web" })
-    expect(paths()).toEqual(["team/api", "team/web"])
+    const api = await card("team/api")
+    expect(await api.findByRole("link", { name: /^!7/ })).toHaveAttribute("href", "/reviews/j1")
+    expect(api.getByText("Pass")).toBeInTheDocument()
+    expect((await card("team/web")).getByText("Running")).toBeInTheDocument()
+    expect(await (await card("team/docs")).findByText("No reviews yet")).toBeInTheDocument()
+  })
 
-    await userEvent.click(screen.getByRole("button", { name: "Reviews" }))
-    expect(paths()).toEqual(["team/web", "team/api"])
-    expect(screen.getByRole("columnheader", { name: "Reviews" })).toHaveAttribute("aria-sort", "ascending")
+  it("only locks the switch of the repository being saved", async () => {
+    let finish: (response: Response) => void = () => {}
+    mockApi({
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": { repos: [addedRepo("r1", "team/api"), addedRepo("r2", "team/web")] },
+      "PATCH /api/repos/r1": () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve
+        }) as unknown as Response,
+    })
+    renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
 
-    await userEvent.click(screen.getByRole("button", { name: "Repository" }))
-    await userEvent.click(screen.getByRole("button", { name: "Repository" }))
-    expect(paths()).toEqual(["team/web", "team/api"])
-    expect(screen.getByRole("columnheader", { name: "Repository" })).toHaveAttribute("aria-sort", "descending")
+    await userEvent.click(await screen.findByRole("switch", { name: "Reviews for team/api" }))
+
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeDisabled())
+    expect(screen.getByRole("switch", { name: "Reviews for team/web" })).toBeEnabled()
+    finish(jsonResponse(200, { repo: { id: "r1" } }))
+  })
+
+  it("keeps a switch locked while another repository is toggled", async () => {
+    const finish: Record<string, (response: Response) => void> = {}
+    const hold = (id: string) => () =>
+      new Promise<Response>((resolve) => {
+        finish[id] = resolve
+      }) as unknown as Response
+    mockApi({
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": { repos: [addedRepo("r1", "team/api"), addedRepo("r2", "team/web")] },
+      "PATCH /api/repos/r1": hold("r1"),
+      "PATCH /api/repos/r2": hold("r2"),
+    })
+    renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+
+    await userEvent.click(await screen.findByRole("switch", { name: "Reviews for team/api" }))
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeDisabled())
+    await userEvent.click(screen.getByRole("switch", { name: "Reviews for team/web" }))
+
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/web" })).toBeDisabled())
+    // Still waiting on its own save.
+    expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeDisabled()
+    finish.r1(jsonResponse(200, { repo: { id: "r1" } }))
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Reviews for team/api" })).toBeEnabled())
+    expect(screen.getByRole("switch", { name: "Reviews for team/web" })).toBeDisabled()
+    finish.r2(jsonResponse(200, { repo: { id: "r2" } }))
+  })
+
+  it("shows repositories a page at a time", async () => {
+    const repos = Array.from({ length: 30 }, (_, index) => addedRepo(`r${index}`, `team/repo-${String(index).padStart(2, "0")}`))
+    mockApi({
+      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
+      "GET /api/connections/c1/status": { status: "active" },
+      "GET /api/repos": { repos },
+    })
+    renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
+    const items = async () =>
+      within(await screen.findByRole("list", { name: "Repositories" })).getAllByRole("listitem")
+
+    expect(await items()).toHaveLength(24)
+    await userEvent.click(screen.getByRole("button", { name: "Show more (6 remaining)" }))
+
+    expect(await items()).toHaveLength(30)
+    expect(screen.queryByRole("button", { name: /^Show more/ })).not.toBeInTheDocument()
   })
 
   it("asks for confirmation before removing a repository", async () => {
@@ -863,73 +1175,25 @@ describe("Repositories page", () => {
     await userEvent.type(search, "-nothing")
     expect(screen.getByText("No repositories match your filters.")).toBeInTheDocument()
     await userEvent.clear(search)
-    expect(paths()).toEqual(["acme/site", "team/api", "team/web", "old/legacy"])
+    // Never reordered, so by path.
+    expect(paths()).toEqual(["acme/site", "old/legacy", "team/api", "team/web"])
 
-    const forgeCell = (path: string) => screen.getByRole("link", { name: path }).closest("tr")!.querySelectorAll("td")[1]
-    expect(forgeCell("acme/site")).toHaveTextContent("GitHub App")
-    expect(forgeCell("team/api")).toHaveTextContent("GitLab token")
     await chooseFilter("Forge", "GitHub App")
     expect(paths()).toEqual(["acme/site"])
     await clearFilters()
 
     await chooseFilter("Reviews", "Enabled")
-    expect(paths()).toEqual(["acme/site", "team/web", "old/legacy"])
+    expect(paths()).toEqual(["acme/site", "old/legacy", "team/web"])
     await userEvent.click(screen.getByRole("combobox", { name: "Account" }))
     await userEvent.click(screen.getByRole("option", { name: "dev (gitlab.com)" }))
     expect(paths()).toEqual(["team/web"])
     await clearFilters()
-    expect(paths()).toEqual(["acme/site", "team/api", "team/web", "old/legacy"])
+    expect(paths()).toEqual(["acme/site", "old/legacy", "team/api", "team/web"])
 
     await waitFor(() => expect(screen.getAllByText("Inactive")).toHaveLength(1))
     await chooseFilter("Connection status", "Inactive")
     expect(paths()).toEqual(["old/legacy"])
-    // Every keystroke and filter click re-renders the table; on CI runners that
+    // Every keystroke and filter click re-renders the grid; on CI runners that
     // has crept past the 5s default.
   }, 15_000)
-
-  describe("pagination", () => {
-    const manyRepos = Array.from({ length: 12 }, (_, i) => addedRepo(`r${i + 1}`, `team/repo-${String(i + 1).padStart(2, "0")}`))
-    const routes = {
-      "GET /api/connections": { connections: [gitlabConnection], availableApps: [] },
-      "GET /api/connections/c1/status": { status: "active" },
-      "GET /api/repos": { repos: manyRepos },
-    }
-    const repoLinks = () => screen.getAllByRole("link", { name: /^team\/repo-/ }).map((link) => link.textContent)
-
-    it("shows ten repositories per page and moves between pages", async () => {
-      mockApi(routes)
-      renderWithProviders(<App />, { route: "/repositories?tab=repositories" })
-
-      expect(await screen.findByText("Showing 1-10 of 12")).toBeInTheDocument()
-      expect(repoLinks()).toHaveLength(10)
-      expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled()
-
-      await userEvent.click(screen.getByRole("button", { name: "Next page" }))
-      expect(screen.getByText("Showing 11-12 of 12")).toBeInTheDocument()
-      expect(repoLinks()).toEqual(["team/repo-11", "team/repo-12"])
-      expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled()
-    })
-
-    it("changes how many rows each page shows", async () => {
-      mockApi(routes)
-      renderWithProviders(<App />, { route: "/repositories?tab=repositories&page=2" })
-
-      expect(await screen.findByText("Showing 11-12 of 12")).toBeInTheDocument()
-      await userEvent.click(screen.getByRole("combobox", { name: "Rows per page" }))
-      await userEvent.click(screen.getByRole("option", { name: "25" }))
-
-      expect(screen.getByText("Showing 1-12 of 12")).toBeInTheDocument()
-      expect(repoLinks()).toHaveLength(12)
-    })
-
-    it("goes back to the first page when searching", async () => {
-      mockApi(routes)
-      renderWithProviders(<App />, { route: "/repositories?tab=repositories&page=2" })
-
-      expect(await screen.findByText("Showing 11-12 of 12")).toBeInTheDocument()
-      await userEvent.type(screen.getByLabelText("Search repositories"), "repo-0")
-
-      expect(screen.getByText("Showing 1-9 of 9")).toBeInTheDocument()
-    })
-  })
 })
