@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from "react"
 import { Keyboard } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -16,8 +17,27 @@ export function SeverityJump({
   onJump: (severity: Severity) => void
   onShowShortcuts: () => void
 }) {
+  const ref = useRef<HTMLElement>(null)
+
+  // The bar wraps on narrow screens, so its height is published on the findings
+  // wrapper for the cards' scroll margin instead of being assumed in CSS.
+  useLayoutEffect(() => {
+    const nav = ref.current
+    const parent = nav?.parentElement
+    if (!nav || !parent) return
+    const publish = () => parent.style.setProperty("--jump-bar-height", `${nav.offsetHeight}px`)
+    publish()
+    const observer = new ResizeObserver(publish)
+    observer.observe(nav)
+    return () => {
+      observer.disconnect()
+      parent.style.removeProperty("--jump-bar-height")
+    }
+  }, [])
+
   return (
     <nav
+      ref={ref}
       aria-label="Jump to severity"
       className="sticky top-14 z-[5] -mx-1 flex flex-wrap items-center gap-1.5 rounded-md bg-background/95 px-1 py-1.5 backdrop-blur supports-backdrop-filter:bg-background/80"
     >

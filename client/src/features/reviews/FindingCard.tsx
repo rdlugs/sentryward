@@ -1,4 +1,3 @@
-import type { Ref } from "react"
 import { ChevronRight } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
@@ -13,14 +12,12 @@ export function FindingCard({
   change,
   open,
   onOpenChange,
-  triggerRef,
   onFocus,
 }: {
   finding: Finding
   change: ReviewResult["change"]
   open: boolean
   onOpenChange: (open: boolean) => void
-  triggerRef?: Ref<HTMLButtonElement>
   onFocus?: () => void
 }) {
   return (
@@ -30,10 +27,13 @@ export function FindingCard({
         aria-label={finding.title}
         onFocus={onFocus}
       >
-        {/* scroll-mt clears the sticky header and severity bar when a card is focused from the keyboard. */}
+        {/* scroll-mt clears the sticky header and the severity bar (whose height
+            SeverityJump publishes, since it wraps on narrow screens) when a card is
+            focused from the keyboard. data-fingerprint lets the list find the
+            trigger; data-jumped keeps the ring after a jump started with the mouse. */}
         <CollapsibleTrigger
-          ref={triggerRef}
-          className="flex w-full scroll-mt-28 items-center gap-2 rounded-lg px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          data-fingerprint={finding.fingerprint}
+          className="flex w-full scroll-mt-[calc(--spacing(14)+var(--jump-bar-height,2.25rem)+--spacing(2))] items-center gap-2 rounded-lg px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-jumped:ring-2 data-jumped:ring-ring"
         >
           <ChevronRight
             aria-hidden

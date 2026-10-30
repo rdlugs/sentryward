@@ -36,6 +36,12 @@ function groupByFile(findings: Finding[]) {
   return [...groups.entries()]
 }
 
+function countBySeverity(findings: Finding[]) {
+  const out = Object.fromEntries(SEVERITIES.map((s) => [s, 0])) as Record<Severity, number>
+  for (const finding of findings) out[finding.severity]++
+  return out
+}
+
 // Filters live in the URL so a filtered view can be linked and survives a reload.
 function useFindingFilters() {
   const [params, setParams] = useSearchParams()
@@ -90,11 +96,7 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
   )
   const files = useMemo(() => new Map(result.files.map((file) => [file.path, file])), [result.files])
 
-  const counts = useMemo(() => {
-    const out = Object.fromEntries(SEVERITIES.map((s) => [s, 0])) as Record<Severity, number>
-    for (const finding of result.findings) out[finding.severity]++
-    return out
-  }, [result.findings])
+  const counts = useMemo(() => countBySeverity(result.findings), [result.findings])
 
   const fileQuery = filters.file.trim().toLowerCase()
   const visible = result.findings.filter(
@@ -104,33 +106,51 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
       (!fileQuery || f.file.toLowerCase().includes(fileQuery)),
   )
 
-  // Render order (bucket, then file), so keyboard navigation and the severity
+  // Rendered from the same grouping, so keyboard navigation and the severity
   // jump follow what is on screen rather than the order the model reported.
-  const ordered = BUCKET_ORDER.flatMap((bucket) =>
-    groupByFile(visible.filter((f) => f.bucket === bucket)).flatMap(([, items]) => items),
-  )
-  const visibleCounts = Object.fromEntries(
-    SEVERITIES.map((s) => [s, visible.filter((f) => f.severity === s).length]),
-  ) as Record<Severity, number>
+  const groups = BUCKET_ORDER.map((bucket) => ({
+    bucket,
+    files: groupByFile(visible.filter((f) => f.bucket === bucket)),
+  })).filter((group) => group.files.length)
+  const ordered = groups.flatMap((group) => group.files.flatMap(([, items]) => items))
+  const visibleCounts = countBySeverity(visible)
 
-  // The finding j/k/o/c act on. Kept in sync with Tab and clicks through the
-  // cards' onFocus; a finding hidden by a filter no longer counts as current.
+  // Where j/k continue from. Kept in sync with Tab and clicks through the cards'
+  // onFocus and kept after focus leaves the list; o/c also need the card to
+  // still hold focus. A finding hidden by a filter no longer counts as current.
   const [current, setCurrent] = useState<string | null>(null)
   const currentIndex = ordered.findIndex((f) => f.fingerprint === current)
-  const triggers = useRef(new Map<string, HTMLButtonElement>())
+  const root = useRef<HTMLDivElement>(null)
   const [helpOpen, setHelpOpen] = useState(false)
 
+  // Looked up by data attribute rather than a ref per card, which would be
+  // detached and reattached for every card on every render.
+  function triggerFor(fingerprint: string) {
+    const triggers = root.current?.querySelectorAll<HTMLElement>("[data-fingerprint]") ?? []
+    return [...triggers].find((el) => el.dataset.fingerprint === fingerprint)
+  }
+
+  function focusedFinding() {
+    const finding = ordered[currentIndex]
+    const card = finding && triggerFor(finding.fingerprint)?.closest("article")
+    return card && card.contains(document.activeElement) ? finding : undefined
+  }
+
   function focusFinding(fingerprint: string, block: ScrollLogicalPosition) {
-    const trigger = triggers.current.get(fingerprint)
+    const trigger = triggerFor(fingerprint)
     if (!trigger) return
-    // jsdom has no scrollIntoView. focusVisible keeps the ring on a jump started with the mouse.
-    trigger.scrollIntoView?.({ block })
-    trigger.focus({ preventScroll: true, focusVisible: true })
+    trigger.scrollIntoView({ block })
+    trigger.focus({ preventScroll: true })
+    // :focus-visible does not match after a jump started with the mouse (and
+    // Chromium ignores focus({ focusVisible })), so the ring is drawn from this
+    // attribute until focus moves on.
+    trigger.dataset.jumped = ""
+    trigger.addEventListener("blur", () => delete trigger.dataset.jumped, { once: true })
     setCurrent(fingerprint)
   }
 
   function step(delta: 1 | -1) {
-    if (!ordered.length) return
+    if (!ordered.length) return false
     const index =
       currentIndex === -1
         ? delta === 1
@@ -138,6 +158,7 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
           : ordered.length - 1
         : Math.min(Math.max(currentIndex + delta, 0), ordered.length - 1)
     focusFinding(ordered[index].fingerprint, "nearest")
+    return true
   }
 
   function jumpTo(severity: Severity) {
@@ -149,15 +170,21 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
     next: () => step(1),
     previous: () => step(-1),
     toggle: () => {
-      const finding = ordered[currentIndex]
-      if (finding) toggle(finding.fingerprint, !open.has(finding.fingerprint))
+      const finding = focusedFinding()
+      if (!finding) return false
+      toggle(finding.fingerprint, !open.has(finding.fingerprint))
+      return true
     },
     copy: () => {
-      const finding = ordered[currentIndex]
-      if (finding) void copyToClipboard(findingPrompt(finding), "Agent prompt")
+      const finding = focusedFinding()
+      if (!finding) return false
+      void copyToClipboard(findingPrompt(finding), "Agent prompt")
+      return true
     },
     help: () => {
-      if (result.findings.length) setHelpOpen(true)
+      if (!result.findings.length) return false
+      setHelpOpen(true)
+      return true
     },
   })
 
@@ -194,7 +221,7 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
   }
 
   return (
-    <div className="flex flex-col gap-5">
+    <div ref={root} className="flex flex-col gap-5">
       <div role="toolbar" aria-label="Filter findings" className="flex flex-wrap items-center gap-2">
         {SEVERITIES.map((severity) => {
           const pressed = filters.severities.has(severity)
@@ -267,17 +294,18 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
           </Button>
         </div>
       ) : (
-        BUCKET_ORDER.map((bucket) => {
-          const findings = visible.filter((f) => f.bucket === bucket)
-          if (!findings.length) return null
+        groups.map(({ bucket, files: bucketFiles }) => {
           const Icon = BUCKET_ICON[bucket]
           return (
             <section key={bucket} aria-label={BUCKET_TITLE[bucket]} className="flex flex-col gap-3">
               <h2 className="flex items-center gap-2 text-lg font-semibold">
                 <Icon className="size-5 text-muted-foreground" aria-hidden />
-                {BUCKET_TITLE[bucket]} <span className="font-normal text-muted-foreground">({findings.length})</span>
+                {BUCKET_TITLE[bucket]}{" "}
+                <span className="font-normal text-muted-foreground">
+                  ({bucketFiles.reduce((sum, [, items]) => sum + items.length, 0)})
+                </span>
               </h2>
-              {groupByFile(findings).map(([path, items]) => {
+              {bucketFiles.map(([path, items]) => {
                 const file = files.get(path)
                 return (
                   <div key={path} className="flex flex-col gap-2">
@@ -300,12 +328,6 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
                         open={open.has(finding.fingerprint)}
                         onOpenChange={(expanded) => toggle(finding.fingerprint, expanded)}
                         onFocus={() => setCurrent(finding.fingerprint)}
-                        triggerRef={(el) => {
-                          if (el) triggers.current.set(finding.fingerprint, el)
-                          return () => {
-                            triggers.current.delete(finding.fingerprint)
-                          }
-                        }}
                       />
                     ))}
                   </div>

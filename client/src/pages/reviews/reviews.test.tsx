@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { screen, waitFor, within } from "@testing-library/react"
+import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { toast } from "sonner"
 import { App } from "@/App"
@@ -973,6 +973,74 @@ describe("Review detail page", () => {
     await user.click(within(toolbar).getByRole("button", { name: /critical/ }))
     expect(within(bar).getByRole("button", { name: "Jump to first major finding (0)" })).toBeDisabled()
     expect(within(bar).getByRole("button", { name: "Jump to first critical finding (1)" })).toBeEnabled()
+  })
+
+  it("keeps Ctrl+O and Ctrl+C to the focused finding once focus leaves the list", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    await user.keyboard(ctrl("j"))
+    const sql = findingTrigger("SQL injection")
+    const expanded = sql.getAttribute("aria-expanded")
+    within(screen.getByRole("navigation", { name: "Jump to severity" }))
+      .getByRole("button", { name: "Keyboard shortcuts" })
+      .focus()
+    await user.keyboard(ctrl("oc"))
+    expect(sql).toHaveAttribute("aria-expanded", expanded!)
+    expect(writeText).not.toHaveBeenCalled()
+    // Ctrl+J still continues from the last finding.
+    await user.keyboard(ctrl("j"))
+    expect(findingTrigger("Caller ignores result")).toHaveFocus()
+  })
+
+  it("leaves the browser's own Ctrl shortcuts alone when there is nothing to act on", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    // fireEvent returns false when the event was prevented.
+    expect(fireEvent.keyDown(document.body, { key: "o", ctrlKey: true })).toBe(true)
+    expect(fireEvent.keyDown(document.body, { key: "c", ctrlKey: true })).toBe(true)
+    await user.keyboard(ctrl("j"))
+    expect(fireEvent.keyDown(document.activeElement!, { key: "o", ctrlKey: true })).toBe(false)
+  })
+
+  it("leaves Ctrl+J to the browser on a review with no findings", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, findings: [] } } },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText(/No findings/)
+
+    expect(fireEvent.keyDown(document.body, { key: "j", ctrlKey: true })).toBe(true)
+    expect(fireEvent.keyDown(document.body, { key: "?", ctrlKey: true, shiftKey: true })).toBe(true)
+  })
+
+  it("matches Ctrl+? on the typed character, not the US slash key", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    await screen.findByText("SQL injection in search")
+
+    // Ctrl+Shift+- (zoom out) on a German layout is the US slash key.
+    expect(fireEvent.keyDown(document.body, { key: "_", code: "Slash", ctrlKey: true, shiftKey: true })).toBe(true)
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument()
+  })
+
+  it("keeps the focus ring on a finding reached by a mouse-started jump until focus moves on", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const bar = await screen.findByRole("navigation", { name: "Jump to severity" })
+    await user.click(within(bar).getByRole("button", { name: "Jump to first major finding (1)" }))
+    const caller = findingTrigger("Caller ignores result")
+    expect(caller).toHaveAttribute("data-jumped")
+    await user.keyboard(ctrl("j"))
+    expect(caller).not.toHaveAttribute("data-jumped")
   })
 
   // The export actions live in the header's Export menu, which closes after each pick.

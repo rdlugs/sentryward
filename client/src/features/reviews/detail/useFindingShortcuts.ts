@@ -1,11 +1,13 @@
 import { useEffect, useRef } from "react"
 
+// Each handler returns whether it acted, so a shortcut with nothing to act on
+// is left to the browser.
 export type FindingShortcutHandlers = {
-  next: () => void
-  previous: () => void
-  toggle: () => void
-  copy: () => void
-  help: () => void
+  next: () => boolean
+  previous: () => boolean
+  toggle: () => boolean
+  copy: () => boolean
+  help: () => boolean
 }
 
 // Keys belong to whatever is being typed into or picked from: the file filter,
@@ -16,9 +18,10 @@ function ownsKeys(target: EventTarget | null) {
   return target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null
 }
 
-// Ctrl+? is Ctrl+Shift+/ on US layouts; code catches layouts that report "/" as the key.
+// Matched on the produced character, not the physical key: on other layouts the
+// US slash key is something else (Ctrl+Shift+- is zoom out on a German one).
 function isHelp(event: KeyboardEvent) {
-  return event.key === "?" || (event.code === "Slash" && event.shiftKey)
+  return event.key === "?"
 }
 
 function hasSelection() {
@@ -51,10 +54,9 @@ export function useFindingShortcuts(handlers: FindingShortcutHandlers) {
             o: ref.current.toggle,
             c: ref.current.copy,
           }[letter]
-      if (!action) return
-      // Also stops the browser's own Ctrl+J (downloads), Ctrl+K (search) and Ctrl+O (open file).
-      event.preventDefault()
-      action()
+      // Only stops the browser's own Ctrl+J (downloads), Ctrl+K (search) and
+      // Ctrl+O (open file) when the shortcut did something here.
+      if (action && action()) event.preventDefault()
     }
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)
