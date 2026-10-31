@@ -31,7 +31,7 @@ export function LlmConnectionsGrid() {
 
   if (isPending) {
     return (
-      <div className="grid gap-4 sm:grid-cols-2" aria-busy="true">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-busy="true">
         {[0, 1, 2, 3].map((index) => (
           <Skeleton key={index} className="h-44 rounded-xl" />
         ))}
@@ -76,7 +76,7 @@ export function LlmConnectionsGrid() {
           Add a provider credential to review with your own account or API host. Only verified connections are used.
         </p>
       )}
-      <ul className="grid gap-4 sm:grid-cols-2" aria-label="LLM providers">
+      <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="LLM providers">
         {data.keys.map((key) => (
           <ProviderCard
             key={key.provider}
