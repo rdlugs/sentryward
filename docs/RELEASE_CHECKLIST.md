@@ -1,5 +1,40 @@
 # Release handoff
 
+## 0.3.0 preparation (2026-10-31)
+
+Release metadata is prepared for `v0.3.0`. Both package manifests and
+lockfile root entries use `0.3.0`, and the production env example and README
+pin it. The changelog's `0.3.0` section has the release notes, upgrade notes
+and comparison link. The production Compose file now runs the server and
+worker under an init process and passes `REVIEW_RETENTION_DAYS` to the worker.
+
+### Verification
+
+- Server: 1276 tests pass, type check passes, and Prisma schema validation passes.
+- Client: 518 tests pass with `--maxWorkers=2`; type check, lint and production
+  build pass. Lint reports the same two Fast Refresh warnings in
+  `AuthProvider.tsx` as 0.2.0, and the build reports the same chunk-size warning.
+- The production Compose file renders with `.env.production.example` (and
+  placeholder secrets), using image `ghcr.io/rdlugs/sentryward:0.3.0`.
+- Dependency audits: server reported one high runtime finding, zod below 4.6.6
+  ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5));
+  `npm audit fix` moved zod to 4.6.7, and the server now reports zero findings
+  with and without dev dependencies (tests and type check rerun). Client reports zero
+  runtime findings and eight in development tooling (one high, five moderate,
+  two low), all outside the browser bundle.
+- Not performed: a production image build, an upgrade from
+  a 0.2.0 database, a browser walkthrough, a live forge/model review, or hosted
+  CI on the preparation commit.
+
+### Publication steps
+
+- [ ] Authorize staging and committing the preparation changes.
+- [ ] Push the approved commit and obtain passing hosted CI for it.
+- [ ] Create and push `v0.3.0` on that verified commit.
+- [ ] Verify both architecture images are published to GHCR and `latest` moved.
+- [ ] Publish a stable GitHub release using the `0.3.0` changelog section,
+  including its upgrade notes.
+
 ## 0.2.0 preparation (2026-10-22)
 
 Release metadata is prepared for `v0.2.0`. Both package manifests and

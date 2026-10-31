@@ -8,6 +8,27 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-31
+
+Sentryward remains pre-1.0, and this release changes some default behaviour:
+review context now follows callers two hops from the changed code, and
+changing your password signs out your other sessions. AI findings still need
+human verification.
+
+### Upgrade notes
+
+- Back up the database and `ENCRYPTION_KEY` before upgrading. The server
+  applies this release's migrations on start.
+- `review.impact_depth` defaults to 2, so reviews search for callers of
+  callers (within a cap of 8 code searches per review). Set
+  `review.impact_depth: 1` to keep the previous context.
+- `REVIEW_RETENTION_DAYS` is optional and unset keeps everything, as before.
+  Once a retention period is set (here or under Instance settings), the worker
+  deletes and clears older review data hourly, including the findings of
+  changes with no activity in that period.
+- `GET /api/usage` no longer returns `recent`; API clients that read it should
+  use `GET /api/usage/recent`.
+
 ### Added
 
 - `list_dir` tool for agentic review passes (#144). With
@@ -867,7 +888,8 @@ boundaries.
 - The Docker Compose setup is for development, not public production hosting.
 - Registration is open, with no invitation gate.
 
-[Unreleased]: https://github.com/rdlugs/sentryward/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rdlugs/sentryward/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rdlugs/sentryward/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rdlugs/sentryward/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rdlugs/sentryward/compare/v0.1.0-alpha.2...v0.1.0
 [0.1.0-alpha.2]: https://github.com/rdlugs/sentryward/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
