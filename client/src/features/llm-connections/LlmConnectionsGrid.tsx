@@ -1,8 +1,11 @@
 import { useState } from "react"
+import { toast } from "sonner"
 import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
-import { useApiKeys, type ApiKey, type LlmProvider } from "./api"
+import { useAuth } from "@/features/auth/useAuth"
+import { SortableGrid } from "@/features/forge/SortableGrid"
+import { useApiKeys, useReorderApiKeys, type ApiKey, type LlmProvider } from "./api"
 import { DetailsSheet } from "./DetailsSheet"
 import { KeySheet } from "./KeySheet"
 import { ProviderCard } from "./ProviderCard"
@@ -12,6 +15,11 @@ import { RemoveKeyDialog } from "./RemoveKeyDialog"
 // missing one is as useful to see as a broken one.
 export function LlmConnectionsGrid() {
   const { data, isPending, refetch, isRefetching } = useApiKeys()
+  const reorder = useReorderApiKeys()
+  // The order is the workspace's, so only those who manage it can change it.
+  // There is always a card per provider and nothing filters them.
+  const { workspace } = useAuth()
+  const reorderable = workspace?.role === "owner" || workspace?.role === "admin"
   // Each overlay's subject is kept after it closes so the closing animation
   // still shows the same content (a save flips the key sheet from "Connect"
   // to stored); only the open flag clears. The key sheet's is replaced on the
@@ -31,9 +39,9 @@ export function LlmConnectionsGrid() {
 
   if (isPending) {
     return (
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-busy="true">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true">
         {[0, 1, 2, 3].map((index) => (
-          <Skeleton key={index} className="h-44 rounded-xl" />
+          <Skeleton key={index} className="h-48 rounded-xl" />
         ))}
       </div>
     )
@@ -69,6 +77,12 @@ export function LlmConnectionsGrid() {
     setRemoveOpen(true)
   }
 
+  function onReorder(providers: string[]) {
+    reorder.mutate(providers as LlmProvider[], {
+      onError: () => toast.error("Could not save the new order"),
+    })
+  }
+
   return (
     <div className="flex flex-col gap-4">
       {!data.keys.some((key) => key.stored) && (
@@ -76,17 +90,19 @@ export function LlmConnectionsGrid() {
           Add a provider credential to review with your own account or API host. Only verified connections are used.
         </p>
       )}
-      <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="LLM providers">
+      {reorderable && <p className="text-sm text-muted-foreground">Drag cards by their handle to reorder them.</p>}
+      <SortableGrid ids={data.keys.map((key) => key.provider)} label="LLM providers" onReorder={onReorder}>
         {data.keys.map((key) => (
           <ProviderCard
             key={key.provider}
             apiKey={key}
+            reorderable={reorderable}
             onDetails={() => openDetails(key)}
             onConnect={() => openKeySheet(key)}
             onRemove={() => openRemove(key)}
           />
         ))}
-      </ul>
+      </SortableGrid>
       <KeySheet key={editing?.provider ?? "none"} credential={editing} open={sheetOpen} onOpenChange={setSheetOpen} />
       <DetailsSheet apiKey={inspected} open={detailsOpen} onOpenChange={setDetailsOpen} />
       <RemoveKeyDialog apiKey={removing} open={removeOpen} onOpenChange={setRemoveOpen} />

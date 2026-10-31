@@ -10,6 +10,7 @@ import {
   deleteAccount,
   deleteApiKey,
   listApiKeys,
+  reorderApiKeys,
   saveApiKey,
   testApiKeyModel,
   updateProfile,
@@ -34,6 +35,8 @@ settingsRouter.get("/api-keys/:provider/status", apiKeyStatus);
 settingsRouter.get("/api-keys/:provider/models", apiKeyModels);
 settingsRouter.get("/api-keys/:provider/capabilities", apiKeyCapabilities);
 settingsRouter.post("/api-keys/:provider/test", testApiKeyModel);
+// Before /:provider, which would otherwise take "order" for a provider name.
+settingsRouter.put("/api-keys/order", requireWorkspaceRole("admin"), reorderApiKeys);
 settingsRouter.put("/api-keys/:provider", requireWorkspaceRole("admin"), saveApiKey);
 settingsRouter.delete("/api-keys/:provider", requireWorkspaceRole("admin"), deleteApiKey);
 // Prices belong to the workspace too: what its reviews' costs are worked out at.

@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, screen, waitFor, within } from "@testing-library/react"
 import { focusManager } from "@tanstack/react-query"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
-import { mockApi } from "@/test/apiRoutes"
+import { mockApi, testUser, testWorkspaces } from "@/test/apiRoutes"
 
 const noKeys = {
   keys: [
@@ -435,6 +435,92 @@ describe("LLM Connections page", () => {
     expect(await within(card("Anthropic")).findByText("••••1234")).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
     expect(screen.queryByRole("dialog", { name: "Anthropic connection" })).not.toBeInTheDocument()
+  })
+
+  describe("reordering", () => {
+    function providers() {
+      return within(screen.getByRole("list", { name: "LLM providers" }))
+        .getAllByRole("listitem")
+        .map((item) => item.getAttribute("aria-label"))
+    }
+
+    // Same layout stand-in as the forge reordering tests: jsdom lays nothing
+    // out, so each card gets a box in a row by its place in the list.
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+        const item = this.closest("li")
+        const index = item ? Array.from(item.parentElement!.children).indexOf(item) : -1
+        const left = index < 0 ? 0 : index * 300
+        return { x: left, y: 0, left, top: 0, right: left + 280, bottom: 200, width: 280, height: 200, toJSON() {} } as DOMRect
+      })
+    })
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    async function moveRight(provider: string) {
+      screen.getByRole("button", { name: `Reorder ${provider}` }).focus()
+      await userEvent.keyboard(" ")
+      await userEvent.keyboard("{ArrowRight}")
+      await userEvent.keyboard(" ")
+    }
+
+    it("saves a card moved with the keyboard, without checking the connections again", async () => {
+      let saved: unknown
+      let finish: (response: Response) => void = () => {}
+      const fetchSpy = mockApi({
+        "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1)] },
+        "GET /api/settings/api-keys/anthropic/status": { status: "active" },
+        "PUT /api/settings/api-keys/order": (init?: RequestInit) => {
+          saved = bodyOf(init)
+          // Held open so the test can look before the server answers.
+          return new Promise<Response>((resolve) => {
+            finish = resolve
+          }) as unknown as Response
+        },
+      })
+      renderWithProviders(<App />, { route: "/llm-connections" })
+      await screen.findByRole("list", { name: "LLM providers" })
+      expect(screen.getByText("Drag cards by their handle to reorder them.")).toBeInTheDocument()
+      await within(card("Anthropic")).findByText("Active")
+
+      await moveRight("Anthropic")
+
+      await waitFor(() => expect(saved).toEqual({ providers: ["openai", "anthropic", "google", "ollama"] }))
+      // Moved before the server answers.
+      expect(providers()).toEqual(["OpenAI", "Anthropic", "Google", "Ollama"])
+      finish(new Response(null, { status: 204 }))
+      await waitFor(() => expect(calls(fetchSpy, "GET", "/api/settings/api-keys")).toHaveLength(2))
+      expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(1)
+    })
+
+    it("puts the cards back when the order cannot be saved", async () => {
+      mockApi({
+        "GET /api/settings/api-keys": noKeys,
+        "PUT /api/settings/api-keys/order": () => jsonResponse(500, { message: "boom" }),
+      })
+      renderWithProviders(<App />, { route: "/llm-connections" })
+      await screen.findByRole("list", { name: "LLM providers" })
+
+      await moveRight("Anthropic")
+
+      expect(await screen.findByText("Could not save the new order")).toBeInTheDocument()
+      await waitFor(() => expect(providers()).toEqual(["Anthropic", "OpenAI", "Google", "Ollama"]))
+    })
+
+    it("offers no handle to members", async () => {
+      const asMember = testWorkspaces.map((workspace) => ({ ...workspace, role: "member" }))
+      mockApi({
+        "GET /api/auth/me": { user: testUser, workspaces: asMember },
+        "GET /api/workspaces": { workspaces: asMember },
+        "GET /api/settings/api-keys": noKeys,
+      })
+      renderWithProviders(<App />, { route: "/llm-connections" })
+      await screen.findByRole("list", { name: "LLM providers" })
+
+      expect(screen.queryByRole("button", { name: /^Reorder/ })).not.toBeInTheDocument()
+      expect(screen.queryByText("Drag cards by their handle to reorder them.")).not.toBeInTheDocument()
+    })
   })
 
   describe("testing a model", () => {

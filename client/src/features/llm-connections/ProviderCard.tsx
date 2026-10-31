@@ -1,4 +1,6 @@
 import { Link } from "react-router"
+import { useSortable } from "@dnd-kit/sortable"
+import { CSS } from "@dnd-kit/utilities"
 import { Info, KeyRound, MoreHorizontal, Plus, RefreshCw, RotateCw, ShieldAlert, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter } from "@/components/ui/card"
@@ -9,6 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { DragHandle } from "@/features/forge/SortableGrid"
 import { formatDate, timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import { useApiKeyStatus, type ApiKey } from "./api"
@@ -101,16 +104,23 @@ function ProviderActions({
 
 export function ProviderCard({
   apiKey,
+  reorderable,
   onDetails,
   onConnect,
   onRemove,
 }: {
   apiKey: ApiKey
+  // Off for members.
+  reorderable: boolean
   onDetails: () => void
   // Opens the key sheet: a first connection, or a replacement for a stored one.
   onConnect: () => void
   onRemove: () => void
 }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
+    id: apiKey.provider,
+    disabled: !reorderable,
+  })
   const provider = LLM_PROVIDERS[apiKey.provider]
   const checkable = isCheckable(apiKey)
   const { status, checkedAt, isFetching, refetch } = useApiKeyStatus(apiKey.provider, { enabled: checkable })
@@ -179,10 +189,24 @@ export function ProviderCard({
   }
 
   return (
-    <li className="min-w-0" aria-label={provider.label} data-attention={ATTENTION[state] ? state : undefined}>
-      <Card size="sm" className={cn("h-full", ATTENTION[state])}>
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      className={cn("min-w-0", isDragging && "relative z-10 opacity-80")}
+      aria-label={provider.label}
+      data-attention={ATTENTION[state] ? state : undefined}
+    >
+      <Card size="sm" className={cn("h-full", ATTENTION[state], isDragging && "shadow-lg")}>
         <CardContent className="flex flex-1 flex-col gap-3">
           <div className="flex items-start gap-2">
+            {reorderable && (
+              <DragHandle
+                label={`Reorder ${provider.label}`}
+                handleRef={setActivatorNodeRef}
+                attributes={attributes}
+                listeners={listeners}
+              />
+            )}
             <span className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background">
               <provider.icon className="size-4" aria-hidden />
             </span>

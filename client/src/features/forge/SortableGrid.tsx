@@ -13,7 +13,7 @@ import {
 import { arrayMove, rectSortingStrategy, SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable"
 import { GripVertical } from "lucide-react"
 
-// The card grid shared by connections and repositories. `ids` is the whole
+// The card grid shared by forge connections, repositories and LLM providers. `ids` is the whole
 // saved order, so a drop always reports every id, while `children` may render
 // only the first `shown` of them (the repository grid grows a page at a time).
 export function SortableGrid({

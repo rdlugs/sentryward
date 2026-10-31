@@ -388,7 +388,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   check it again, the page header sums up how many providers are connected
   and how many need attention, and the page shows placeholders while loading
   and a retry on error. The "Inactive" and "Unknown" statuses read "Key
-  rejected" and "Couldn't verify".
+  rejected" and "Couldn't verify". The cards are laid out like the
+  Repositories page's, and workspace admins can drag them by their handle
+  (or move them with the keyboard) into an order saved for the workspace.
 - Redesigned login, sign-up, password reset and invite pages. On wide screens
   they split into a product panel (what Sentryward does, light or dark with
   the theme) beside the form; on phones only the form shows, under the logo.

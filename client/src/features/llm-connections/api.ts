@@ -35,6 +35,41 @@ export function useApiKeys() {
   })
 }
 
+const REORDER_API_KEYS = ["settings", "api-keys", "reorder"]
+
+// Takes every provider in its new order, like useReorderConnections: the cache
+// is reordered first so a dropped card stays put, and put back if the save
+// fails; saves run one at a time and only the last one refetches. Exact keys
+// throughout, since each connection's status check sits under the same prefix
+// and refetching those would call every provider on each drop.
+export function useReorderApiKeys() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: REORDER_API_KEYS,
+    scope: { id: "reorder-api-keys" },
+    mutationFn: (providers: LlmProvider[]) =>
+      api<void>("/settings/api-keys/order", { method: "PUT", body: JSON.stringify({ providers }) }),
+    onMutate: async (providers) => {
+      await queryClient.cancelQueries({ queryKey: API_KEYS_QUERY_KEY, exact: true })
+      const previous = queryClient.getQueryData<{ keys: ApiKey[] }>(API_KEYS_QUERY_KEY)
+      if (previous) {
+        const byProvider = new Map(previous.keys.map((key) => [key.provider, key]))
+        const keys = providers.flatMap((provider) => byProvider.get(provider) ?? [])
+        queryClient.setQueryData(API_KEYS_QUERY_KEY, { ...previous, keys })
+      }
+      return { previous }
+    },
+    onError: (_error, _providers, context) => {
+      if (context?.previous) queryClient.setQueryData(API_KEYS_QUERY_KEY, context.previous)
+    },
+    onSettled: () => {
+      if (queryClient.isMutating({ mutationKey: REORDER_API_KEYS }) === 1) {
+        return queryClient.invalidateQueries({ queryKey: API_KEYS_QUERY_KEY, exact: true })
+      }
+    },
+  })
+}
+
 function apiKeyStatusQuery(provider: LlmProvider) {
   return {
     queryKey: [...API_KEYS_QUERY_KEY, provider, "status"],
