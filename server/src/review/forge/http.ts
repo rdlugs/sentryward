@@ -19,6 +19,8 @@ export interface ForgeHttpOptions {
   baseUrl: string;
   headers: () => Promise<Record<string, string>>;
   fetch?: FetchLike;
+  // Test hook; production requests always use FORGE_TIMEOUT_MS.
+  timeoutMs?: number;
 }
 
 // Thin JSON client shared by both adapters. Errors carry the forge's status so
@@ -31,7 +33,12 @@ export class ForgeHttp {
     const doFetch = this.options.fetch ?? globalThis.fetch;
     const json: Record<string, string> = typeof init.body === "string" ? { "Content-Type": "application/json" } : {};
     const headers = { ...json, ...(await this.options.headers()), ...(init.headers as Record<string, string> | undefined) };
-    let res = await doFetch(url, { ...init, headers, redirect: "manual" });
+    // A forge that accepts the connection but never answers would hang the
+    // worker's runJob promise (whose memory is only freed when it settles) and
+    // the webhook handlers that call the forge inline. One signal bounds every
+    // hop; a caller bringing its own signal keeps control.
+    const signal = init.signal ?? AbortSignal.timeout(this.options.timeoutMs ?? FORGE_TIMEOUT_MS);
+    let res = await doFetch(url, { ...init, headers, redirect: "manual", signal });
     // Redirects are followed by hand so each hop gets the same origin check;
     // GitHub answers renamed repositories with a 301 on its own API host.
     for (let hop = 0; isRedirect(res.status) && hop < MAX_REDIRECTS; hop++) {
@@ -40,7 +47,7 @@ export class ForgeHttp {
         break;
       }
       url = this.sameOrigin(new URL(location, url).toString());
-      res = await doFetch(url, { ...init, headers, redirect: "manual" });
+      res = await doFetch(url, { ...init, headers, redirect: "manual", signal });
     }
     if (isRedirect(res.status)) {
       throw new ForgeError(res.status, `${init.method ?? "GET"} ${url} redirected too many times`);
@@ -97,6 +104,10 @@ export class ForgeHttp {
 }
 
 const MAX_REDIRECTS = 3;
+
+// Generous enough for a slow self-hosted forge, tight enough that a hung run
+// is failed and collected well before the worker's own 30-minute ceiling.
+const FORGE_TIMEOUT_MS = 30_000;
 
 // The primary limit shows in x-ratelimit-remaining; GitHub's secondary limits
 // send retry-after, or sometimes only say so in the message.
