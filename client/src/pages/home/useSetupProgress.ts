@@ -1,6 +1,7 @@
 import { useGlobalConfig } from "@/features/config/api"
 import { useConnections, useRepos } from "@/features/forge/api"
 import { useApiKeyStatuses, useApiKeys, type ApiKey, type LlmConnectionStatus } from "@/features/llm-connections/api"
+import { isCheckable } from "@/features/llm-connections/health"
 import { useReviews } from "@/features/reviews/api"
 
 type LlmState = "ok" | "unreachable" | "missing"
@@ -28,12 +29,6 @@ function keyState(key: ApiKey, status: LlmConnectionStatus | undefined): LlmStat
   return status === "unreachable" ? "unreachable" : "missing"
 }
 
-// Stored keys the server would actually call: an undecryptable one always
-// fails its check, and a blocked one is never called.
-function checkable(key: ApiKey) {
-  return key.stored && !key.undecryptable && !key.blocked
-}
-
 // The setup steps from live data, in the order a new workspace takes them.
 export function useSetupProgress() {
   const connections = useConnections()
@@ -48,8 +43,8 @@ export function useSetupProgress() {
   const finished = useReviews({ status: "completed", limit: 1 })
 
   const keyList = keys.data?.keys ?? []
-  const statuses = useApiKeyStatuses(keyList.filter(checkable))
-  const statusesPending = keyList.some((key) => checkable(key) && statuses[key.provider] === undefined)
+  const statuses = useApiKeyStatuses(keyList.filter(isCheckable))
+  const statusesPending = keyList.some((key) => isCheckable(key) && statuses[key.provider] === undefined)
 
   const isPending =
     connections.isPending ||

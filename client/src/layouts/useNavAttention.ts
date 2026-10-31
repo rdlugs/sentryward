@@ -1,5 +1,6 @@
 import { useConnectionStatuses, useConnections } from "@/features/forge/api"
 import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
+import { isCheckable, needsAttention } from "@/features/llm-connections/health"
 import { useReviewAttention } from "@/features/reviews/api"
 
 // What a nav item flags: a count (failed reviews) or a warning dot. The label
@@ -16,18 +17,11 @@ export function useNavAttention(pathname: string): Record<string, NavAttention |
   const attention = useReviewAttention()
   const failed = attention.data?.failed ?? 0
 
-  // Only stored keys are checked, as on the LLM Connections page; an
-  // unreadable one has nothing to send the provider.
+  // Only stored keys count, and only the checkable ones have a status, as on
+  // the LLM Connections page.
   const keys = (useApiKeys().data?.keys ?? EMPTY).filter((key) => key.stored)
-  const keyStatuses = useApiKeyStatuses(
-    keys.filter((key) => !key.undecryptable),
-    { live: false },
-  )
-  const llmUnhealthy = keys.some((key) => {
-    if (key.undecryptable || key.blocked) return true
-    const status = keyStatuses[key.provider]
-    return status === "revoked" || status === "unreachable" || status === "blocked"
-  })
+  const keyStatuses = useApiKeyStatuses(keys.filter(isCheckable), { live: false })
+  const llmUnhealthy = keys.some((key) => needsAttention(key, keyStatuses[key.provider]))
 
   const connections = useConnections().data?.connections ?? EMPTY
   const connectionStatuses = useConnectionStatuses(connections, { live: false })

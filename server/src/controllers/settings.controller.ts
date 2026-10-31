@@ -17,6 +17,7 @@ import {
   apiKeyParamsSchema,
   changePasswordSchema,
   deleteAccountSchema,
+  reorderApiKeysSchema,
   saveApiKeySchema,
   testModelSchema,
   updateProfileSchema,
@@ -135,20 +136,42 @@ async function assertAllowed(workspaceId: string, target: LlmTarget, field: "bas
   if (violation) throw new HttpError(400, "Validation failed", { [field]: [violation.message] });
 }
 
+// The saved order first; providers it does not name (none saved yet, or one
+// added since) follow in their default order, and names no longer supported
+// are skipped, so a changed provider list never hides a card.
+function orderProviders(saved: string[]): ProviderName[] {
+  const rank = (provider: ProviderName) => {
+    const index = saved.indexOf(provider);
+    return index === -1 ? saved.length + PROVIDERS.indexOf(provider) : index;
+  };
+  return [...PROVIDERS].sort((a, b) => rank(a) - rank(b));
+}
+
 export async function listApiKeys(req: Request, res: Response) {
-  const stored = await prisma.llmCredential.findMany({ where: { workspaceId: req.workspaceId } });
+  const [stored, workspace] = await Promise.all([
+    prisma.llmCredential.findMany({ where: { workspaceId: req.workspaceId } }),
+    prisma.workspace.findUniqueOrThrow({ where: { id: req.workspaceId }, select: { llmProviderOrder: true } }),
+  ]);
   const byProvider = new Map(stored.map((credential) => [credential.provider, credential]));
   // The policy refuses a provider or host whichever key would be used, so a
   // server-wide key is checked too: it has no status request to report it.
   const policy = await policyFor(req.workspaceId!);
   const keys = await Promise.all(
-    PROVIDERS.map(async (provider) => {
+    orderProviders(workspace.llmProviderOrder).map(async (provider) => {
       const credential = byProvider.get(provider);
       const violation = await checkModel(policy, connectionTarget(provider, credential?.baseUrl));
       return publicKey(provider, credential, Boolean(violation));
     }),
   );
   res.json({ keys });
+}
+
+// One list on the workspace row, so a single write needs none of the row
+// locking the forge reorders take.
+export async function reorderApiKeys(req: Request, res: Response) {
+  const { providers } = reorderApiKeysSchema.parse(req.body);
+  await prisma.workspace.update({ where: { id: req.workspaceId }, data: { llmProviderOrder: providers } });
+  res.status(204).end();
 }
 
 // The stored secret stays server-side while the provider confirms whether it

@@ -24,6 +24,17 @@ export const changePasswordSchema = z
 
 export const apiKeyParamsSchema = z.object({ provider: z.enum(PROVIDERS) });
 
+// Every provider, in the order to show them. The whole list, so none is left
+// to land somewhere nobody chose.
+export const reorderApiKeysSchema = z.object({
+  providers: z
+    .array(z.enum(PROVIDERS))
+    .refine(
+      (providers) => providers.length === PROVIDERS.length && new Set(providers).size === providers.length,
+      "List each provider exactly once",
+    ),
+});
+
 export const saveApiKeySchema = z.object({
   apiKey: z.string().trim().max(500).optional(),
   baseUrl: z.url({ protocol: /^https?$/, error: "Enter an http or https URL" }).max(500).optional(),

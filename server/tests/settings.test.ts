@@ -9,7 +9,7 @@ import { testLlmModel } from "../src/services/llmConnection.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { encryptWithOtherKey } from "./helpers/foreignKey.ts";
 import { fakeModel } from "./helpers/model.ts";
-import { createUser } from "./helpers/users.ts";
+import { addMember, createTeam, createUser, inWorkspace } from "./helpers/users.ts";
 
 const PASSWORD = "correct-horse";
 
@@ -260,6 +260,63 @@ describe("/api/settings/api-keys", () => {
     const res = await request(app).delete("/api/settings/api-keys/anthropic").set("Cookie", cookie);
     expect(res.status).toBe(404);
     expect(await prisma.llmCredential.count({ where: { workspaceId: other.workspace.id } })).toBe(1);
+  });
+});
+
+describe("PUT /api/settings/api-keys/order", () => {
+  const providers = async (asCookie = cookie) =>
+    (await request(app).get("/api/settings/api-keys").set("Cookie", asCookie)).body.keys.map(
+      (key: { provider: string }) => key.provider,
+    );
+  const reorder = (order: unknown) =>
+    request(app).put("/api/settings/api-keys/order").set("Cookie", cookie).send({ providers: order });
+
+  it("lists providers in the saved order, stored or not", async () => {
+    expect(await providers()).toEqual(["anthropic", "openai", "google", "ollama"]);
+    await prisma.llmCredential.create({ data: { workspaceId, provider: "google", encryptedKey: encrypt("g-key") } });
+
+    expect((await reorder(["ollama", "google", "anthropic", "openai"])).status).toBe(204);
+
+    expect(await providers()).toEqual(["ollama", "google", "anthropic", "openai"]);
+  });
+
+  it("puts providers the saved order misses after it and skips ones it no longer knows", async () => {
+    // As left by an older provider list.
+    await prisma.workspace.update({ where: { id: workspaceId }, data: { llmProviderOrder: ["retired", "google"] } });
+
+    expect(await providers()).toEqual(["google", "anthropic", "openai", "ollama"]);
+  });
+
+  it.each([
+    ["a partial list", ["anthropic", "openai"]],
+    ["a repeated provider", ["anthropic", "anthropic", "openai", "google"]],
+    ["an unknown provider", ["anthropic", "openai", "google", "mistral"]],
+  ])("400s on %s", async (_case, order) => {
+    expect((await reorder(order)).status).toBe(400);
+    expect((await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId } })).llmProviderOrder).toEqual([]);
+  });
+
+  it("keeps each workspace's order to itself", async () => {
+    const other = await createUser("other@example.com");
+
+    await reorder(["ollama", "google", "anthropic", "openai"]);
+
+    expect(await providers(other.cookie)).toEqual(["anthropic", "openai", "google", "ollama"]);
+  });
+
+  it("refuses workspace members who are not admins", async () => {
+    const owner = await createUser("owner@example.com");
+    const team = await createTeam(owner.user.id, "Acme");
+    await addMember(team.id, userId, "member");
+
+    const res = await request(app)
+      .put("/api/settings/api-keys/order")
+      .set("Cookie", cookie)
+      .set(...inWorkspace(team.id))
+      .send({ providers: ["ollama", "google", "anthropic", "openai"] });
+
+    expect(res.status).toBe(403);
+    expect((await prisma.workspace.findUniqueOrThrow({ where: { id: team.id } })).llmProviderOrder).toEqual([]);
   });
 });
 

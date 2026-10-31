@@ -26,7 +26,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TextField } from "@/features/auth/TextField"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
 import { copyToClipboard } from "@/lib/clipboard"
-import { timeAgo } from "@/lib/time"
+import { formatDate, timeAgo } from "@/lib/time"
 import { useApiTokens, useCreateApiToken, useRevokeApiToken, type ApiToken } from "./api"
 
 const NEVER = "never"
@@ -43,10 +43,6 @@ const tokenSchema = z.object({
   expiry: z.string(),
 })
 type TokenInput = z.infer<typeof tokenSchema>
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
-}
 
 function isExpired(iso: string, now = Date.now()) {
   return new Date(iso).getTime() <= now

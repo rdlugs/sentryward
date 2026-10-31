@@ -7,11 +7,11 @@ export type LlmProvider = "anthropic" | "openai" | "google" | "ollama"
 // blocked: the privacy policy refuses the connection's host or provider.
 export type LlmConnectionStatus = "active" | "revoked" | "unreachable" | "blocked"
 
-// Shared with the status filter and the status badge so both read the same.
+// Read by the connection state badge.
 export const STATUS_LABELS: Record<LlmConnectionStatus, string> = {
   active: "Active",
-  revoked: "Inactive",
-  unreachable: "Unknown",
+  revoked: "Key rejected",
+  unreachable: "Couldn't verify",
   blocked: "Blocked by policy",
 }
 
@@ -32,6 +32,41 @@ export function useApiKeys() {
   return useQuery({
     queryKey: API_KEYS_QUERY_KEY,
     queryFn: () => api<{ keys: ApiKey[] }>("/settings/api-keys"),
+  })
+}
+
+const REORDER_API_KEYS = ["settings", "api-keys", "reorder"]
+
+// Takes every provider in its new order, like useReorderConnections: the cache
+// is reordered first so a dropped card stays put, and put back if the save
+// fails; saves run one at a time and only the last one refetches. Exact keys
+// throughout, since each connection's status check sits under the same prefix
+// and refetching those would call every provider on each drop.
+export function useReorderApiKeys() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: REORDER_API_KEYS,
+    scope: { id: "reorder-api-keys" },
+    mutationFn: (providers: LlmProvider[]) =>
+      api<void>("/settings/api-keys/order", { method: "PUT", body: JSON.stringify({ providers }) }),
+    onMutate: async (providers) => {
+      await queryClient.cancelQueries({ queryKey: API_KEYS_QUERY_KEY, exact: true })
+      const previous = queryClient.getQueryData<{ keys: ApiKey[] }>(API_KEYS_QUERY_KEY)
+      if (previous) {
+        const byProvider = new Map(previous.keys.map((key) => [key.provider, key]))
+        const keys = providers.flatMap((provider) => byProvider.get(provider) ?? [])
+        queryClient.setQueryData(API_KEYS_QUERY_KEY, { ...previous, keys })
+      }
+      return { previous }
+    },
+    onError: (_error, _providers, context) => {
+      if (context?.previous) queryClient.setQueryData(API_KEYS_QUERY_KEY, context.previous)
+    },
+    onSettled: () => {
+      if (queryClient.isMutating({ mutationKey: REORDER_API_KEYS }) === 1) {
+        return queryClient.invalidateQueries({ queryKey: API_KEYS_QUERY_KEY, exact: true })
+      }
+    },
   })
 }
 
@@ -62,6 +97,15 @@ export function useApiKeyStatuses(
         ]),
       ),
   })
+}
+
+// One provider's check, for a card or details sheet that shows when it last ran
+// and can run it again. Shares its cache entry with useApiKeyStatuses.
+export function useApiKeyStatus(provider: LlmProvider, { enabled = true }: { enabled?: boolean } = {}) {
+  const query = useQuery({ ...apiKeyStatusQuery(provider), enabled })
+  const status: LlmConnectionStatus | undefined = query.isError ? "unreachable" : query.data?.status
+  const checkedAt = Math.max(query.dataUpdatedAt, query.errorUpdatedAt) || null
+  return { status, checkedAt, isFetching: query.isFetching, refetch: query.refetch }
 }
 
 // Feeds the model pickers. Saving or deleting a key invalidates the api-keys

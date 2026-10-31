@@ -62,15 +62,18 @@ model UserAvatar {
 // credentials and the global review config. Every user has a personal one, so
 // a solo user never sees the difference.
 model Workspace {
-  id              String   @id @default(uuid()) @db.Uuid
-  name            String
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String
   // Set only on a user's personal workspace: at most one each, deleted with them.
-  personalOwnerId String?  @unique @map("personal_owner_id") @db.Uuid
+  personalOwnerId  String?  @unique @map("personal_owner_id") @db.Uuid
   // Global review config: a ConfigOverride applied to every repository that
   // follows it (and beneath the overrides of those that do not).
-  reviewSettings  Json     @default("{}") @map("review_settings")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  reviewSettings   Json     @default("{}") @map("review_settings")
+  // The LLM Connections page's dragged order of provider names. Kept here, not
+  // on llm_credentials, because a provider without a stored key has a card too.
+  llmProviderOrder String[] @default([]) @map("llm_provider_order")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   personalOwner   User?                @relation("PersonalWorkspace", fields: [personalOwnerId], references: [id], onDelete: Cascade)
   memberships     Membership[]
