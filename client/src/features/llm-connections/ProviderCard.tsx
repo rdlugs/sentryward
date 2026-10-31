@@ -9,15 +9,23 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { timeAgo } from "@/lib/time"
+import { formatDate, timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import { useApiKeyStatus, type ApiKey } from "./api"
 import { ConnectionStateBadge } from "./ApiKeyStatusBadge"
-import { formatDate, keyText } from "./format"
-import { connectionState, type ConnectionState } from "./health"
+import { keyText } from "./format"
+import { connectionState, isCheckable, type ConnectionState } from "./health"
 import { LLM_PROVIDERS } from "./providers"
 
-const PROBLEMS: ConnectionState[] = ["blocked", "unreadable", "rejected"]
+// The card's ring, so the cards highlight exactly what the header and the
+// sidebar count as needing attention; an unverified check may be the host's
+// hiccup, so it warns rather than alarms, like its badge.
+const ATTENTION: Partial<Record<ConnectionState, string>> = {
+  blocked: "ring-destructive/40",
+  unreadable: "ring-destructive/40",
+  rejected: "ring-destructive/40",
+  unverified: "ring-amber-600/40",
+}
 
 // Written out on the card rather than left in a tooltip, which touch screens
 // never show.
@@ -104,10 +112,11 @@ export function ProviderCard({
   onRemove: () => void
 }) {
   const provider = LLM_PROVIDERS[apiKey.provider]
-  // Only stored, readable keys are checked: each check calls the provider.
-  const checkable = apiKey.stored && !apiKey.undecryptable
+  const checkable = isCheckable(apiKey)
   const { status, checkedAt, isFetching, refetch } = useApiKeyStatus(apiKey.provider, { enabled: checkable })
-  const state = connectionState(apiKey, isFetching ? undefined : status)
+  // The last result stays up while a check reruns, as in the header and the
+  // sidebar; only the recheck controls show the run.
+  const state = connectionState(apiKey, status)
   const recheck = () => void refetch()
 
   function mainAction() {
@@ -139,8 +148,8 @@ export function ProviderCard({
         )
       case "unverified":
         return (
-          <Button size="sm" onClick={recheck}>
-            <RotateCw />
+          <Button size="sm" onClick={recheck} disabled={isFetching}>
+            <RotateCw className={cn(isFetching && "animate-spin")} />
             Check again
           </Button>
         )
@@ -170,8 +179,8 @@ export function ProviderCard({
   }
 
   return (
-    <li className="min-w-0" aria-label={provider.label}>
-      <Card size="sm" className={cn("h-full", PROBLEMS.includes(state) && "ring-destructive/40")}>
+    <li className="min-w-0" aria-label={provider.label} data-attention={ATTENTION[state] ? state : undefined}>
+      <Card size="sm" className={cn("h-full", ATTENTION[state])}>
         <CardContent className="flex flex-1 flex-col gap-3">
           <div className="flex items-start gap-2">
             <span className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background">

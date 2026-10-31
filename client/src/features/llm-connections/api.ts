@@ -7,7 +7,7 @@ export type LlmProvider = "anthropic" | "openai" | "google" | "ollama"
 // blocked: the privacy policy refuses the connection's host or provider.
 export type LlmConnectionStatus = "active" | "revoked" | "unreachable" | "blocked"
 
-// Shared with the status filter and the status badge so both read the same.
+// Read by the connection state badge.
 export const STATUS_LABELS: Record<LlmConnectionStatus, string> = {
   active: "Active",
   revoked: "Key rejected",

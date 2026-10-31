@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { screen, waitFor, within } from "@testing-library/react"
+import { act, screen, waitFor, within } from "@testing-library/react"
+import { focusManager } from "@tanstack/react-query"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
@@ -315,6 +316,9 @@ describe("LLM Connections page", () => {
     renderWithProviders(<App />, { route: "/llm-connections" })
 
     expect(await screen.findByText("Couldn't verify")).toBeInTheDocument()
+    // Counted in the header, so its card is marked too.
+    expect(screen.getByText("1 of 4 providers connected · 1 needs attention")).toBeInTheDocument()
+    expect(card("Anthropic")).toHaveAttribute("data-attention", "unverified")
     expect(within(card("Anthropic")).getByText("checked just now")).toBeInTheDocument()
     await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Check again" }))
     await waitFor(() =>
@@ -325,6 +329,112 @@ describe("LLM Connections page", () => {
     await waitFor(() =>
       expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(3),
     )
+  })
+
+  it("keeps a card's last result and its fix while the check runs again", async () => {
+    let checks = 0
+    const fetchSpy = mockApi({
+      "GET /api/settings/api-keys": { keys: [storedAnthropic, ...noKeys.keys.slice(1)] },
+      // The second check never answers, so the card is caught mid-run.
+      "GET /api/settings/api-keys/anthropic/status": () =>
+        ++checks === 1 ? jsonResponse(200, { status: "revoked" }) : (new Promise(() => {}) as unknown as Response),
+    })
+    renderWithProviders(<App />, { route: "/llm-connections" })
+
+    await screen.findByRole("list", { name: "LLM providers" })
+    expect(await within(card("Anthropic")).findByText("Key rejected")).toBeInTheDocument()
+    await openFromMenu("Anthropic", "Check again")
+    await waitFor(() =>
+      expect(calls(fetchSpy, "GET", "/api/settings/api-keys/anthropic/status")).toHaveLength(2),
+    )
+
+    expect(within(card("Anthropic")).getByText("Key rejected")).toBeInTheDocument()
+    expect(within(card("Anthropic")).getByRole("button", { name: "Replace key" })).toBeInTheDocument()
+    expect(card("Anthropic")).toHaveAttribute("data-attention", "rejected")
+  })
+
+  it("offers to connect again once a key blocked by its check is removed", async () => {
+    let keys: { keys: object[] } = { keys: [storedAnthropic, ...noKeys.keys.slice(1)] }
+    mockApi({
+      "GET /api/settings/api-keys": () => jsonResponse(200, keys),
+      "GET /api/settings/api-keys/anthropic/status": { status: "blocked" },
+      "DELETE /api/settings/api-keys/anthropic": () => {
+        keys = noKeys
+        return jsonResponse(204)
+      },
+    })
+    renderWithProviders(<App />, { route: "/llm-connections" })
+
+    await screen.findByRole("list", { name: "LLM providers" })
+    expect(await within(card("Anthropic")).findByText("Blocked by policy")).toBeInTheDocument()
+    await openFromMenu("Anthropic", "Remove")
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove connection" }))
+
+    // The check no longer runs once the key is gone, but its last result stays
+    // cached; it must not keep the card blocked.
+    expect(await within(card("Anthropic")).findByText("Not connected")).toBeInTheDocument()
+    expect(within(card("Anthropic")).queryByText("Blocked by policy")).not.toBeInTheDocument()
+    expect(within(card("Anthropic")).getByRole("button", { name: "Connect" })).toBeEnabled()
+  })
+
+  it("keeps the cards when refreshing the list fails", async () => {
+    let failing = false
+    mockApi({
+      "GET /api/settings/api-keys": () =>
+        failing ? jsonResponse(500, { message: "boom" }) : jsonResponse(200, { keys: [storedAnthropic, ...noKeys.keys.slice(1)] }),
+      "GET /api/settings/api-keys/anthropic/status": { status: "active" },
+      "DELETE /api/settings/api-keys/anthropic": () => {
+        failing = true
+        return jsonResponse(204)
+      },
+    })
+    renderWithProviders(<App />, { route: "/llm-connections" })
+
+    await openFromMenu("Anthropic", "Remove")
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove connection" }))
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    // Give the failed refetch time to land before checking nothing changed.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText("Could not load your connections.")).not.toBeInTheDocument()
+    expect(screen.getByRole("list", { name: "LLM providers" })).toBeInTheDocument()
+  })
+
+  it("closes the details of a key removed elsewhere and leaves them closed after reconnecting", async () => {
+    let keys: { keys: object[] } = { keys: [storedAnthropic, ...noKeys.keys.slice(1)] }
+    mockApi({
+      "GET /api/settings/api-keys": () => jsonResponse(200, keys),
+      "GET /api/settings/api-keys/anthropic/status": { status: "active" },
+      "GET /api/settings/api-keys/anthropic/models": { models: [] },
+      "GET /api/settings/api-keys/anthropic/capabilities": { capabilities: [] },
+      "PUT /api/settings/api-keys/anthropic": () => {
+        keys = { keys: [storedAnthropic, ...noKeys.keys.slice(1)] }
+        return jsonResponse(200, { key: storedAnthropic })
+      },
+    })
+    renderWithProviders(<App />, { route: "/llm-connections" })
+
+    await screen.findByRole("list", { name: "LLM providers" })
+    await userEvent.click(await within(card("Anthropic")).findByRole("button", { name: "Details" }))
+    expect(await screen.findByRole("dialog", { name: "Anthropic connection" })).toBeInTheDocument()
+
+    // Removed in another tab; coming back to this one refetches the list.
+    keys = noKeys
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    focusManager.setFocused(undefined)
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+    await userEvent.click(within(card("Anthropic")).getByRole("button", { name: "Connect" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("Anthropic API key"), "sk-ant-secret-1234")
+    await userEvent.click(within(sheet).getByRole("button", { name: "Check and save" }))
+
+    expect(await within(card("Anthropic")).findByText("••••1234")).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    expect(screen.queryByRole("dialog", { name: "Anthropic connection" })).not.toBeInTheDocument()
   })
 
   describe("testing a model", () => {

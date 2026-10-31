@@ -1,5 +1,6 @@
-import { useState, type ReactNode } from "react"
+import { useState } from "react"
 import { CircleCheck, CircleX, Loader2, RotateCw } from "lucide-react"
+import { DetailRow, Section } from "@/components/DetailSection"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field"
@@ -8,7 +9,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ModelCombobox } from "@/features/config/ModelCombobox"
 import { ApiError } from "@/lib/api"
-import { timeAgo } from "@/lib/time"
+import { formatDate, timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import {
   useApiKeyStatus,
@@ -20,27 +21,9 @@ import {
   type ThinkingSupport,
 } from "./api"
 import { ConnectionStateBadge } from "./ApiKeyStatusBadge"
-import { formatDate, keyText } from "./format"
-import { connectionState } from "./health"
+import { keyText } from "./format"
+import { connectionState, isCheckable } from "./health"
 import { LLM_PROVIDERS } from "./providers"
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="flex flex-col gap-3">
-      <h3 className="text-sm font-medium">{title}</h3>
-      {children}
-    </section>
-  )
-}
-
-function DetailRow({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-words">{children}</dd>
-    </>
-  )
-}
 
 function TestModelForm({ apiKey }: { apiKey: ApiKey }) {
   const [model, setModel] = useState("")
@@ -174,14 +157,14 @@ function CapabilitiesList({ provider }: { provider: LlmProvider }) {
 }
 
 function StatusRow({ apiKey }: { apiKey: ApiKey }) {
-  // An unreadable key has nothing to send the provider, so it is not checked.
-  const checkable = !apiKey.undecryptable
+  const checkable = isCheckable(apiKey)
   const { status, checkedAt, isFetching, refetch } = useApiKeyStatus(apiKey.provider, { enabled: checkable })
   return (
     <>
       <DetailRow label="Status">
         <div className="flex flex-wrap items-center gap-2">
-          <ConnectionStateBadge state={connectionState(apiKey, isFetching ? undefined : status)} />
+          {/* The last result stays up while a check reruns, as on the card. */}
+          <ConnectionStateBadge state={connectionState(apiKey, status)} />
           {checkable && (
             <Button variant="ghost" size="sm" onClick={() => refetch()} disabled={isFetching}>
               <RotateCw className={cn(isFetching && "animate-spin")} />
@@ -202,11 +185,19 @@ function StatusRow({ apiKey }: { apiKey: ApiKey }) {
 // Rendered once beside the grid for the same reason as RemoveKeyDialog. The
 // test form is keyed by provider so reopening starts without the last model
 // or result.
-export function DetailsSheet({ apiKey, onOpenChange }: { apiKey: ApiKey | null; onOpenChange: (open: boolean) => void }) {
+export function DetailsSheet({
+  apiKey,
+  open,
+  onOpenChange,
+}: {
+  apiKey: ApiKey | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
   const provider = apiKey ? LLM_PROVIDERS[apiKey.provider] : null
 
   return (
-    <Sheet open={apiKey !== null} onOpenChange={onOpenChange}>
+    <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="overflow-y-auto data-[side=right]:sm:max-w-xl">
         {apiKey && provider && (
           <>

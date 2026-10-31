@@ -11,15 +11,23 @@ import { RemoveKeyDialog } from "./RemoveKeyDialog"
 // Every provider gets a card, connected or not: there are only a few, and a
 // missing one is as useful to see as a broken one.
 export function LlmConnectionsGrid() {
-  const { data, isPending, error, refetch, isRefetching } = useApiKeys()
-  // Kept after the sheet closes so its closing animation still shows the same
-  // provider (a save flips it from "Connect" to stored); replaced on the next
-  // open, which remounts the sheet by key.
+  const { data, isPending, refetch, isRefetching } = useApiKeys()
+  // Each overlay's subject is kept after it closes so the closing animation
+  // still shows the same content (a save flips the key sheet from "Connect"
+  // to stored); only the open flag clears. The key sheet's is replaced on the
+  // next open, which remounts it by key.
   const [editing, setEditing] = useState<ApiKey | null>(null)
   const [sheetOpen, setSheetOpen] = useState(false)
   // By provider, so the sheet follows a key that is replaced while it is open.
   const [inspecting, setInspecting] = useState<LlmProvider | null>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const [removing, setRemoving] = useState<ApiKey | null>(null)
+  const [removeOpen, setRemoveOpen] = useState(false)
+
+  const inspected = data?.keys.find((key) => key.provider === inspecting) ?? null
+  // A key removed while its details are open (say from another tab) closes
+  // them for good, rather than leaving them to reopen once it is reconnected.
+  if (detailsOpen && data && !inspected?.stored) setDetailsOpen(false)
 
   if (isPending) {
     return (
@@ -31,7 +39,9 @@ export function LlmConnectionsGrid() {
     )
   }
 
-  if (error || !data) {
+  // Only when there is nothing to show: a failed background refetch keeps the
+  // last list, and the overlays open on it.
+  if (!data) {
     return (
       <Alert variant="destructive">
         <AlertDescription>Could not load your connections.</AlertDescription>
@@ -49,7 +59,15 @@ export function LlmConnectionsGrid() {
     setSheetOpen(true)
   }
 
-  const inspected = data.keys.find((key) => key.provider === inspecting && key.stored) ?? null
+  function openDetails(key: ApiKey) {
+    setInspecting(key.provider)
+    setDetailsOpen(true)
+  }
+
+  function openRemove(key: ApiKey) {
+    setRemoving(key)
+    setRemoveOpen(true)
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -63,15 +81,15 @@ export function LlmConnectionsGrid() {
           <ProviderCard
             key={key.provider}
             apiKey={key}
-            onDetails={() => setInspecting(key.provider)}
+            onDetails={() => openDetails(key)}
             onConnect={() => openKeySheet(key)}
-            onRemove={() => setRemoving(key)}
+            onRemove={() => openRemove(key)}
           />
         ))}
       </ul>
       <KeySheet key={editing?.provider ?? "none"} credential={editing} open={sheetOpen} onOpenChange={setSheetOpen} />
-      <DetailsSheet apiKey={inspected} onOpenChange={(open) => !open && setInspecting(null)} />
-      <RemoveKeyDialog apiKey={removing} onOpenChange={(open) => !open && setRemoving(null)} />
+      <DetailsSheet apiKey={inspected} open={detailsOpen} onOpenChange={setDetailsOpen} />
+      <RemoveKeyDialog apiKey={removing} open={removeOpen} onOpenChange={setRemoveOpen} />
     </div>
   )
 }

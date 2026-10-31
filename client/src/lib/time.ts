@@ -14,6 +14,11 @@ export function timeAgo(iso: string, now = Date.now()) {
   return "just now"
 }
 
+// A calendar date in the viewer's locale, e.g. "Oct 31, 2026".
+export function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" })
+}
+
 // Short elapsed time, e.g. "42s", "3m 05s", "1h 02m", "2d 04h".
 export function formatDuration(ms: number) {
   const seconds = Math.max(0, Math.round(ms / 1000))

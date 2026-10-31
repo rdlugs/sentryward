@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from "react"
+import { useState } from "react"
 import { Link } from "react-router"
 import { ExternalLink, EyeOff, RotateCcw } from "lucide-react"
+import { DetailRow } from "@/components/DetailSection"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -16,15 +17,6 @@ import { CATEGORY_LABEL, IGNORE_REASON_LABEL, KIND_LABEL, LIFECYCLE_LABEL } from
 import { ReopenFindingDialog } from "./ReopenFindingDialog"
 import { StateBadge } from "./StateBadge"
 import type { FindingRow } from "./types"
-
-function DetailRow({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-words">{children}</dd>
-    </>
-  )
-}
 
 function When({ iso }: { iso: string }) {
   return <time dateTime={iso} title={new Date(iso).toLocaleString()}>{timeAgo(iso)}</time>

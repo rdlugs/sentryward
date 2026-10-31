@@ -14,13 +14,23 @@ export type ConnectionState =
 export function connectionState(key: ApiKey, status: LlmConnectionStatus | undefined): ConnectionState {
   // The policy refuses the provider whichever key is used, so it outranks
   // anything wrong with the key itself.
-  if (key.blocked || status === "blocked") return "blocked"
+  if (key.blocked) return "blocked"
+  // Before any check result: a removed key's last check can linger in the
+  // cache, and it says nothing about connecting afresh.
   if (!key.stored) return key.serverDefault ? "server" : "none"
   // An unreadable key is never checked, so it has no status.
   if (key.undecryptable) return "unreadable"
+  if (status === "blocked") return "blocked"
   if (status === "revoked") return "rejected"
   if (status === "unreachable") return "unverified"
   return status === "active" ? "active" : "checking"
+}
+
+// Stored keys the server would actually call, so the only ones worth a status
+// check: an unreadable key has nothing to send, and a blocked one is never
+// called (its flag alone already shows the problem).
+export function isCheckable(key: ApiKey) {
+  return key.stored && !key.undecryptable && !key.blocked
 }
 
 // The same rule as the sidebar's warning dot: only stored connections count,

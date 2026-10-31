@@ -17,9 +17,11 @@ import { LLM_PROVIDERS } from "./providers"
 // unmounts its items (and any dialog in them) as soon as it closes.
 export function RemoveKeyDialog({
   apiKey,
+  open,
   onOpenChange,
 }: {
   apiKey: ApiKey | null
+  open: boolean
   onOpenChange: (open: boolean) => void
 }) {
   const remove = useDeleteApiKey()
@@ -37,7 +39,7 @@ export function RemoveKeyDialog({
   }
 
   return (
-    <Dialog open={apiKey !== null} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         {apiKey && (
           <>

@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/PageHeader"
 import { PageShell } from "@/components/PageShell"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
-import { summarize } from "@/features/llm-connections/health"
+import { isCheckable, summarize } from "@/features/llm-connections/health"
 import { LlmConnectionsGrid } from "@/features/llm-connections/LlmConnectionsGrid"
 import { ModelPricesCard } from "@/features/model-prices/ModelPricesCard"
 
@@ -21,10 +21,7 @@ const EMPTY: never[] = []
 // the sidebar's warning dot, so the header and the cards always agree.
 function useHealthSummary() {
   const keys = useApiKeys().data?.keys ?? EMPTY
-  const statuses = useApiKeyStatuses(
-    keys.filter((key) => key.stored && !key.undecryptable),
-    { live: false },
-  )
+  const statuses = useApiKeyStatuses(keys.filter(isCheckable), { live: false })
   if (!keys.length) return null
   const { connected, total, attention } = summarize(keys, statuses)
   const summary = `${connected} of ${total} providers connected`

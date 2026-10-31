@@ -11,16 +11,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { formatDate } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import type { Connection, ConnectionStatus } from "./api"
 import { ConnectionStatusBadge } from "./ConnectionStatusBadge"
 import { kindLabel } from "./forgeKind"
 import { PROVIDERS } from "./providers"
 import { DragHandle } from "./SortableGrid"
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleDateString(undefined, { dateStyle: "medium" })
-}
 
 function ConnectionActions({
   connection,

@@ -1,7 +1,7 @@
-import type { ReactNode } from "react"
 import { Link } from "react-router"
 import { Copy, ExternalLink, RotateCw } from "lucide-react"
 import { toast } from "sonner"
+import { DetailRow, Section } from "@/components/DetailSection"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -17,24 +17,6 @@ import { PROVIDERS } from "./providers"
 
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
-}
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="flex flex-col gap-3">
-      <h3 className="text-sm font-medium">{title}</h3>
-      {children}
-    </section>
-  )
-}
-
-function DetailRow({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-words">{children}</dd>
-    </>
-  )
 }
 
 function CopyableId({ label, value }: { label: string; value: string }) {
