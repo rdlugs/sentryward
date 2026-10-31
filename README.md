@@ -267,7 +267,7 @@ docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 ```
 
 Images are published for `linux/amd64` and `linux/arm64` on each release tag.
-`SENTRYWARD_VERSION` picks the tag (for example `0.2.0`). `latest` follows
+`SENTRYWARD_VERSION` picks the tag (for example `0.3.0`). `latest` follows
 the newest stable release only; pin a version for controlled upgrades.
 To build from source instead, set `SENTRYWARD_VERSION` to a local name and run
 `docker compose -f docker-compose.prod.yml --env-file .env.production build server`
