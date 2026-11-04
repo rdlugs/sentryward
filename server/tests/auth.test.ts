@@ -1,11 +1,19 @@
 import request from "supertest";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
 import { env } from "../src/config/env.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { AUTH_COOKIE } from "../src/lib/jwt.ts";
 import { createInvite } from "../src/services/invites.ts";
 import { createUser } from "./helpers/users.ts";
+import { verifyPassword } from "../src/lib/password.ts";
+
+// Wrap the real hashing in a spy so a test can assert that login always pays the
+// argon2 cost, even for an email with no account (see #208).
+vi.mock("../src/lib/password.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/password.ts")>();
+  return { ...actual, verifyPassword: vi.fn(actual.verifyPassword) };
+});
 
 const validUser = {
   name: "Ada Lovelace",
@@ -110,6 +118,18 @@ describe("POST /api/auth/login", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.message).toBe("Invalid email or password");
+  });
+
+  it("still hashes a password when the email has no account", async () => {
+    vi.mocked(verifyPassword).mockClear();
+
+    await request(app)
+      .post("/api/auth/login")
+      .send({ email: "nobody@example.com", password: "whatever123" });
+
+    // Skipping argon2 for an unknown email is a timing oracle for which
+    // addresses have accounts.
+    expect(vi.mocked(verifyPassword)).toHaveBeenCalledTimes(1);
   });
 });
 

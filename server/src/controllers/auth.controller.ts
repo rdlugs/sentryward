@@ -116,11 +116,20 @@ export async function register(req: Request, res: Response) {
   res.status(201).json(await session(user.id));
 }
 
+// A real argon2id hash that no password matches. Login verifies against it when
+// the email has no account, so an unknown email costs the same argon2 work as a
+// wrong password instead of returning early (see #208).
+const DUMMY_PASSWORD_HASH =
+  "$argon2id$v=19$m=65536,t=3,p=4$Ot0BouBhK863gjT/0MWGBQ$4Sqk/V1EioOT6m4QJPZcmhc6ofe2A1Q0lHIzHUJ+/SA";
+
 export async function login(req: Request, res: Response) {
   const { email, password } = loginSchema.parse(req.body);
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !(await verifyPassword(user.passwordHash, password))) {
+  // Always run argon2, even for an unknown email: skipping it here is a timing
+  // oracle for which addresses have accounts.
+  const passwordOk = await verifyPassword(user?.passwordHash ?? DUMMY_PASSWORD_HASH, password);
+  if (!user || !passwordOk) {
     throw new HttpError(401, "Invalid email or password");
   }
 
