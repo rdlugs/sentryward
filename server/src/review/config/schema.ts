@@ -135,7 +135,17 @@ export const HIGH_LEVEL_SUMMARY_PLACEMENTS = ["description", "walkthrough"] as c
 const outputShape = {
   walkthrough: z.boolean(),
   postInline: z.boolean(),
+  // Inline threads only for actionable findings at or above this severity;
+  // the rest are written out in the summary instead.
+  inlineMinSeverity: severitySchema,
+  // At most this many inline threads per review, the most severe first; null
+  // posts every one. The rest are written out in the summary.
+  maxInlineComments: z.number().int().min(1).max(100).nullable(),
   postSummary: z.boolean(),
+  // Never start a summary comment for a completed review with no findings
+  // (the commit status still reports the verdict). One an earlier run posted
+  // is still updated, so it does not keep showing findings that are gone.
+  summaryOnlyWithFindings: z.boolean(),
   postCheck: z.boolean(),
   // Resolve an inline thread once a later run no longer reports its finding,
   // and reopen it if the finding comes back.
@@ -413,7 +423,10 @@ export const DEFAULT_CONFIG: Config = {
   output: {
     walkthrough: true,
     postInline: true,
+    inlineMinSeverity: "info",
+    maxInlineComments: null,
     postSummary: true,
+    summaryOnlyWithFindings: false,
     postCheck: false,
     resolveFixedThreads: true,
     findingCounts: false,

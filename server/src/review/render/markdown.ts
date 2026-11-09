@@ -1,4 +1,4 @@
-import { BUCKET_TITLE, SUMMARY_BUCKETS } from "../core/buckets.ts";
+import { BUCKET_TITLE, SUMMARY_BUCKETS, inlineSelection, type InlineLimits } from "../core/buckets.ts";
 import type {
   Bucket,
   Finding,
@@ -46,6 +46,9 @@ const BUCKET_ICON: Record<Bucket, string> = {
   outside_diff: "📍",
   nitpick: "🧹",
 };
+
+// Actionable findings the inline limits left without a thread.
+const HELD_BACK_ICON = "📥";
 
 const OMISSION_TEXT: Record<Omission["reason"], string> = {
   ignored: "ignored by configuration",
@@ -324,9 +327,19 @@ function findingDetail(finding: Finding): string[] {
   return lines;
 }
 
-function bucketSections(result: ReviewResult): string[] {
+function detailSection(summary: string, findings: Finding[]): string[] {
+  const lines = ["", "<details>", summary, ""];
+  findings.forEach((finding, index) => {
+    if (index) lines.push("");
+    lines.push(...findingDetail(finding));
+  });
+  lines.push("", "</details>");
+  return lines;
+}
+
+function bucketSections(result: ReviewResult, limits?: InlineLimits): string[] {
   const lines: string[] = [];
-  const actionable = result.findings.filter((f) => f.bucket === "actionable");
+  const { inline: actionable, heldBack } = inlineSelection(result.findings, limits);
   if (actionable.length) {
     // Each has its own inline thread; the summary only indexes them.
     lines.push("", "<details>", bucketSummary("actionable", actionable.length), "");
@@ -335,15 +348,15 @@ function bucketSections(result: ReviewResult): string[] {
     }
     lines.push("", "</details>");
   }
+  // Below the inline threshold or over the cap: no thread holds them, so the
+  // summary carries them in full.
+  if (heldBack.length) {
+    lines.push(...detailSection(`<summary>${HELD_BACK_ICON} Not posted inline (${heldBack.length})</summary>`, heldBack));
+  }
   for (const bucket of SUMMARY_BUCKETS) {
     const findings = result.findings.filter((f) => f.bucket === bucket);
     if (!findings.length) continue;
-    lines.push("", "<details>", bucketSummary(bucket, findings.length), "");
-    findings.forEach((finding, index) => {
-      if (index) lines.push("");
-      lines.push(...findingDetail(finding));
-    });
-    lines.push("", "</details>");
+    lines.push(...detailSection(bucketSummary(bucket, findings.length), findings));
   }
   return lines;
 }
@@ -461,11 +474,20 @@ function footer(result: ReviewResult): string {
 // counting the findings (output.findingCounts), `stats: false` the line
 // naming the commit, models and coverage (output.reviewStats), `lifecycle:
 // false` the comparison with the earlier reviews (output.findingLifecycle),
-// and `agentPrompt: false` the one prompt covering every finding
-// (output.agentPromptAll). The rest shape the walkthrough (walkthroughOptions).
+// `agentPrompt: false` the one prompt covering every finding
+// (output.agentPromptAll), and `inline` holds back the actionable findings
+// the inline limits leave without a thread (output.inlineMinSeverity,
+// output.maxInlineComments). The rest shape the walkthrough (walkthroughOptions).
 export function toMarkdown(
   result: ReviewResult,
-  options: { walkthrough?: boolean; counts?: boolean; stats?: boolean; lifecycle?: boolean; agentPrompt?: boolean } & WalkthroughOptions = {},
+  options: {
+    walkthrough?: boolean;
+    counts?: boolean;
+    stats?: boolean;
+    lifecycle?: boolean;
+    agentPrompt?: boolean;
+    inline?: InlineLimits;
+  } & WalkthroughOptions = {},
 ): string {
   const walkthrough = options.walkthrough === false ? null : walkthroughSection(result, options);
   const lines = [walkthrough?.heading ?? "## Summary", ...(walkthrough?.lines ?? [])];
@@ -473,7 +495,7 @@ export function toMarkdown(
   if (options.counts !== false) lines.push("", countsLine(result));
   lines.push(...incrementalNote(result));
   if (options.lifecycle !== false) lines.push(...lifecycleSection(result));
-  lines.push(...bucketSections(result));
+  lines.push(...bucketSections(result, options.inline));
   if (options.agentPrompt !== false && result.findings.length) {
     lines.push("", ...agentPromptBlock(`Prompt for AI agents (${plural(result.findings.length, "finding")})`, allFindingsPrompt(result.findings)));
   }

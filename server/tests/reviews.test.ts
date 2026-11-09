@@ -600,6 +600,19 @@ describe("GET /api/reviews/:id and /markdown", () => {
     expect(res.text).not.toContain("in the sections below.");
   });
 
+  it("holds back what the review's inline limits left without a thread, as the summary did", async () => {
+    const job = await completedJob();
+    await prisma.reviewJob.update({
+      where: { id: job.id },
+      data: { resolvedConfig: { config: { output: { postInline: true, inlineMinSeverity: "major", maxInlineComments: null } } } },
+    });
+
+    const res = await request(app).get(`/api/reviews/${job.id}/markdown`).set("Cookie", cookie);
+
+    expect(res.text).toBe(toMarkdown(await sampleResult(), { agentPrompt: false, inline: { minSeverity: "major", max: null } }));
+    expect(res.text).toContain("Not posted inline (1)");
+  });
+
   it("409s for markdown before there is a result", async () => {
     const job = await prisma.reviewJob.create({
       data: { repositoryId: repoId, number: 7, headSha: "h", trigger: "manual" },

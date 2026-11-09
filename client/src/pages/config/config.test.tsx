@@ -46,7 +46,10 @@ const effective = {
   output: {
     walkthrough: true,
     postInline: true,
+    inlineMinSeverity: "info",
+    maxInlineComments: null,
     postSummary: true,
+    summaryOnlyWithFindings: false,
     postCheck: false,
     resolveFixedThreads: true,
     findingCounts: false,
@@ -1709,7 +1712,10 @@ describe("Display tab", { timeout: 20_000 }, () => {
 
     const parents = [
       ["Post inline comments", ["Prompt for AI agents per comment", "Resolve fixed threads"]],
-      ["Post summary comment", ["Show finding counts", "Show changes since the last review", "Show review details", "Prompt for all review comments"]],
+      [
+        "Post summary comment",
+        ["Only when there are findings", "Show finding counts", "Show changes since the last review", "Show review details", "Prompt for all review comments"],
+      ],
       ["PR summary", ["Show labels in the summary", "Show review effort in the summary", "Publish blast radius label"]],
     ] as const
     for (const [parent, children] of parents) {
@@ -1730,6 +1736,53 @@ describe("Display tab", { timeout: 20_000 }, () => {
     }
     // The parent is on this tab, so there is no tab to link to.
     expect(screen.queryByRole("button", { name: "Display tab" })).not.toBeInTheDocument()
+  })
+
+  it("limits inline comments by severity and count, and saves them with summary only with findings", async () => {
+    let body: unknown
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          body = JSON.parse(String(init?.body))
+          return jsonResponse(200, globalConfig((body as { settings: Record<string, unknown> }).settings))
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?tab=display" })
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Show finding counts" })).toBeEnabled())
+    const view = within(screen.getByRole("region", { name: "Review preview" })).getByRole("group", { name: "View" })
+    const pressed = () => within(view).getByRole("button", { pressed: true })
+
+    // Both limits sit under inline comments and need them.
+    const severity = screen.getByRole("combobox", { name: "Inline comments from" })
+    const cap = screen.getByLabelText("Max inline comments")
+    expect(severity).toBeEnabled()
+    await userEvent.click(screen.getByRole("switch", { name: "Post inline comments" }))
+    expect(screen.getByRole("combobox", { name: "Inline comments from" })).toBeDisabled()
+    expect(screen.getByLabelText("Max inline comments")).toBeDisabled()
+    await userEvent.click(screen.getByRole("switch", { name: "Post inline comments" }))
+
+    // Each shows up in the inline thread.
+    await userEvent.click(screen.getByRole("switch", { name: "Show finding counts" }))
+    expect(pressed()).toHaveTextContent("Summary")
+    await userEvent.click(screen.getByRole("combobox", { name: "Inline comments from" }))
+    await userEvent.click(screen.getByRole("option", { name: "Major and above" }))
+    expect(pressed()).toHaveTextContent("In-line")
+    await userEvent.click(screen.getByRole("switch", { name: "Show finding counts" }))
+    await userEvent.type(cap, "5")
+    expect(pressed()).toHaveTextContent("In-line")
+    await userEvent.click(screen.getByRole("switch", { name: "Only when there are findings" }))
+
+    await selectConnectionOnLlmTab()
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+    await waitFor(() =>
+      expect(body).toEqual({
+        settings: {
+          llm: { connection: "openai" },
+          output: { inlineMinSeverity: "major", maxInlineComments: 5, summaryOnlyWithFindings: true },
+        },
+      }),
+    )
   })
 
   it("groups the effort and blast radius text beside their labels", async () => {
@@ -2005,6 +2058,8 @@ describe("Display tab", { timeout: 20_000 }, () => {
 
     await userEvent.click(within(presets).getByRole("button", { name: "Everything" }))
     expect(screen.getByRole("switch", { name: "Publish blast radius label" })).toBeChecked()
+    // Everything posts the most, so the switch that posts less stays off.
+    expect(screen.getByRole("switch", { name: "Only when there are findings" })).not.toBeChecked()
     expect(screen.getByRole("switch", { name: "Publish review time estimate label" })).toBeChecked()
     await selectConnectionOnLlmTab()
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))

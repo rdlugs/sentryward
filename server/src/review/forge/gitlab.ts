@@ -34,6 +34,7 @@ import {
   type ThreadResult,
   type ThreadRoot,
   type ThreadTarget,
+  type UpsertOptions,
 } from "./types.ts";
 
 export interface GitLabAdapterOptions {
@@ -596,13 +597,14 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return result;
   }
 
-  upsertSummaryComment(ref: ForgeRef, body: string): Promise<string> {
-    return this.upsertComment(ref, SUMMARY_MARKER, body);
+  upsertSummaryComment(ref: ForgeRef, body: string, options?: UpsertOptions): Promise<string | null> {
+    return this.upsertComment(ref, SUMMARY_MARKER, body, options);
   }
 
-  async upsertComment(ref: ForgeRef, marker: string, body: string): Promise<string> {
+  async upsertComment(ref: ForgeRef, marker: string, body: string, options: UpsertOptions = {}): Promise<string | null> {
     const notes = await this.http.paginate<GlNote>(`${this.mergeRequest(ref)}/notes?per_page=100&sort=asc`, nextPage);
     const existing = notes.filter((n) => this.isSelf(n) && n.body.includes(marker)).at(-1);
+    if (!existing && options.create === false) return null;
     const saved = existing
       ? await this.http.json<GlNote>(`${this.mergeRequest(ref)}/notes/${existing.id}`, {
           method: "PUT",

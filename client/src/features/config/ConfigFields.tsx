@@ -160,6 +160,11 @@ const FLAG_INFO: Record<FlagName, { label: string; description: ReactNode; cost?
   },
   postInline: { label: "Post inline comments", description: "Comment on the lines each finding refers to." },
   postSummary: { label: "Post summary comment", description: "Post the review summary as a comment on the change." },
+  summaryOnlyWithFindings: {
+    label: "Only when there are findings",
+    description:
+      "Start no summary comment, PR summary included, for a completed review that found nothing. One an earlier review posted is still updated, and the commit status still reports the verdict.",
+  },
   postCheck: { label: "Post commit status", description: "Report the verdict as the sentryward/review status." },
   resolveFixedThreads: {
     label: "Resolve fixed threads",
@@ -317,6 +322,16 @@ const CHOICE_INFO: Record<
       { value: "published", label: "Published PRs" },
     ],
   },
+  inlineMinSeverity: {
+    label: "Inline comments from",
+    description: "Comment inline only on findings at or above this severity. The rest are written out in the summary comment.",
+    options: [
+      { value: "critical", label: "Critical only" },
+      { value: "major", label: "Major and above" },
+      { value: "minor", label: "Minor and above" },
+      { value: "info", label: "Every severity" },
+    ],
+  },
   highLevelSummaryPlacement: {
     label: "Summary placement",
     description: "Where the high-level summary is written.",
@@ -414,6 +429,9 @@ const DISPLAY_FLAGS: FlagName[] = FLAGS.filter((flag) => flag.section === "outpu
 // Settings whose effect only shows in the preview's inline thread; changing
 // one switches the preview there, any other Display setting to the summary.
 const INLINE_FLAGS = new Set<FlagName>(["postInline", "agentPrompts", "resolveFixedThreads"])
+// The inline limits, which decide which findings get a thread.
+const INLINE_CHOICES = new Set<ChoiceName>(["inlineMinSeverity"])
+const INLINE_NUMBERS = new Set<NumberName>(["maxInlineComments"])
 
 type DisplayPreset = "minimal" | "standard" | "everything"
 
@@ -426,6 +444,8 @@ const DISPLAY_PRESETS: { value: DisplayPreset; label: string }[] = [
   { value: "everything", label: "Everything" },
 ]
 const MINIMAL_ON = new Set<FlagName>(["postInline", "resolveFixedThreads"])
+// Switches that post less when on, which Everything leaves off.
+const LESS_FLAGS = new Set<FlagName>(["summaryOnlyWithFindings"])
 
 // Whether the Display tab shows its preview, per browser. Storage can throw
 // (private mode, blocked site data), so it falls back to shown.
@@ -553,6 +573,11 @@ const NUMBER_INFO: Record<NumberName, { label: string; description: string }> = 
   maxSteps: { label: "Agent steps", description: "Model calls per agentic pass, the final report included." },
   maxToolTokens: { label: "Agent tool tokens", description: "What tools may return in one pass before the model must report." },
   maxSearches: { label: "Agent searches", description: "Code searches across the whole review. GitHub rate-limits search." },
+  maxInlineComments: {
+    label: "Max inline comments",
+    description:
+      'At most this many inline comments per review, the most severe first. The rest are written out in the summary comment. "none" posts every one.',
+  },
 }
 
 // "x (from y)" for any config value, e.g. "critical (from global config)".
@@ -1462,8 +1487,10 @@ export function ConfigFields(props: {
     if (DISPLAY_FLAGS.includes(name)) focusPreview(INLINE_FLAGS.has(name) ? "inline" : "summary")
     props.onChange({ ...form, flags: { ...form.flags, [name]: value } })
   }
-  const setNumber = (name: NumberName) => (value: string) =>
+  const setNumber = (name: NumberName) => (value: string) => {
+    if (INLINE_NUMBERS.has(name)) focusPreview("inline")
     props.onChange({ ...form, numbers: { ...form.numbers, [name]: value } })
+  }
 
   // Only worth showing when the value comes from somewhere else (a profile, a
   // default, the repository file): what this scope sets is already in its input.
@@ -1596,7 +1623,7 @@ export function ConfigFields(props: {
         label={info.label}
         value={form.choices[name]}
         onChange={(value) => {
-          if (spec.section === "output") focusPreview("summary")
+          if (spec.section === "output") focusPreview(INLINE_CHOICES.has(name) ? "inline" : "summary")
           props.onChange({ ...form, choices: { ...form.choices, [name]: value } })
         }}
         options={info.options}
@@ -1659,6 +1686,8 @@ export function ConfigFields(props: {
     const spec = NUMBERS.find((number) => number.name === name)!
     const path = `${spec.section}.${name}`
     const fallback = inherited ? (at(inherited, path) as number | null) : undefined
+    // A saved null is shown as the word typed for it, e.g. "auto" or "none".
+    const shown = (value: unknown) => (value === null && spec.nullable ? spec.nullable : value)
     const { label, description } = NUMBER_INFO[name]
     return (
       <TextField
@@ -1667,15 +1696,15 @@ export function ConfigFields(props: {
         value={form.numbers[name]}
         onChange={setNumber(name)}
         description={description}
-        emptyHint={emptyHint(path, fallback)}
-        placeholder={fallback === undefined ? undefined : fallback === null ? AUTO : String(fallback)}
-        // The context budget also takes "auto", which a number input would reject.
+        emptyHint={emptyHint(path, shown(fallback))}
+        placeholder={fallback === undefined ? undefined : String(shown(fallback))}
+        // A word for null, such as the context budget's "auto", would be rejected by a number input.
         type={spec.nullable ? "text" : "number"}
         inputMode={spec.integer ? "numeric" : "decimal"}
         min={spec.nullable ? undefined : spec.min}
         max={spec.nullable ? undefined : spec.max}
         step={spec.nullable ? undefined : spec.step}
-        effective={config && effective(path, at(config, path))}
+        effective={config && effective(path, shown(at(config, path)))}
         extra={extra}
         error={errors[name]}
         disabled={locked(path) || off}
@@ -1777,7 +1806,7 @@ export function ConfigFields(props: {
     return Object.fromEntries(
       DISPLAY_FLAGS.map((name) => [
         name,
-        preset === "everything" ? true : preset === "minimal" ? MINIMAL_ON.has(name) : Boolean(defaults![name]),
+        preset === "everything" ? !LESS_FLAGS.has(name) : preset === "minimal" ? MINIMAL_ON.has(name) : Boolean(defaults![name]),
       ]),
     ) as Partial<Record<FlagName, boolean>>
   }
@@ -2222,7 +2251,11 @@ export function ConfigFields(props: {
           <ToggleList>
             {toggles(["postInline"])}
             {/* Only threads Sentryward opened are resolved. */}
-            <Nested>{toggles(["agentPrompts", "resolveFixedThreads"], !postInlineOn, "Post inline comments")}</Nested>
+            <Nested>
+              {toggles(["agentPrompts", "resolveFixedThreads"], !postInlineOn, "Post inline comments")}
+              {choiceField("inlineMinSeverity", !postInlineOn, <OffHint setting="Post inline comments" onTabChange={props.onTabChange} />)}
+              {numberField("maxInlineComments", undefined, !postInlineOn)}
+            </Nested>
             {toggles(["postSummary"], false, undefined, {
               postSummary: standaloneSummary && (
                 <FieldDescription className="text-xs">
@@ -2233,7 +2266,7 @@ export function ConfigFields(props: {
             {/* The counts, lifecycle, details and the combined prompt are part of the summary comment. */}
             <Nested>
               {toggles(
-                ["findingCounts", "findingLifecycle", "reviewStats", "agentPromptAll"],
+                ["summaryOnlyWithFindings", "findingCounts", "findingLifecycle", "reviewStats", "agentPromptAll"],
                 !postSummaryOn,
                 "Post summary comment",
               )}

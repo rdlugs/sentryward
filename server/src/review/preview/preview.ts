@@ -4,6 +4,7 @@ import type { CommitStatus } from "../forge/types.ts";
 import { runReview } from "../pipeline.ts";
 import { inlineComments } from "../publish/inline.ts";
 import { labelChanges } from "../publish/labels.ts";
+import { inlineLimits } from "../core/buckets.ts";
 import { withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummary, summaryPlacement } from "../publish/publisher.ts";
 import { commitStatus } from "../publish/status.ts";
@@ -94,10 +95,15 @@ export async function previewPublication(config: Config, provider: ForgeProvider
       description: withDescriptionSummary(change.description, descriptionSummary(config, result)),
     },
     status: output.postCheck ? commitStatus(result) : null,
-    summaryComment: placement.summary,
+    // The sample change has no earlier summary to update.
+    summaryComment: placement.summaryCreate ? placement.summary : null,
     walkthroughComment: placement.walkthroughComment,
     inline: output.postInline
-      ? inlineComments(result.findings, change, provider, new Set(), { agentPrompt: output.agentPrompts, rules: config.rules }).map((comment) => ({
+      ? inlineComments(result.findings, change, provider, new Set(), {
+          agentPrompt: output.agentPrompts,
+          rules: config.rules,
+          limits: inlineLimits(output),
+        }).map((comment) => ({
           path: comment.path,
           startLine: comment.startLine,
           endLine: comment.endLine,

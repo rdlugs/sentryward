@@ -47,6 +47,23 @@ describe("inlineComments", () => {
     expect(rest.map((c) => c.fingerprint)).toEqual([actionable[1]!.fingerprint]);
   });
 
+  it("posts only findings at or above the inline severity, up to the cap, most severe first", async () => {
+    const result = await sampleResult();
+    const changeSet = makeChangeSet();
+    const sql = finding(result, "SQL");
+    const minor = finding(result, "c is never negative");
+    // The minor finding first, so the cap has to pick by severity, not order.
+    const findings = [minor, ...result.findings.filter((f) => f !== minor)];
+    const prints = (limits: { minSeverity: "info" | "major"; max: number | null }, posted = new Set<string>()) =>
+      inlineComments(findings, changeSet, "github", posted, { limits }).map((c) => c.fingerprint);
+
+    expect(prints({ minSeverity: "info", max: null })).toEqual([minor.fingerprint, sql.fingerprint]);
+    expect(prints({ minSeverity: "major", max: null })).toEqual([sql.fingerprint]);
+    expect(prints({ minSeverity: "info", max: 1 })).toEqual([sql.fingerprint]);
+    // A thread an earlier run posted still takes its place under the cap.
+    expect(prints({ minSeverity: "info", max: 1 }, new Set([sql.fingerprint]))).toEqual([]);
+  });
+
   it("adds the old line for a finding on an unchanged context line", async () => {
     const result = await sampleResult();
     const onContext: Finding = { ...finding(result, "SQL"), startLine: 13, endLine: 13 };
@@ -79,6 +96,8 @@ function recordingPublisher(
     description?: string;
     failDescription?: boolean;
     failThreads?: boolean;
+    // Whether a summary comment from an earlier run is on the change.
+    summaryOnForge?: boolean;
   } = {},
 ) {
   const calls = {
@@ -100,7 +119,9 @@ function recordingPublisher(
       calls.order.push("inline");
       return { posted: comments.map((c) => ({ fingerprint: c.fingerprint, forgeCommentId: "1" })), failed: [] };
     },
-    upsertSummaryComment: async (_ref, body) => {
+    upsertSummaryComment: async (_ref, body, upsert) => {
+      // Like the adapters: create: false only edits a comment already there.
+      if (upsert?.create === false && options.summaryOnForge === false) return null;
       calls.summaries.push(body);
       calls.order.push("summary");
       return "s1";
@@ -294,6 +315,84 @@ describe("publishReview", () => {
     expect(calls.inline).toEqual([]);
     expect(calls.statuses).toEqual([]);
     expect(calls.summaries).toHaveLength(1);
+  });
+});
+
+describe("inline limits and the summary", () => {
+  it("writes the findings held back from inline out in full in the summary", async () => {
+    const result = await sampleResult();
+    const minor = finding(result, "c is never negative");
+
+    const all = toMarkdown(result, { walkthrough: false });
+    expect(all).not.toContain("Not posted inline");
+    expect(toMarkdown(result, { walkthrough: false, inline: { minSeverity: "info", max: null } })).toBe(all);
+
+    const limited = toMarkdown(result, { walkthrough: false, inline: { minSeverity: "major", max: null } });
+    expect(limited).toContain("Actionable comments (1)");
+    expect(limited).toContain("Not posted inline (1)");
+    // In full, under its own heading, as the nitpick and outside-diff sections are.
+    expect(limited).toMatch(new RegExp(`#### .*: ${minor.title}`));
+  });
+
+  it("publishes the inline limits and holds the rest back to the summary", async () => {
+    const result = await sampleResult();
+    const { publisher, calls } = recordingPublisher();
+
+    await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result,
+      config: config({ output: { maxInlineComments: 1 } }),
+      postedFingerprints: new Set(),
+    });
+
+    expect(calls.inline.map((c) => c.fingerprint)).toEqual([finding(result, "SQL").fingerprint]);
+    expect(calls.summaries[0]).toContain("Not posted inline (1)");
+  });
+
+  it("holds nothing back when inline comments are off", async () => {
+    const result = await sampleResult();
+    const placement = summaryPlacement(config({ output: { postInline: false, inlineMinSeverity: "critical" } }), result);
+    expect(placement.summary).not.toContain("Not posted inline");
+  });
+});
+
+describe("summary only with findings", () => {
+  async function clean(status: ReviewResult["status"] = "completed"): Promise<ReviewResult> {
+    return { ...(await sampleResult()), findings: [], status };
+  }
+
+  async function publishClean(result: ReviewResult, output: ConfigOverride["output"], summaryOnForge: boolean) {
+    const { publisher, calls } = recordingPublisher({ summaryOnForge });
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result,
+      config: config({ output }),
+      postedFingerprints: new Set(),
+    });
+    return { publication, calls };
+  }
+
+  it("starts no summary comment for a clean review, but still reports the status", async () => {
+    const { publication, calls } = await publishClean(await clean(), { summaryOnlyWithFindings: true }, false);
+    expect(calls.summaries).toEqual([]);
+    expect(publication.summaryCommentId).toBeNull();
+    expect(publication.walkthroughLocation).toBeNull();
+    expect(calls.statuses).toHaveLength(1);
+    expect(publication.errors).toEqual([]);
+  });
+
+  it("updates a summary an earlier run left on the change", async () => {
+    const { publication, calls } = await publishClean(await clean(), { summaryOnlyWithFindings: true }, true);
+    expect(calls.summaries).toHaveLength(1);
+    expect(publication.summaryCommentId).toBe("s1");
+  });
+
+  it("still posts the summary for a partial review, a review with findings, or with the option off", async () => {
+    expect((await publishClean(await clean("partial"), { summaryOnlyWithFindings: true }, false)).calls.summaries).toHaveLength(1);
+    expect((await publishClean(await sampleResult(), { summaryOnlyWithFindings: true }, false)).calls.summaries).toHaveLength(1);
+    expect((await publishClean(await clean(), {}, false)).calls.summaries).toHaveLength(1);
   });
 });
 

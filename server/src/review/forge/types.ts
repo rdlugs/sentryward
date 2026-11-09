@@ -162,15 +162,22 @@ export interface ThreadRoot {
   fingerprint: string | null;
 }
 
+export interface UpsertOptions {
+  // false: edit the comment if it exists, never start one. Default true.
+  create?: boolean;
+}
+
 export interface ForgePublisher {
   postInlineComments(ref: ForgeRef, comments: InlineComment[]): Promise<InlineResult>;
   // Fingerprints in Sentryward's own inline comments on this change, read from their
   // hidden markers, so a lost database row never means a duplicate comment.
   listPostedFingerprints(ref: ForgeRef): Promise<Set<string>>;
   // Creates Sentryward's summary comment, or edits the one it posted before.
-  upsertSummaryComment(ref: ForgeRef, body: string): Promise<string>;
+  // With create: false only an existing one is edited, and null means there
+  // was none.
+  upsertSummaryComment(ref: ForgeRef, body: string, options?: UpsertOptions): Promise<string | null>;
   // The same for any comment Sentryward owns, found by the hidden marker in its body.
-  upsertComment(ref: ForgeRef, marker: string, body: string): Promise<string>;
+  upsertComment(ref: ForgeRef, marker: string, body: string, options?: UpsertOptions): Promise<string | null>;
   // Rewrites the PR/MR description from its current text.
   updateDescription(ref: ForgeRef, transform: (description: string) => string): Promise<void>;
   // Adds and removes labels; removing one the change does not carry is not an error.

@@ -630,6 +630,11 @@ When a review starts, Sentryward posts a "reviewing" summary comment and, with
 it finishes it publishes, each step independently:
 
 - **Inline comments** for actionable findings only.
+  - `output.inline_min_severity` (default `info`) posts threads only for
+    findings at or above that severity, and `output.max_inline_comments`
+    (default none) caps the threads per review, the most severe first. Threads
+    posted by earlier runs count toward the cap. Findings either one holds back
+    are written out in full in the summary comment, under "Not posted inline".
   - GitHub: one review posted as `COMMENT`, never approve or request changes.
     GitLab: one discussion per finding.
   - Suggestions use each forge's suggestion syntax.
@@ -653,6 +658,12 @@ it finishes it publishes, each step independently:
     models and coverage.
   - With `output.post_summary` off, the PR summary is posted as a comment of
     its own.
+  - With `output.summary_only_with_findings` on, a completed review with no
+    findings starts no summary comment (the PR summary included), and the
+    "reviewing" note only replaces an earlier summary, never starts one. A
+    summary an earlier run posted is still updated, so it never keeps showing findings that are gone. The
+    commit status still reports the verdict, and a partial or failed review is
+    always posted.
   - `output.summary_location` is accepted but ignored, and a walkthrough block
     an earlier version wrote into the description is removed on the next
     review.
@@ -1139,7 +1150,10 @@ review:
 output:
   walkthrough: true         # the PR summary
   post_inline: true
+  inline_min_severity: info # critical | major | minor | info: lower actionable findings go in the summary
+  max_inline_comments: null # e.g. 10: cap inline threads, most severe first; the rest go in the summary
   post_summary: true
+  summary_only_with_findings: false  # no summary comment for a clean review (one already posted is updated)
   post_check: false         # the sentryward/review commit status
   resolve_fixed_threads: true  # resolve a finding's inline thread once it is fixed
   finding_counts: false     # the findings-count line under the verdict

@@ -15,6 +15,7 @@ export const FLAGS = [
   { name: "walkthrough", section: "output" },
   { name: "postInline", section: "output" },
   { name: "postSummary", section: "output" },
+  { name: "summaryOnlyWithFindings", section: "output" },
   { name: "postCheck", section: "output" },
   { name: "resolveFixedThreads", section: "output" },
   { name: "findingCounts", section: "output" },
@@ -48,6 +49,7 @@ export const CHOICES = [
   { name: "review", section: "triggers" },
   { name: "summary", section: "triggers" },
   { name: "highLevelSummaryPlacement", section: "output" },
+  { name: "inlineMinSeverity", section: "output" },
   { name: "verify", section: "review" },
   { name: "context", section: "review" },
   { name: "thinking", section: "llm" },
@@ -85,24 +87,29 @@ export type NumberName =
   | "maxSteps"
   | "maxToolTokens"
   | "maxSearches"
+  | "maxInlineComments"
 
 export interface NumberSpec {
   name: NumberName
-  section: "llm" | "review" | "review.agent"
+  section: "llm" | "review" | "review.agent" | "output"
   min: number
   max?: number
   step: number
   integer: boolean
-  // Accepts AUTO, saved as null.
-  nullable?: boolean
+  // The word typed for a saved null (AUTO for the context budget); absent
+  // when null is not allowed.
+  nullable?: string
 }
+
+// Typed into the context budget to derive it from the model's context window.
+export const AUTO = "auto"
 
 // Bounds mirror server/src/review/config/schema.ts so a bad value is caught
 // before the server rejects the whole save.
 export const NUMBERS: NumberSpec[] = [
   { name: "temperature", section: "llm", min: 0, max: 1, step: 0.1, integer: false },
   { name: "maxTokens", section: "llm", min: 1000, max: 64000, step: 1000, integer: true },
-  { name: "contextBudget", section: "llm", min: 4000, step: 1000, integer: true, nullable: true },
+  { name: "contextBudget", section: "llm", min: 4000, step: 1000, integer: true, nullable: AUTO },
   { name: "maxFindings", section: "review", min: 1, max: 100, step: 1, integer: true },
   { name: "maxChunks", section: "review", min: 1, max: 50, step: 1, integer: true },
   { name: "impactDepth", section: "review", min: 1, max: 3, step: 1, integer: true },
@@ -110,10 +117,9 @@ export const NUMBERS: NumberSpec[] = [
   { name: "maxSteps", section: "review.agent", min: 2, max: 20, step: 1, integer: true },
   { name: "maxToolTokens", section: "review.agent", min: 1000, max: 100000, step: 1000, integer: true },
   { name: "maxSearches", section: "review.agent", min: 0, max: 10, step: 1, integer: true },
+  // null posts every inline comment.
+  { name: "maxInlineComments", section: "output", min: 1, max: 100, step: 1, integer: true, nullable: "none" },
 ]
-
-// Typed into the context budget to derive it from the model's context window.
-export const AUTO = "auto"
 
 // Router ids such as "openai/cx/gpt-5.6-sol(medium)" keep slashes and
 // parentheses in the model part.
@@ -241,7 +247,7 @@ function legacyReview(triggers: ConfigOverride["triggers"]): string | undefined 
 function parseNumber(spec: NumberSpec, text: string): number | null | undefined {
   const trimmed = text.trim()
   if (!trimmed) return undefined
-  if (spec.nullable && trimmed.toLowerCase() === AUTO) return null
+  if (spec.nullable && trimmed.toLowerCase() === spec.nullable) return null
   return Number(trimmed)
 }
 
@@ -291,9 +297,9 @@ export function toForm(settings: ConfigOverride): FormState {
     flags[name] = typeof value === "boolean" ? value : undefined
   }
   const numbers = {} as FormState["numbers"]
-  for (const { name, section } of NUMBERS) {
+  for (const { name, section, nullable } of NUMBERS) {
     const value = (at(settings, section) as Section | undefined)?.[name]
-    numbers[name] = value === null ? AUTO : typeof value === "number" ? String(value) : ""
+    numbers[name] = value === null ? (nullable ?? "") : typeof value === "number" ? String(value) : ""
   }
   const choices = {} as FormState["choices"]
   for (const choice of CHOICES) {
@@ -466,7 +472,7 @@ export function validateForm(
     const range = spec.max === undefined ? `at least ${spec.min}` : `between ${spec.min} and ${spec.max}`
     if (!Number.isFinite(value) || (spec.integer && !Number.isInteger(value))) {
       errors[spec.name] = spec.nullable
-        ? `Enter a whole number or "${AUTO}"`
+        ? `Enter a whole number or "${spec.nullable}"`
         : spec.integer
           ? "Enter a whole number"
           : "Enter a number"

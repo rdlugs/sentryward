@@ -6,6 +6,7 @@ import { Prisma } from "../generated/prisma/client.ts";
 import type { Repository } from "../generated/prisma/client.ts";
 import { MAX_CHANGE_NUMBER, reviewResultSchema } from "../review/core/models.ts";
 import { roundUsd } from "../review/core/pricing/pricing.ts";
+import { severitySchema } from "../review/core/severity.ts";
 import { parseChangeUrl } from "../review/forge/url.ts";
 import { toJson } from "../review/render/json.ts";
 import { toMarkdown, walkthroughOptions } from "../review/render/markdown.ts";
@@ -380,7 +381,8 @@ export async function getReviewMarkdown(req: Request, res: Response) {
   // stored before output.findingCounts or output.reviewStats existed showed
   // those lines, and before output.walkthroughLabels or
   // output.walkthroughBlastRadius those segments; jobs stored before
-  // output.agentPromptAll existed had no prompt.
+  // output.agentPromptAll existed had no prompt, and before
+  // output.inlineMinSeverity or output.maxInlineComments held nothing back.
   const stored = review.resolvedConfig as {
     config?: {
       output?: {
@@ -392,6 +394,9 @@ export async function getReviewMarkdown(req: Request, res: Response) {
         highLevelSummaryPlacement?: string;
         walkthroughLabels?: boolean;
         walkthroughBlastRadius?: boolean;
+        postInline?: boolean;
+        inlineMinSeverity?: string;
+        maxInlineComments?: number | null;
       };
     };
   } | null;
@@ -401,9 +406,16 @@ export async function getReviewMarkdown(req: Request, res: Response) {
   // Results stored before output.findingLifecycle existed have no lifecycle.
   const lifecycle = output?.findingLifecycle !== false;
   const agentPrompt = output?.agentPromptAll === true;
+  const minSeverity = severitySchema.safeParse(output?.inlineMinSeverity);
+  const max = output?.maxInlineComments;
+  // Only while inline comments were posted, as summaryPlacement decides.
+  const inline =
+    output?.postInline !== false && (minSeverity.success || typeof max === "number")
+      ? { minSeverity: minSeverity.success ? minSeverity.data : "info", max: typeof max === "number" ? max : null }
+      : undefined;
   res
     .type("text/markdown; charset=utf-8")
-    .send(toMarkdown(result, { counts, stats, lifecycle, agentPrompt, ...walkthroughOptions(output) }));
+    .send(toMarkdown(result, { counts, stats, lifecycle, agentPrompt, inline, ...walkthroughOptions(output) }));
 }
 
 export async function rerunReview(req: Request, res: Response) {

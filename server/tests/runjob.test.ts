@@ -126,8 +126,11 @@ function deps(
     tools?: { annotations: ToolAnnotation[]; warnings: string[] } | Error;
     // What getChange throws instead of answering.
     changeError?: Error;
+    // A summary comment from an earlier run is on the change.
+    summaryOnForge?: boolean;
   } = {},
 ) {
+  let summaryOnForge = options.summaryOnForge ?? false;
   const reads: string[] = [];
   const toolReads: string[] = [];
   const published: Published = { inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] };
@@ -176,9 +179,12 @@ function deps(
       published.inline.push(...comments.map((c) => ({ fingerprint: c.fingerprint, startLine: c.startLine })));
       return { posted: comments.map((c) => ({ fingerprint: c.fingerprint, forgeCommentId: `c-${c.fingerprint}` })), failed: [] };
     },
-    upsertSummaryComment: async (_ref: unknown, body: string) => {
+    upsertSummaryComment: async (_ref: unknown, body: string, upsert?: { create?: boolean }) => {
+      // Like the adapters: create: false only edits a summary already there.
+      if (upsert?.create === false && !summaryOnForge) return null;
       if (options.failSummary && !body.includes("Reviewing")) throw new Error("403 Forbidden");
       published.summaries.push(body);
+      summaryOnForge = true;
       return "note-1";
     },
     upsertComment: async (_ref: unknown, _marker: string, body: string) => {
@@ -565,6 +571,35 @@ describe("runJob", () => {
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(stored.publication).toMatchObject({ summaryCommentId: "note-1", statusState: "failure", errors: [] });
     expect(await prisma.postedFinding.count({ where: { repositoryId, number: 42 } })).toBe(1);
+  });
+
+  describe("with summaryOnlyWithFindings", () => {
+    async function run(findings: unknown[], summaryOnForge: boolean) {
+      const job = await claimedJob();
+      await prisma.repository.update({ where: { id: repositoryId }, data: { settings: { review: { blockOn: "major" }, output: { summaryOnlyWithFindings: true } } } });
+      const { runDeps, published } = deps({}, { code_review: { findings }, walkthrough: WALKTHROUGH }, undefined, { summaryOnForge });
+      await runJob(job, runDeps);
+      return { published, stored: await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } }) };
+    }
+
+    it("posts no progress note or summary for a clean review", async () => {
+      const { published, stored } = await run([], false);
+      expect(published.summaries).toEqual([]);
+      expect(stored.status).toBe("completed");
+      expect(stored.publication).toMatchObject({ summaryCommentId: null, errors: [] });
+    });
+
+    it("updates a summary an earlier run left, progress note first", async () => {
+      const { published } = await run([], true);
+      expect(published.summaries).toHaveLength(2);
+      expect(published.summaries[0]).toMatch(/^⏳ \*\*Reviewing/);
+    });
+
+    it("posts the summary of a review with findings, without starting a progress note", async () => {
+      const { published } = await run([modelFinding()], false);
+      expect(published.summaries).toHaveLength(1);
+      expect(published.summaries[0]).toMatch(/^## Summary\n/);
+    });
   });
 
   it("never posts the same finding twice across runs", async () => {

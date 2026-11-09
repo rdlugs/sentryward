@@ -1,5 +1,6 @@
 import type { Rule } from "../config/schema.ts";
 import type { ChangeSet, Finding, ForgeProvider } from "../core/models.ts";
+import { inlineSelection, type InlineLimits } from "../core/buckets.ts";
 import { fingerprintMarker } from "../core/markers.ts";
 import { FORGE_INFO } from "../forge/providers.ts";
 import type { InlineComment } from "../forge/types.ts";
@@ -28,6 +29,9 @@ export interface InlineOptions {
   agentPrompt?: boolean;
   // The resolved config's rules, to spell out the one a rule finding broke.
   rules?: Rule[];
+  // output.inlineMinSeverity and output.maxInlineComments; every actionable
+  // finding when absent.
+  limits?: InlineLimits;
 }
 
 // Rules set in the dashboard are not in the repository, so a developer
@@ -63,8 +67,9 @@ export function inlineBody(finding: Finding, provider: ForgeProvider, options: I
   return lines.join("\n");
 }
 
-// Only actionable findings become inline threads; everything else lives in
-// the summary. The bucket was decided once, when the finding was validated.
+// Only actionable findings become inline threads, and of those only the ones
+// the inline limits select; everything else lives in the summary. The bucket
+// was decided once, when the finding was validated.
 export function inlineComments(
   findings: Finding[],
   changeSet: ChangeSet,
@@ -74,8 +79,8 @@ export function inlineComments(
 ): InlineComment[] {
   const files = new Map(changeSet.files.map((file) => [file.path, file]));
   const comments: InlineComment[] = [];
-  for (const finding of findings) {
-    if (finding.bucket !== "actionable" || alreadyPosted.has(finding.fingerprint)) continue;
+  for (const finding of inlineSelection(findings, options.limits).inline) {
+    if (alreadyPosted.has(finding.fingerprint)) continue;
     const file = files.get(finding.file);
     if (!file) continue;
     const oldLine = file.hunks
