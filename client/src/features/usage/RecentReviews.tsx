@@ -3,6 +3,7 @@ import { TablePagination } from "@/components/TablePagination"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { costUnknown, formatCost, formatTokens } from "@/features/reviews/cost"
+import { changeLabel, untitledChange } from "@/features/reviews/links"
 import { usePagination } from "@/hooks/use-pagination"
 import { timeAgo } from "@/lib/time"
 import { useRecentUsage } from "./api"
@@ -34,10 +35,10 @@ export function RecentReviews({ period }: { period: UsagePeriod }) {
               <li key={review.id} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2 text-sm">
                 <div className="flex min-w-0 flex-col">
                   <Link to={`/reviews/${review.id}`} className="truncate font-medium hover:underline">
-                    {review.title ?? `#${review.number}`}
+                    {review.title ?? untitledChange(review.provider, review.number)}
                   </Link>
                   <span className="truncate text-xs text-muted-foreground">
-                    {review.fullPath} #{review.number} · <span className="font-mono">{review.models.join(", ")}</span>
+                    {review.fullPath} {changeLabel(review.provider, review.number)} · <span className="font-mono">{review.models.join(", ")}</span>
                   </span>
                 </div>
                 <div className="flex shrink-0 items-baseline gap-3 text-xs text-muted-foreground tabular-nums">

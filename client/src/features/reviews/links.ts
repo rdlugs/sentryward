@@ -21,11 +21,12 @@ export function changeLabel(provider: Provider, number: number) {
   return PROVIDERS[provider].changeLabel(number)
 }
 
+// "Pull request #42" or "Merge request !42": a change before it has a title.
+export function untitledChange(provider: Provider, number: number) {
+  return `${PROVIDERS[provider].changeNoun} ${changeLabel(provider, number)}`
+}
+
 // What a review is called in lists and dialogs: the change title, or "Pull request #42" before there is one.
 export function changeTitle(review: ReviewListItem) {
-  return (
-    review.title ??
-    review.summary?.title ??
-    `${PROVIDERS[review.repository.provider].changeNoun} ${changeLabel(review.repository.provider, review.number)}`
-  )
+  return review.title ?? review.summary?.title ?? untitledChange(review.repository.provider, review.number)
 }

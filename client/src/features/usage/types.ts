@@ -1,3 +1,5 @@
+import type { Provider } from "@/features/reviews/types"
+
 export const USAGE_PERIODS = ["24h", "7d", "30d", "90d", "all"] as const
 export type UsagePeriod = (typeof USAGE_PERIODS)[number]
 
@@ -41,6 +43,7 @@ export interface RecentReviewUsage {
   number: number
   title: string | null
   fullPath: string
+  provider: Provider
   createdAt: string
   models: string[]
   calls: number

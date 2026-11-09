@@ -274,6 +274,17 @@ describe("Home page", () => {
     expect(screen.getByText("acme/web · Blocked")).toBeInTheDocument()
   })
 
+  it.each([
+    { provider: "github", label: "Pull request #42" },
+    { provider: "gitlab", label: "Merge request !42" },
+  ])("names an untitled $provider review as $label", async ({ provider, label }) => {
+    stubHome({
+      reviews: [{ ...listItem, title: null, summary: null, repository: { ...listItem.repository, provider } }],
+    })
+
+    expect(await screen.findByRole("link", { name: label })).toHaveAttribute("href", `/reviews/${listItem.id}`)
+  })
+
   it("opens the manual review sheet from the suggested actions", async () => {
     stubHome()
 

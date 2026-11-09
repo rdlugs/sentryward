@@ -23,7 +23,7 @@ const usage = (inputTokens: number, outputTokens: number, usd = { input: 0, outp
 });
 
 let seq = 0;
-function job(createdAt: string, byModel: UsageByModel | null, repo = { id: "r1", fullPath: "team/web" }): UsageJob {
+function job(createdAt: string, byModel: UsageByModel | null, repo: UsageJob["repository"] = { id: "r1", fullPath: "team/web", provider: "github" }): UsageJob {
   seq += 1;
   return {
     id: `job-${seq}`,
@@ -182,7 +182,7 @@ describe("buildUsageReport", () => {
   });
 
   it("groups by repository", () => {
-    const api = { id: "r2", fullPath: "team/api" };
+    const api = { id: "r2", fullPath: "team/api", provider: "gitlab" as const };
     const report = buildUsageReport(
       [
         job("2026-10-21T10:00:00Z", { [SONNET]: usage(1_000_000, 0, { input: 2, output: 0 }) }),
@@ -211,7 +211,7 @@ describe("buildUsageReport", () => {
 
 describe("buildRecentUsage", () => {
   it("lists the reviews that used a model, newest first, with their totals", () => {
-    const api = { id: "r2", fullPath: "team/api" };
+    const api = { id: "r2", fullPath: "team/api", provider: "gitlab" as const };
     const jobs = [
       job("2026-10-21T10:00:00Z", { [SONNET]: usage(1_000_000, 0, { input: 2, output: 0 }) }),
       job("2026-10-23T10:00:00Z", { [HAIKU]: usage(1_000_000, 0, { input: 0.1, output: 0 }) }, api),
@@ -224,7 +224,11 @@ describe("buildRecentUsage", () => {
     const recent = buildRecentUsage(jobs, 1, 10);
 
     expect(recent.total).toBe(3);
-    expect(recent.reviews.map((r) => r.fullPath)).toEqual(["team/api", "team/web", "team/web"]);
+    expect(recent.reviews.map((r) => [r.fullPath, r.provider])).toEqual([
+      ["team/api", "gitlab"],
+      ["team/web", "github"],
+      ["team/web", "github"],
+    ]);
     expect(recent.reviews[0]).toMatchObject({ models: [HAIKU], inputTokens: 1_000_000, usd: 0.1 });
   });
 
@@ -329,7 +333,7 @@ describe("GET /api/usage", () => {
     expect(second.body.reviews).toHaveLength(2);
 
     const scoped = await request(app).get(`/api/usage/recent?repoId=${otherRepoId}`).set("Cookie", cookie);
-    expect(scoped.body.reviews.map((r: { number: number }) => r.number)).toEqual([4]);
+    expect(scoped.body.reviews.map((r: { number: number; provider: string }) => [r.number, r.provider])).toEqual([[4, "gitlab"]]);
 
     const report = await request(app).get("/api/usage").set("Cookie", cookie);
     expect(report.body).not.toHaveProperty("recent");

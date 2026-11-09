@@ -64,6 +64,7 @@ const REVIEW: RecentReviewUsage = {
   number: 42,
   title: "Add b and c",
   fullPath: "acme/web",
+  provider: "github",
   createdAt: "2026-10-23T10:00:00.000Z",
   models: [SONNET],
   calls: 3,
@@ -300,6 +301,18 @@ describe("Usage page", () => {
     const recent = await screen.findByRole("list", { name: "Recent reviews" })
     expect(within(recent).getByRole("link", { name: "Add b and c" })).toHaveAttribute("href", "/reviews/rev-1")
     expect(within(recent).getByText("~$0.62 est.")).toBeInTheDocument()
+  })
+
+  it.each([
+    { provider: "github", label: "Pull request #42", line: "acme/web #42" },
+    { provider: "gitlab", label: "Merge request !42", line: "acme/web !42" },
+  ] as const)("names an untitled $provider review the forge's way", async ({ provider, label, line }) => {
+    mockApi({ "GET /api/usage?period=7d": report(), ...recentRoutes([{ ...REVIEW, title: null, provider }]) })
+    renderWithProviders(<App />, { route: "/usage" })
+
+    const recent = await screen.findByRole("list", { name: "Recent reviews" })
+    expect(within(recent).getByRole("link", { name: label })).toHaveAttribute("href", "/reviews/rev-1")
+    expect(within(recent).getByRole("listitem")).toHaveTextContent(line)
   })
 
   it("shows empty states without usage", async () => {

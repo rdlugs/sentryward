@@ -21,7 +21,7 @@ function loadUsageJobs(workspaceId: string, period: UsagePeriod, repoId: string 
       createdAt: true,
       title: true,
       summary: true,
-      repository: { select: { id: true, fullPath: true } },
+      repository: { select: { id: true, fullPath: true, provider: true } },
     },
   });
 }

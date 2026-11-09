@@ -14,6 +14,7 @@ import { SegmentedControl } from "@/components/SegmentedControl"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { PROVIDER_IDS, PROVIDERS } from "@/features/forge/providers"
+import { changeLabel } from "@/features/reviews/links"
 import { cn } from "@/lib/utils"
 import {
   useConfigPreview,
@@ -178,7 +179,7 @@ function PageHeader({ preview, highlight }: { preview: PreviewPublication; highl
   return (
     <header className="flex flex-col gap-2 border-b pb-3">
       <h4 className="text-base font-semibold">
-        {pr.title} <span className="font-normal text-muted-foreground">{github ? `#${pr.number}` : `!${pr.number}`}</span>
+        {pr.title} <span className="font-normal text-muted-foreground">{changeLabel(provider, pr.number)}</span>
       </h4>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span

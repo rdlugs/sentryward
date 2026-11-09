@@ -71,6 +71,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- The Recent reviews lists on the Home and Usage pages label an untitled
+  GitLab merge request as `Merge request !42` and an untitled GitHub pull
+  request as `Pull request #42`, instead of `#42`, and the Usage list writes a
+  GitLab change as `group/project !42` instead of `group/project #42` (#269).
 - The stats line at the end of the summary comment and of the review markdown
   now reads "2 review passes" instead of "2 review passs" when a review ran
   more than one pass (#260).

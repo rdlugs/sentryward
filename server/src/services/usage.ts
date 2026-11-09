@@ -1,3 +1,4 @@
+import type { ForgeProvider } from "../review/core/models.ts";
 import { addUsage, roundUsd, usedTokens, type UsageByModel } from "../review/core/pricing/pricing.ts";
 
 export const USAGE_PERIODS = ["24h", "7d", "30d", "90d", "all"] as const;
@@ -11,7 +12,8 @@ export interface UsageJob {
   // Absent on callers that only read the digest; the digest's title is the fallback.
   title?: string | null;
   summary: unknown;
-  repository: { id: string; fullPath: string };
+  // provider, so the client writes the change number the forge's way (#42, !42).
+  repository: { id: string; fullPath: string; provider: ForgeProvider };
 }
 
 type Unit = "hour" | "day" | "month";
@@ -149,6 +151,7 @@ export interface RecentUsage {
   number: number;
   title: string | null;
   fullPath: string;
+  provider: ForgeProvider;
   createdAt: string;
   models: string[];
   // With unpricedCalls, so a review no call had a price for reads as unknown.
@@ -267,6 +270,7 @@ export function buildRecentUsage(jobs: UsageJob[], page: number, limit: number) 
       number: job.number,
       title,
       fullPath: job.repository.fullPath,
+      provider: job.repository.provider,
       createdAt: job.createdAt.toISOString(),
       models: Object.keys(byModel!).sort(),
       calls: totals.calls,
