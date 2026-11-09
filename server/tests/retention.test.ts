@@ -2,7 +2,12 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { Prisma } from "../src/generated/prisma/client.ts";
 import type { ReviewStatus } from "../src/generated/prisma/client.ts";
 import { prisma } from "../src/lib/prisma.ts";
-import { pruneReviews, purgeStaleChanges, runRetention } from "../src/worker/retention.ts";
+import {
+  DELIVERIES_PER_TARGET,
+  pruneReviews,
+  purgeStaleChanges,
+  runRetention,
+} from "../src/worker/retention.ts";
 import { createUser } from "./helpers/users.ts";
 
 const NOW = new Date("2026-06-01T00:00:00Z");
@@ -318,6 +323,37 @@ describe("runRetention", () => {
     expect(result.oauthStates).toBe(2);
     expect((await prisma.signInState.findMany()).map((row) => row.id)).toEqual(["live"]);
     expect(await prisma.oAuthState.count()).toBe(0);
+  });
+
+  it("keeps notification deliveries for 30 days and at most 100 per target", async () => {
+    const make = (name: string) =>
+      prisma.notificationTarget.create({ data: { workspaceId, kind: "slack", name, events: ["failed"] } });
+    const busy = await make("busy");
+    const quiet = await make("quiet");
+    const row = (targetId: string, createdAt: Date) => ({
+      targetId,
+      event: "failed",
+      status: "sent" as const,
+      createdAt,
+      finishedAt: createdAt,
+    });
+    await prisma.notificationDelivery.createMany({
+      data: Array.from({ length: DELIVERIES_PER_TARGET + 5 }, (_, i) =>
+        row(busy.id, new Date(RECENT.getTime() + i * 1000)),
+      ),
+    });
+    await prisma.notificationDelivery.createMany({ data: [row(quiet.id, OLD), row(quiet.id, RECENT)] });
+
+    const result = await runRetention({ now: NOW });
+
+    expect(result.deliveries).toBe(6);
+    const kept = await prisma.notificationDelivery.findMany({ where: { targetId: busy.id }, orderBy: { createdAt: "asc" } });
+    expect(kept).toHaveLength(DELIVERIES_PER_TARGET);
+    // The oldest five went.
+    expect(kept[0]!.createdAt).toEqual(new Date(RECENT.getTime() + 5000));
+    expect(await prisma.notificationDelivery.findMany({ where: { targetId: quiet.id } })).toMatchObject([
+      { createdAt: RECENT },
+    ]);
   });
 
   it("purges audit rows past the instance's audit period", async () => {

@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react"
+import { Link } from "react-router"
 import { Controller, useForm, useWatch, type Control, type FieldValues, type Path } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { AlertTriangle, BellRing, Copy, Loader2, MoreHorizontal, Pencil, Plus, Send, Trash2 } from "lucide-react"
+import { AlertTriangle, BellRing, Copy, History, Loader2, MoreHorizontal, Pencil, Plus, Send, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
 import { SortableHead } from "@/components/SortableHead"
@@ -48,6 +49,7 @@ import {
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -60,14 +62,18 @@ import { useSort } from "@/hooks/use-sort"
 import { copyToClipboard } from "@/lib/clipboard"
 import { ALL, matchesQuery, selectedLabel } from "@/lib/filters"
 import { timeAgo } from "@/lib/time"
+import { cn } from "@/lib/utils"
 import {
   EVENT_OPTIONS,
   KIND_LABELS,
   useCreateNotificationTarget,
   useDeleteNotificationTarget,
+  useNotificationDeliveries,
   useNotificationTargets,
   useTestNotificationTarget,
   useUpdateNotificationTarget,
+  type DeliveryEvent,
+  type LastDelivery,
   type NotificationEvent,
   type NotificationKind,
   type NotificationTarget,
@@ -465,6 +471,144 @@ function EventBadges({ events }: { events: NotificationEvent[] }) {
   )
 }
 
+const DELIVERY_EVENT_LABELS: Record<DeliveryEvent, string> = {
+  blocked: "Blocked",
+  failed: "Failed",
+  completed: "Completed",
+  test: "Test",
+}
+
+// "Sent" or "Failed · 503"; the error text is shown separately, since it can be long.
+function deliveryOutcome(delivery: LastDelivery) {
+  if (delivery.status === "sent") return "Sent"
+  return delivery.httpStatus ? `Failed · ${delivery.httpStatus}` : "Failed"
+}
+
+function OutcomeDot({ status }: { status: LastDelivery["status"] }) {
+  return (
+    <span
+      className={cn("size-1.5 shrink-0 rounded-full", status === "sent" ? "bg-emerald-500" : "bg-destructive")}
+      aria-hidden
+    />
+  )
+}
+
+function LastDeliveryCell({ delivery }: { delivery: LastDelivery | null }) {
+  if (!delivery) return <span className="text-muted-foreground">Never</span>
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 whitespace-nowrap",
+        delivery.status === "failed" && "text-destructive",
+      )}
+      title={delivery.error ?? undefined}
+    >
+      <OutcomeDot status={delivery.status} />
+      {deliveryOutcome(delivery)} · {timeAgo(delivery.createdAt)}
+    </span>
+  )
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+}
+
+const DELIVERIES_PAGE_SIZE = 20
+
+function DeliveriesSheet({
+  target,
+  onOpenChange,
+}: {
+  target: NotificationTarget
+  onOpenChange: (open: boolean) => void
+}) {
+  const [page, setPage] = useState(1)
+  const [size, setSize] = useState(DELIVERIES_PAGE_SIZE)
+  const { data, isPending, isError } = useNotificationDeliveries(target.id, page, size)
+
+  return (
+    <Sheet open onOpenChange={onOpenChange}>
+      <SheetContent className="overflow-y-auto data-[side=right]:sm:max-w-2xl">
+        <SheetHeader>
+          <SheetTitle>Deliveries to {target.name}</SheetTitle>
+          <SheetDescription>
+            Every delivery, tests included, newest first. The last 30 days are kept, up to 100 per target.
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex flex-col gap-4 px-4 pb-4">
+          {isPending ? (
+            <Skeleton className="h-40 w-full" />
+          ) : isError ? (
+            <Alert variant="destructive">
+              <AlertTriangle />
+              <AlertTitle>Could not load deliveries.</AlertTitle>
+            </Alert>
+          ) : data.total === 0 ? (
+            <p className="text-sm text-muted-foreground">No deliveries yet. Send a test to check this target.</p>
+          ) : (
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Time</TableHead>
+                    <TableHead>Event</TableHead>
+                    <TableHead>Outcome</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {data.deliveries.map((delivery) => (
+                    <TableRow key={delivery.id}>
+                      <TableCell className="align-top whitespace-nowrap text-muted-foreground">
+                        {formatDateTime(delivery.createdAt)}
+                      </TableCell>
+                      <TableCell className="align-top">
+                        <div className="flex flex-col gap-1">
+                          <span>{DELIVERY_EVENT_LABELS[delivery.event]}</span>
+                          {delivery.jobId && (
+                            <Link to={`/reviews/${delivery.jobId}`} className="text-xs underline underline-offset-4">
+                              View review
+                            </Link>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="align-top whitespace-normal">
+                        <div className="flex flex-col gap-1">
+                          <span
+                            className={cn(
+                              "inline-flex items-center gap-1.5",
+                              delivery.status === "failed" && "text-destructive",
+                            )}
+                          >
+                            <OutcomeDot status={delivery.status} />
+                            {deliveryOutcome(delivery)}
+                          </span>
+                          {delivery.error && delivery.error !== `Responded with ${delivery.httpStatus}` && (
+                            <span className="text-xs break-words text-muted-foreground">{delivery.error}</span>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <TablePagination
+                page={page}
+                size={size}
+                total={data.total}
+                onPageChange={setPage}
+                onSizeChange={(next) => {
+                  setSize(next)
+                  setPage(1)
+                }}
+              />
+            </>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
 // Pausing keeps a target's settings, so it can be turned back on without
 // adding it again (and, for a webhook, getting a new secret).
 function TargetActiveSwitch({ target, canManage }: { target: NotificationTarget; canManage: boolean }) {
@@ -491,12 +635,18 @@ function TargetActiveSwitch({ target, canManage }: { target: NotificationTarget;
   )
 }
 
+// Members get the menu too, for the delivery history; changing a target and
+// sending tests stay with admins, as the server enforces.
 function TargetActions({
   target,
+  canManage,
+  onViewDeliveries,
   onEdit,
   onRemove,
 }: {
   target: NotificationTarget
+  canManage: boolean
+  onViewDeliveries: () => void
   onEdit: () => void
   onRemove: () => void
 }) {
@@ -521,19 +671,27 @@ function TargetActions({
       </DropdownMenuTrigger>
       {/* The shared menu matches its trigger's width, which is far too narrow for an icon button. */}
       <DropdownMenuContent align="end" className="w-max whitespace-nowrap">
-        <DropdownMenuItem onSelect={sendTest} disabled={testTarget.isPending}>
-          <Send />
-          Send test
+        <DropdownMenuItem onSelect={onViewDeliveries}>
+          <History />
+          View deliveries
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onEdit}>
-          <Pencil />
-          Edit
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onRemove}>
-          <Trash2 />
-          Remove
-        </DropdownMenuItem>
+        {canManage && (
+          <>
+            <DropdownMenuItem onSelect={sendTest} disabled={testTarget.isPending}>
+              <Send />
+              Send test
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onEdit}>
+              <Pencil />
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={onRemove}>
+              <Trash2 />
+              Remove
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -554,6 +712,9 @@ function TargetTable({
   const { sort, onSort } = useSort<SortKey>()
   const [editing, setEditing] = useState<NotificationTarget | null>(null)
   const [removing, setRemoving] = useState<NotificationTarget | null>(null)
+  // Kept by id so the sheet follows the target through list refetches.
+  const [viewingId, setViewingId] = useState<string | null>(null)
+  const viewing = targets.find((target) => target.id === viewingId) ?? null
 
   const sorted = useMemo(() => {
     if (!sort) return targets
@@ -573,18 +734,17 @@ function TargetTable({
             <SortableHead label="Type" sortKey="kind" {...head} />
             <TableHead>Destination</TableHead>
             <TableHead>Events</TableHead>
+            <TableHead>Last delivery</TableHead>
             <SortableHead label="Added" sortKey="createdAt" {...head} />
             <SortableHead label="Active" sortKey="active" {...head} />
-            {canManage && (
-              <TableHead className="w-0">
-                <span className="sr-only">Actions</span>
-              </TableHead>
-            )}
+            <TableHead className="w-0">
+              <span className="sr-only">Actions</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {!sorted.length && (
-            <NoMatchesRow colSpan={canManage ? 7 : 6}>No notification targets match your filters.</NoMatchesRow>
+            <NoMatchesRow colSpan={8}>No notification targets match your filters.</NoMatchesRow>
           )}
           {page.rows.map((target) => (
             <TableRow key={target.id}>
@@ -598,19 +758,22 @@ function TargetTable({
               <TableCell>
                 <EventBadges events={target.events} />
               </TableCell>
+              <TableCell>
+                <LastDeliveryCell delivery={target.lastDelivery} />
+              </TableCell>
               <TableCell className="text-muted-foreground">{timeAgo(target.createdAt)}</TableCell>
               <TableCell>
                 <TargetActiveSwitch target={target} canManage={canManage} />
               </TableCell>
-              {canManage && (
-                <TableCell className="text-right">
-                  <TargetActions
-                    target={target}
-                    onEdit={() => setEditing(target)}
-                    onRemove={() => setRemoving(target)}
-                  />
-                </TableCell>
-              )}
+              <TableCell className="text-right">
+                <TargetActions
+                  target={target}
+                  canManage={canManage}
+                  onViewDeliveries={() => setViewingId(target.id)}
+                  onEdit={() => setEditing(target)}
+                  onRemove={() => setRemoving(target)}
+                />
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -633,6 +796,9 @@ function TargetTable({
         />
       )}
       <RemoveTargetDialog target={removing} onOpenChange={(open) => !open && setRemoving(null)} />
+      {viewing && (
+        <DeliveriesSheet key={viewing.id} target={viewing} onOpenChange={(open) => !open && setViewingId(null)} />
+      )}
     </>
   )
 }
@@ -773,7 +939,7 @@ function TargetList({
           <CardHeader>
             <CardTitle>Notification targets</CardTitle>
             <CardDescription>
-              Sent once a review finishes. A delivery that fails is logged and never affects the review.
+              Sent once a review finishes. Every delivery is recorded; one that fails never affects the review.
             </CardDescription>
           </CardHeader>
           <CardContent>

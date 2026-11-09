@@ -6,7 +6,7 @@ import type { NotificationEvent, ReviewStatus, ReviewVerdict } from "../src/gene
 import { decrypt, encrypt } from "../src/lib/crypto.ts";
 import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
-import { escapeSlack, eventsFor, notifyJob, signature } from "../src/services/notifications.ts";
+import { escapeSlack, eventsFor, notifyJob, redactError, signature } from "../src/services/notifications.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { addMember, createUser, inWorkspace } from "./helpers/users.ts";
 
@@ -370,6 +370,193 @@ describe("notifyJob", () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ subject: "Review failed: acme/web#7 - boom Bcc: x@evil.example" }),
     );
+  });
+});
+
+describe("delivery log", () => {
+  function deliveries() {
+    return prisma.notificationDelivery.findMany({ orderBy: { createdAt: "asc" } });
+  }
+
+  it("records each delivery of a job with its outcome", async () => {
+    const stub = fetchStub([
+      { method: "POST", url: /broken\.example\.com/, status: 503 },
+      { method: "POST", url: /hooks\.example\.com/ },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const good = await target("slack", ["blocked"]);
+    const broken = await target("webhook", ["completed"], "https://broken.example.com/sw");
+    const job = await finishedJob("completed", "blocked");
+
+    await notifyJob(job.id);
+
+    const rows = await deliveries();
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.targetId === good.id)).toMatchObject({
+      jobId: job.id,
+      event: "blocked",
+      status: "sent",
+      httpStatus: null,
+      error: null,
+      attempts: 1,
+    });
+    expect(rows.find((row) => row.targetId === broken.id)).toMatchObject({
+      jobId: job.id,
+      event: "completed",
+      status: "failed",
+      httpStatus: 503,
+      error: "Responded with 503",
+    });
+  });
+
+  it("records an email delivery that fails without an HTTP status", async () => {
+    vi.spyOn(mailer, "configured").mockReturnValue(true);
+    vi.spyOn(mailer, "send").mockRejectedValue(new Error("SMTP down"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await prisma.notificationTarget.create({
+      data: { workspaceId, kind: "email", name: "Leads", events: ["failed"], recipientIds: [userId] },
+    });
+    const job = await finishedJob("failed", "error", "boom");
+
+    await notifyJob(job.id);
+
+    expect(await deliveries()).toMatchObject([
+      { status: "failed", httpStatus: null, error: "1 of 1 emails could not be sent" },
+    ]);
+  });
+
+  it("never stores the target URL in an error", async () => {
+    const url = "https://hooks.example.com/services/T000/B000/secret-token?key=hush";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error(`request to ${url} failed; path /services/T000/B000/secret-token key=hush`);
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await target("slack", ["completed"], url);
+    const job = await finishedJob("completed", "pass");
+
+    await notifyJob(job.id);
+
+    const [row] = await deliveries();
+    expect(row!.error).not.toMatch(/secret-token|hush/);
+    expect(row!.error).toBe("request to [redacted] failed; path [redacted] [redacted]");
+  });
+
+  it("flattens and clips stored errors", () => {
+    expect(redactError("a\n\nb", null)).toBe("a b");
+    expect(redactError("x".repeat(600), null)).toHaveLength(500);
+    expect(redactError("   ", null)).toBe("Unknown error");
+  });
+
+  it("still delivers when the delivery cannot be recorded", async () => {
+    const stub = fetchStub([{ method: "POST", url: /hooks\.example\.com/ }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(prisma.notificationDelivery, "create").mockRejectedValue(new Error("db down"));
+    const hook = await target("webhook", ["completed"]);
+    const job = await finishedJob("completed", "pass");
+
+    await notifyJob(job.id);
+
+    expect(stub.calls).toHaveLength(1);
+    expect(errors).toHaveBeenCalledWith(`[notify] could not record a delivery to target ${hook.id}`, expect.any(Error));
+  });
+
+  it("records test deliveries without a job", async () => {
+    const stub = fetchStub([{ method: "POST", url: /hooks\.example\.com/, status: 410 }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const hook = await target("slack", ["failed"]);
+
+    const res = await request(app).post(`/api/notifications/${hook.id}/test`).set("Cookie", cookie);
+
+    expect(res.body.result).toEqual({ ok: false, error: "Responded with 410" });
+    expect(await deliveries()).toMatchObject([
+      { targetId: hook.id, jobId: null, event: "test", status: "failed", httpStatus: 410 },
+    ]);
+  });
+
+  it("lists each target's last delivery", async () => {
+    const hook = await target("webhook", ["failed"]);
+    const quiet = await target("slack", ["failed"]);
+    const base = { targetId: hook.id, event: "failed", finishedAt: new Date() };
+    await prisma.notificationDelivery.create({
+      data: { ...base, status: "sent", createdAt: new Date("2026-11-01T00:00:00Z") },
+    });
+    await prisma.notificationDelivery.create({
+      data: { ...base, status: "failed", httpStatus: 503, error: "Responded with 503", createdAt: new Date("2026-11-02T00:00:00Z") },
+    });
+
+    const res = await request(app).get("/api/notifications").set("Cookie", cookie);
+
+    const byId = Object.fromEntries(res.body.targets.map((t: { id: string }) => [t.id, t]));
+    expect(byId[hook.id].lastDelivery).toEqual({
+      status: "failed",
+      event: "failed",
+      httpStatus: 503,
+      error: "Responded with 503",
+      createdAt: "2026-11-02T00:00:00.000Z",
+    });
+    expect(byId[quiet.id].lastDelivery).toBeNull();
+  });
+
+  it("pages a target's history newest first, for members too, within the workspace", async () => {
+    const hook = await target("webhook", ["failed"]);
+    for (let day = 1; day <= 3; day++) {
+      await prisma.notificationDelivery.create({
+        data: {
+          targetId: hook.id,
+          event: "failed",
+          status: "sent",
+          createdAt: new Date(`2026-11-0${day}T00:00:00Z`),
+          finishedAt: new Date(`2026-11-0${day}T00:00:01Z`),
+        },
+      });
+    }
+    const { user: member, cookie: memberCookie } = await createUser("member@example.com");
+    await addMember(workspaceId, member.id, "member");
+
+    const first = await request(app)
+      .get(`/api/notifications/${hook.id}/deliveries?limit=2`)
+      .set("Cookie", memberCookie)
+      .set(...inWorkspace(workspaceId));
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ total: 3, page: 1, limit: 2 });
+    expect(first.body.deliveries.map((d: { createdAt: string }) => d.createdAt)).toEqual([
+      "2026-11-03T00:00:00.000Z",
+      "2026-11-02T00:00:00.000Z",
+    ]);
+    expect(first.body.deliveries[0]).toEqual({
+      id: expect.any(String),
+      event: "failed",
+      status: "sent",
+      httpStatus: null,
+      error: null,
+      attempts: 1,
+      jobId: null,
+      createdAt: "2026-11-03T00:00:00.000Z",
+      finishedAt: "2026-11-03T00:00:01.000Z",
+    });
+
+    const second = await request(app).get(`/api/notifications/${hook.id}/deliveries?page=2&limit=2`).set("Cookie", cookie);
+    expect(second.body.deliveries).toHaveLength(1);
+
+    const { cookie: otherCookie } = await createUser("other@example.com");
+    const hidden = await request(app).get(`/api/notifications/${hook.id}/deliveries`).set("Cookie", otherCookie);
+    expect(hidden.status).toBe(404);
+  });
+
+  it("drops a target's deliveries with it", async () => {
+    const hook = await target("webhook", ["failed"]);
+    await prisma.notificationDelivery.create({
+      data: { targetId: hook.id, event: "test", status: "sent", finishedAt: new Date() },
+    });
+
+    await request(app).delete(`/api/notifications/${hook.id}`).set("Cookie", cookie).expect(204);
+
+    expect(await prisma.notificationDelivery.count()).toBe(0);
   });
 });
 

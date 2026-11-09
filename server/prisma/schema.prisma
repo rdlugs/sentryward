@@ -478,8 +478,9 @@ model ReviewJob {
   resultExpiredAt DateTime?      @map("result_expired_at") @db.Timestamptz
   createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz
 
-  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  findings   Finding[]
+  repository             Repository             @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  findings               Finding[]
+  notificationDeliveries NotificationDelivery[]
 
   @@index([status, createdAt])
   @@index([status, finishedAt])
@@ -717,10 +718,47 @@ model NotificationTarget {
   createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace  Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deliveries NotificationDelivery[]
 
   @@index([workspaceId])
   @@map("notification_targets")
+}
+
+enum NotificationDeliveryStatus {
+  sent
+  failed
+
+  @@map("notification_delivery_status")
+}
+
+// One delivery to one target, test deliveries included, so the dashboard can
+// show a revoked Slack URL or an endpoint that keeps failing. Retention keeps
+// the last DELIVERIES_PER_TARGET rows per target, none older than
+// DELIVERY_RETENTION_DAYS (worker/retention.ts).
+model NotificationDelivery {
+  id         String                     @id @default(uuid()) @db.Uuid
+  targetId   String                     @map("target_id") @db.Uuid
+  // Null for test deliveries, and once review retention deletes the job.
+  jobId      String?                    @map("job_id") @db.Uuid
+  // A NotificationEvent, or "test".
+  event      String
+  status     NotificationDeliveryStatus
+  httpStatus Int?                       @map("http_status")
+  // Redacted of the target URL before it is stored: the URL may be the
+  // credential, and members can read this.
+  error      String?
+  // Always 1 until deliveries are retried.
+  attempts   Int                        @default(1)
+  createdAt  DateTime                   @default(now()) @map("created_at") @db.Timestamptz
+  finishedAt DateTime                   @map("finished_at") @db.Timestamptz
+
+  target NotificationTarget @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  job    ReviewJob?         @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([targetId, createdAt])
+  @@index([createdAt])
+  @@map("notification_deliveries")
 }
 
 // Instance-wide privacy policy, edited by instance admins. A single row (id 1,

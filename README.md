@@ -941,7 +941,17 @@ There are three kinds:
 outcome. Deliveries are best effort: the worker sends them once a review reaches
 its final status, a failed delivery is logged (`[notify] ...`) and never changes
 the review, and nothing is retried. URLs are stored encrypted, and only their
-host is ever shown again. In production a URL must be https and resolve only to
+host is ever shown again.
+
+**Delivery log.** Every delivery, tests included, is recorded with its event,
+outcome (`sent` or `failed`), the HTTP status a failing endpoint answered with
+or the error otherwise, and when it ran. The list's **Last delivery** column
+shows each target's latest one (for example "Sent · 4 minutes ago" or
+"Failed · 503 · 1 hour ago", or "Never"), and **View deliveries** in a target's
+menu opens its history, linking each delivery to its review. Admins and members
+can both read it. Stored errors have the target URL cut out first, since the URL
+can be the credential. The worker's retention pass keeps the last 30 days, and
+at most the 100 newest deliveries per target; removing a target removes its log. In production a URL must be https and resolve only to
 public addresses, the same rule as self-hosted forge hosts, checked when the
 target is saved and again before each delivery; redirects are not followed.
 
@@ -1704,7 +1714,8 @@ rate limited (20 requests per 15 minutes per IP).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET    | `/api/notifications` | `{ targets, mailConfigured }`: the workspace's notification targets with their events, whether each is `active`, a URL's host only and email recipients' user ids |
+| GET    | `/api/notifications` | `{ targets, mailConfigured }`: the workspace's notification targets with their events, whether each is `active`, a URL's host only, email recipients' user ids and `lastDelivery` (`{ status, event, httpStatus, error, createdAt }` or `null`) |
+| GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, `status` `sent` or `failed`, `httpStatus`, `error`, `attempts`, `jobId`, `createdAt`, `finishedAt`); members can read it |
 | POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
 | PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, active? }`; `active: false` pauses deliveries |
 | POST   | `/api/notifications/:id/test` | Workspace admins: sends a sample delivery; returns `{ result }`, `{ ok: true }` or `{ ok: false, error }` |

@@ -10,6 +10,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- A delivery log for notification targets (#248). Every delivery, tests
+  included, is recorded with its outcome and the HTTP status or error (with the
+  target URL cut out). The Notifications list has a **Last delivery** column,
+  and **View deliveries** in a target's menu, open to admins and members, shows
+  its history. `GET /api/notifications` returns each target's `lastDelivery`,
+  and `GET /api/notifications/:id/deliveries` pages the log. The worker keeps
+  the last 30 days, at most 100 deliveries per target. Adds the
+  `notification_deliveries` table (migration applied on start).
 - Output settings for how much a review posts (#246), each set from the Display
   tab or `.sentryward.yaml`, defaulting to today's behaviour:
   `output.inline_min_severity` posts inline comments only at or above a

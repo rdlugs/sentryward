@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { env } from "../config/env.ts";
 import type {
+  NotificationDelivery,
   NotificationEvent,
   NotificationTarget,
   ReviewJob,
@@ -141,6 +142,13 @@ export function newWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
 
+// A delivery the far end answered with a non-2xx status.
+export class DeliveryError extends Error {
+  constructor(readonly httpStatus: number) {
+    super(`Responded with ${httpStatus}`);
+  }
+}
+
 // Checked on every delivery, not only when saved, since the name can resolve
 // elsewhere later. Redirects are not followed, so one cannot lead past the check.
 async function post(url: string, body: string, headers: Record<string, string> = {}): Promise<void> {
@@ -153,7 +161,7 @@ async function post(url: string, body: string, headers: Record<string, string> =
     signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
   });
   if (!res.ok) {
-    throw new Error(`Responded with ${res.status}`);
+    throw new DeliveryError(res.status);
   }
 }
 
@@ -197,7 +205,85 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
 }
 
 function message(err: unknown): string {
+  if (err instanceof DecryptError) return "The stored URL can't be decrypted; add the target again";
   return err instanceof Error ? err.message : String(err);
+}
+
+const STORED_ERROR_LIMIT = 500;
+
+// Members can read stored errors, and the URL (or its query) may be the
+// credential, so it is cut out of whatever a library put in the message
+// before anything is stored. Nothing we throw names the URL today; this keeps
+// it that way if a dependency starts to.
+export function redactError(error: string, url: string | null): string {
+  let text = error;
+  if (url) {
+    const forms = new Set([url]);
+    try {
+      const parsed = new URL(url);
+      forms.add(parsed.href);
+      forms.add(`${parsed.origin}${parsed.pathname}`);
+      if (parsed.pathname.length > 1) forms.add(parsed.pathname);
+      if (parsed.search) forms.add(parsed.search.slice(1));
+    } catch {
+      // Not a URL we can take apart; the raw string is still removed.
+    }
+    // Longest first, so a shorter form never leaves the tail of a longer one.
+    for (const form of [...forms].sort((a, b) => b.length - a.length)) {
+      text = text.split(form).join("[redacted]");
+    }
+  }
+  text = oneLine(text) || "Unknown error";
+  return text.length > STORED_ERROR_LIMIT ? `${text.slice(0, STORED_ERROR_LIMIT - 1)}…` : text;
+}
+
+function storedUrl(target: NotificationTarget): string | null {
+  if (!target.encryptedUrl) return null;
+  try {
+    return decrypt(target.encryptedUrl);
+  } catch {
+    return null;
+  }
+}
+
+export type DeliveryOutcome = { ok: true } | { ok: false; error: string };
+
+// Delivers and records the outcome. Recording is best effort: a row that cannot
+// be written is logged and the outcome still returned, so neither a review nor
+// a test answer ever depends on the log.
+async function attempt(
+  target: NotificationTarget,
+  workspaceId: string,
+  payload: NotificationPayload,
+  jobId: string | null,
+): Promise<DeliveryOutcome> {
+  const createdAt = new Date();
+  let outcome: DeliveryOutcome;
+  let httpStatus: number | null = null;
+  try {
+    await deliver(target, workspaceId, payload);
+    outcome = { ok: true };
+  } catch (err) {
+    if (err instanceof DeliveryError) httpStatus = err.httpStatus;
+    outcome = { ok: false, error: redactError(message(err), storedUrl(target)) };
+  }
+  try {
+    await prisma.notificationDelivery.create({
+      data: {
+        targetId: target.id,
+        jobId,
+        event: payload.event,
+        status: outcome.ok ? "sent" : "failed",
+        httpStatus,
+        error: outcome.ok ? null : outcome.error,
+        createdAt,
+        finishedAt: new Date(),
+      },
+    });
+  } catch (err) {
+    console.error(`[notify] could not record a delivery to target ${target.id}`, err);
+  }
+  return outcome;
 }
 
 // Best effort and at most once per job: called when a job reaches its final
@@ -225,10 +311,9 @@ export async function notifyJob(jobId: string): Promise<void> {
     await Promise.all(
       targets.map(async (target) => {
         const event = eventForTarget(events, target)!;
-        try {
-          await deliver(target, workspaceId, payloadFor(job, job.repository, event));
-        } catch (err) {
-          console.error(`[notify] target ${target.id} job ${jobId}: ${message(err)}`);
+        const outcome = await attempt(target, workspaceId, payloadFor(job, job.repository, event), job.id);
+        if (!outcome.ok) {
+          console.error(`[notify] target ${target.id} job ${jobId}: ${outcome.error}`);
         }
       }),
     );
@@ -238,7 +323,7 @@ export async function notifyJob(jobId: string): Promise<void> {
 }
 
 // A sample delivery from the dashboard; the outcome is the answer either way.
-export async function testTarget(target: NotificationTarget): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function testTarget(target: NotificationTarget): Promise<DeliveryOutcome> {
   const sample: NotificationPayload = {
     event: "test",
     review: {
@@ -252,17 +337,28 @@ export async function testTarget(target: NotificationTarget): Promise<{ ok: true
     change: { number: 1, title: "Test notification from Sentryward", url: null },
     findings: { total: 0, bySeverity: {} },
   };
-  try {
-    await deliver(target, target.workspaceId, sample);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof DecryptError ? "The stored URL can't be decrypted; add the target again" : message(err) };
-  }
+  return attempt(target, target.workspaceId, sample, null);
+}
+
+export type LastDelivery = Pick<NotificationDelivery, "status" | "event" | "httpStatus" | "error" | "createdAt">;
+
+export function publicDelivery(delivery: NotificationDelivery) {
+  return {
+    id: delivery.id,
+    event: delivery.event,
+    status: delivery.status,
+    httpStatus: delivery.httpStatus,
+    error: delivery.error,
+    attempts: delivery.attempts,
+    jobId: delivery.jobId,
+    createdAt: delivery.createdAt,
+    finishedAt: delivery.finishedAt,
+  };
 }
 
 // Only the host of a URL ever leaves the server: the full Slack URL is the
 // credential, and a webhook URL may carry one in its query.
-export function publicTarget(target: NotificationTarget) {
+export function publicTarget(target: NotificationTarget, lastDelivery: LastDelivery | null = null) {
   let host: string | null = null;
   let undecryptable = false;
   if (target.encryptedUrl) {
@@ -282,6 +378,13 @@ export function publicTarget(target: NotificationTarget) {
     undecryptable,
     recipientIds: target.recipientIds,
     active: target.active,
+    lastDelivery: lastDelivery && {
+      status: lastDelivery.status,
+      event: lastDelivery.event,
+      httpStatus: lastDelivery.httpStatus,
+      error: lastDelivery.error,
+      createdAt: lastDelivery.createdAt,
+    },
     createdAt: target.createdAt,
     updatedAt: target.updatedAt,
   };

@@ -199,6 +199,27 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
 export interface RetentionResult extends PruneResult, PurgeResult {
   auditRows: number;
   oauthStates: number;
+  deliveries: number;
+}
+
+// The delivery log answers "is this target working", so recent rows are all it
+// needs; a fixed window keeps a busy target from growing it without bound.
+export const DELIVERY_RETENTION_DAYS = 30;
+export const DELIVERIES_PER_TARGET = 100;
+
+export async function pruneDeliveries({ now = new Date() }: { now?: Date } = {}): Promise<number> {
+  const cutoff = new Date(now.getTime() - DELIVERY_RETENTION_DAYS * DAY_MS);
+  const old = await prisma.notificationDelivery.deleteMany({ where: { createdAt: { lt: cutoff } } });
+  const surplus = await prisma.$executeRaw`
+    DELETE FROM notification_deliveries WHERE id IN (
+      SELECT id FROM (
+        SELECT id, row_number() OVER (PARTITION BY target_id ORDER BY created_at DESC, id DESC) AS rank
+        FROM notification_deliveries
+      ) ranked
+      WHERE rank > ${DELIVERIES_PER_TARGET}
+    )
+  `;
+  return old.count + surplus;
 }
 
 // One retention pass: each workspace by its effective period (the shorter of
@@ -225,6 +246,7 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     replies: 0,
     auditRows: 0,
     oauthStates: 0,
+    deliveries: 0,
   };
   for (const [days, workspaceIds] of byDays) {
     const pruned = await pruneReviews(days, { now, workspaceIds });
@@ -254,5 +276,6 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
   const expired = { expiresAt: { lt: now } };
   result.oauthStates += (await prisma.signInState.deleteMany({ where: expired })).count;
   result.oauthStates += (await prisma.oAuthState.deleteMany({ where: expired })).count;
+  result.deliveries = await pruneDeliveries({ now });
   return result;
 }

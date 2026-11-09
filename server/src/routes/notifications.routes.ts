@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   createNotification,
   deleteNotification,
+  listDeliveries,
   listNotifications,
   testNotification,
   updateNotification,
@@ -16,6 +17,7 @@ export const notificationsRouter = Router();
 
 notificationsRouter.use(userLimiter, requireAuth, requireWorkspace);
 notificationsRouter.get("/", listNotifications);
+notificationsRouter.get("/:id/deliveries", listDeliveries);
 notificationsRouter.post("/", requireWorkspaceRole("admin"), createNotification);
 notificationsRouter.patch("/:id", requireWorkspaceRole("admin"), updateNotification);
 notificationsRouter.post("/:id/test", requireWorkspaceRole("admin"), testNotification);

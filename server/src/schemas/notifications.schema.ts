@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { pageSchema } from "./pagination.ts";
 
 const NOTIFICATION_EVENTS = ["blocked", "failed", "completed"] as const;
 
@@ -35,3 +36,8 @@ export const updateNotificationSchema = z
   });
 
 export const notificationParamsSchema = z.object({ id: z.uuid() });
+
+export const deliveriesQuerySchema = z.object({
+  page: pageSchema,
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});

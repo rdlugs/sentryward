@@ -6,10 +6,11 @@ import { mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
 import {
   createNotificationSchema,
+  deliveriesQuerySchema,
   notificationParamsSchema,
   updateNotificationSchema,
 } from "../schemas/notifications.schema.ts";
-import { newWebhookSecret, publicTarget, testTarget } from "../services/notifications.ts";
+import { newWebhookSecret, publicDelivery, publicTarget, testTarget } from "../services/notifications.ts";
 
 async function loadTarget(req: Request) {
   const { id } = notificationParamsSchema.parse(req.params);
@@ -33,9 +34,31 @@ export async function listNotifications(req: Request, res: Response) {
   const targets = await prisma.notificationTarget.findMany({
     where: { workspaceId: req.workspaceId },
     orderBy: { createdAt: "asc" },
+    include: { deliveries: { orderBy: { createdAt: "desc" }, take: 1 } },
   });
   // Lets the dashboard explain why email targets cannot be added.
-  res.json({ targets: targets.map(publicTarget), mailConfigured: mailer.configured() });
+  res.json({
+    targets: targets.map(({ deliveries, ...target }) => publicTarget(target, deliveries[0] ?? null)),
+    mailConfigured: mailer.configured(),
+  });
+}
+
+// Newest first. Members can read it like the list: stored errors never carry
+// the target URL.
+export async function listDeliveries(req: Request, res: Response) {
+  const target = await loadTarget(req);
+  const { page, limit } = deliveriesQuerySchema.parse(req.query);
+  const where = { targetId: target.id };
+  const [deliveries, total] = await prisma.$transaction([
+    prisma.notificationDelivery.findMany({
+      where,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.notificationDelivery.count({ where }),
+  ]);
+  res.json({ deliveries: deliveries.map(publicDelivery), total, page, limit });
 }
 
 // A webhook's signing secret is in this response only; the dashboard never

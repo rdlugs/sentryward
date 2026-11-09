@@ -63,11 +63,11 @@ async function prune(): Promise<void> {
   // retrying every poll.
   lastPruneAt = Date.now();
   const r = await runRetention();
-  if (r.deleted || r.trimmed || r.changes || r.auditRows) {
+  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries) {
     console.log(
       `[worker] retention: deleted ${r.deleted} job(s), expired ${r.trimmed} result(s), ` +
         `purged ${r.changes} change(s) (${r.findings} finding(s), ${r.replies} reply(ies)), ` +
-        `${r.auditRows} audit row(s)`,
+        `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies)`,
     );
   }
 }
