@@ -83,6 +83,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - The paginated list endpoints (reviews, findings, usage, privacy and admin)
   answer `400 Validation failed` instead of `500 Internal server error` when
   `page` is above 1000000.
+- Day counts read "1 day" instead of "1 days" (#271): the retention policy
+  summary, the hints and instance-limit error in the privacy settings
+  (including the error the API returns), and the "last N days" periods on the
+  home page, the reviews and findings stats, the false positive breakdown and
+  the confidence calibration.
 
 ### Security
 

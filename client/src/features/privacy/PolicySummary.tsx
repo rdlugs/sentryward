@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { Badge } from "@/components/ui/badge"
 import { LLM_PROVIDERS } from "@/features/llm-connections/providers"
+import { plural } from "@/lib/plural"
 import type { WorkspacePrivacy } from "./api"
 
 // An empty list allows everything. Saving checks that a workspace list stays
@@ -71,7 +72,7 @@ export function PolicySummary({ data }: { data: WorkspacePrivacy }) {
         <span>{effective.localOnly ? "On" : "Off"}</span>
       </Row>
       <Row label="Review data kept" byInstance={retentionByInstance}>
-        <span>{effective.retentionDays === null ? "Forever" : `${effective.retentionDays} days`}</span>
+        <span>{effective.retentionDays === null ? "Forever" : plural(effective.retentionDays, "day")}</span>
       </Row>
     </dl>
   )

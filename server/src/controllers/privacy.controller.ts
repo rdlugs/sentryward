@@ -129,7 +129,8 @@ export async function updateWorkspacePrivacy(req: Request, res: Response) {
     if (outside.length) errors.allowedHosts = [`Not allowed on this instance: ${outside.join(", ")}`];
   }
   if (instance.retentionDays !== null && data.retentionDays !== null && data.retentionDays > instance.retentionDays) {
-    errors.retentionDays = [`Must be at most ${instance.retentionDays} days (the instance limit)`];
+    const days = instance.retentionDays === 1 ? "1 day" : `${instance.retentionDays} days`;
+    errors.retentionDays = [`Must be at most ${days} (the instance limit)`];
   }
   if (Object.keys(errors).length) throw new HttpError(400, "Validation failed", errors);
 

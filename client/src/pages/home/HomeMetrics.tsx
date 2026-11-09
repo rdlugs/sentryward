@@ -5,6 +5,7 @@ import { useReviewStats } from "@/features/reviews/api"
 import { costUnknown, formatCost } from "@/features/reviews/cost"
 import { Stat } from "@/features/reviews/ReviewStatsStrip"
 import { useUsage } from "@/features/usage/api"
+import { plural } from "@/lib/plural"
 
 const detail = "ml-2 text-xs font-normal text-muted-foreground"
 const tileSkeleton = <Skeleton className="h-24 w-full rounded-xl" />
@@ -18,7 +19,7 @@ export function HomeMetrics() {
   const usage = useUsage("30d")
 
   // The server's default window; only needed before the stats arrive.
-  const period = `last ${reviews.data?.days ?? 7} days`
+  const period = `last ${plural(reviews.data?.days ?? 7, "day")}`
   const open = findings.data?.openBySeverity
 
   return (

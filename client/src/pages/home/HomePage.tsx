@@ -8,6 +8,7 @@ import { useGlobalConfig } from "@/features/config/api"
 import { useConnections } from "@/features/forge/api"
 import { useReviews } from "@/features/reviews/api"
 import { useStartManualReview } from "@/features/reviews/useStartManualReview"
+import { plural } from "@/lib/plural"
 import { ConnectionsPanel } from "./ConnectionsPanel"
 import { HomeMetrics } from "./HomeMetrics"
 import { RecentReviewsTimeline } from "./RecentReviewsTimeline"
@@ -55,10 +56,6 @@ function ActionText({ title, text }: { title: string; text: string }) {
       <span className="text-sm text-muted-foreground">{text}</span>
     </span>
   )
-}
-
-function plural(count: number, noun: string, nouns = `${noun}s`) {
-  return `${count} ${count === 1 ? noun : nouns}`
 }
 
 function capitalize(text: string) {

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { PROVIDERS } from "@/features/forge/providers"
 import { copyToClipboard } from "@/lib/clipboard"
+import { plural } from "@/lib/plural"
 import { formatDuration, timeAgo } from "@/lib/time"
 import { TriggerIcon } from "../badges"
 import { costUnknown, formatCost } from "../cost"
@@ -42,10 +43,6 @@ function dropReasonText(reason: string) {
   if (Object.hasOwn(DROP_REASON_TEXT, reason)) return DROP_REASON_TEXT[reason as DropReason]
   const words = reason.replace(/_/g, " ").trim()
   return words ? words[0].toUpperCase() + words.slice(1) : reason
-}
-
-function plural(count: number, word: string) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`
 }
 
 // One line on what reached the forge, so nobody has to go and check.

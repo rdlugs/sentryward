@@ -161,6 +161,19 @@ describe("workspace privacy", () => {
     expect(await prisma.workspacePrivacy.count()).toBe(0);
   });
 
+  it("names a one-day instance limit in the singular", async () => {
+    await prisma.instanceSettings.create({ data: { id: 1, retentionDays: 1 } });
+
+    const res = await request(app)
+      .put("/api/privacy")
+      .set("Cookie", owner.cookie)
+      .set(...inWorkspace(teamId))
+      .send({ ...OPEN, retentionDays: 5 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual({ retentionDays: ["Must be at most 1 day (the instance limit)"] });
+  });
+
   it("works in a personal workspace", async () => {
     const res = await request(app)
       .put("/api/privacy")

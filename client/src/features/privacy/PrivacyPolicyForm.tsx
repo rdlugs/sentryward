@@ -28,6 +28,7 @@ import { applyServerErrors } from "@/features/auth/applyServerErrors"
 import { saveBarClass } from "@/features/config/saveBarClass"
 import { useUnsavedChanges } from "@/hooks/use-unsaved-changes"
 import { LLM_PROVIDERS } from "@/features/llm-connections/providers"
+import { plural } from "@/lib/plural"
 import { PROVIDER_OPTIONS, type InstanceSettings, type PolicyLayer } from "./api"
 
 // Days are typed as text so an empty box can mean "no limit".
@@ -168,7 +169,7 @@ export function PrivacyPolicyForm(props: {
     const retentionDays = toDays(values.retentionDays)
     // Caught here so the field shows it without a round trip; the server checks too.
     if (instanceRetention !== null && retentionDays !== null && retentionDays > instanceRetention) {
-      form.setError("retentionDays", { message: `Must be at most ${instanceRetention} days (the instance limit)` })
+      form.setError("retentionDays", { message: `Must be at most ${plural(instanceRetention, "day")} (the instance limit)` })
       return
     }
     try {
@@ -189,10 +190,10 @@ export function PrivacyPolicyForm(props: {
   const retentionHint =
     scope === "instance"
       ? props.envRetentionDays
-        ? `Empty uses REVIEW_RETENTION_DAYS from the server environment (${props.envRetentionDays} days).`
+        ? `Empty uses REVIEW_RETENTION_DAYS from the server environment (${plural(props.envRetentionDays, "day")}).`
         : "Empty keeps review data forever."
       : instanceRetention
-        ? `Empty follows the instance (${instanceRetention} days); a value can only be shorter.`
+        ? `Empty follows the instance (${plural(instanceRetention, "day")}); a value can only be shorter.`
         : "Empty keeps review data forever."
 
   const dirty = form.formState.isDirty

@@ -5,6 +5,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { plural } from "@/lib/plural"
 import { useFindingCalibration } from "./api"
 import { CATEGORY_LABEL } from "./options"
 import type { CalibrationBucket, CalibrationGroupBy, FindingCategory } from "./types"
@@ -69,7 +70,7 @@ export function ConfidenceCalibration({ repoId, repoName }: { repoId?: string; r
         <CardTitle>How self-reported confidence holds up</CardTitle>
         <CardDescription>
           Confidence is self-reported by the model; this table shows how it has matched outcomes for findings first
-          seen in the last {data?.days ?? 30} days{repoName ? ` in ${repoName}` : ""}. Not re-reported means a later run
+          seen in the last {plural(data?.days ?? 30, "day")}{repoName ? ` in ${repoName}` : ""}. Not re-reported means a later run
           that read the file stopped reporting it, so it is an upper bound on how many were real. Rates are over findings
           that were not re-reported or dismissed as false positives; muted rows have fewer than {MIN_DECIDED} of those.
         </CardDescription>

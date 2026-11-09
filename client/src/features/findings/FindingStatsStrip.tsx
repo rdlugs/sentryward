@@ -3,6 +3,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { SeverityBadge } from "@/features/reviews/badges"
 import { Stat } from "@/features/reviews/ReviewStatsStrip"
 import { SEVERITIES } from "@/features/reviews/types"
+import { plural } from "@/lib/plural"
 import { formatDuration } from "@/lib/time"
 import { useFindingStats } from "./api"
 
@@ -15,7 +16,7 @@ export function FindingStatsStrip() {
   if (isError) return null
   if (isPending) return <Skeleton className="h-24 w-full" />
 
-  const period = `last ${data.days} days`
+  const period = `last ${plural(data.days, "day")}`
 
   return (
     <section aria-label="Finding stats" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -31,7 +32,7 @@ export function FindingStatsStrip() {
         </div>
         {data.staleOpen > 0 && (
           <div className={`pt-1 ${detail}`}>
-            {data.staleOpen} older than {data.days} days
+            {data.staleOpen} older than {plural(data.days, "day")}
           </div>
         )}
       </Stat>

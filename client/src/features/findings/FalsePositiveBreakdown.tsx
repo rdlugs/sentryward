@@ -7,6 +7,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { SeverityBadge } from "@/features/reviews/badges"
+import { plural } from "@/lib/plural"
 import { cn } from "@/lib/utils"
 import { useFindingStats } from "./api"
 import { CATEGORY_LABEL } from "./options"
@@ -133,7 +134,7 @@ export function FalsePositiveBreakdown({ repoId, repoName }: FalsePositiveBreakd
           </EmptyMedia>
           <EmptyTitle>No findings yet</EmptyTitle>
           <EmptyDescription>
-            No findings were first seen in the last {data.days} days{repoName ? ` in ${repoName}` : ""}, so there is
+            No findings were first seen in the last {plural(data.days, "day")}{repoName ? ` in ${repoName}` : ""}, so there is
             nothing to break down.
           </EmptyDescription>
         </EmptyHeader>
@@ -146,7 +147,7 @@ export function FalsePositiveBreakdown({ repoId, repoName }: FalsePositiveBreakd
       <CardHeader>
         <CardTitle>Where false positives come from</CardTitle>
         <CardDescription>
-          Findings first seen in the last {data.days} days{repoName ? ` in ${repoName}` : ""}, ignored ones included.
+          Findings first seen in the last {plural(data.days, "day")}{repoName ? ` in ${repoName}` : ""}, ignored ones included.
         </CardDescription>
       </CardHeader>
       {/* The rule table only appears for repositories with rules, so the grid makes room for it then. */}

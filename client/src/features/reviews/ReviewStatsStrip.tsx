@@ -3,6 +3,7 @@ import { Link } from "react-router"
 import { CircleX, Coins, GitPullRequest, ShieldX, Timer, type LucideIcon } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
+import { plural } from "@/lib/plural"
 import { formatDuration } from "@/lib/time"
 import { USAGE_PERIODS, type UsagePeriod } from "@/features/usage/types"
 import { useReviewStats } from "./api"
@@ -51,7 +52,7 @@ export function ReviewStatsStrip() {
 
   const finished = data.blocked + data.passed
   const blockedRate = finished ? Math.round((data.blocked / finished) * 100) : 0
-  const period = `last ${data.days} days`
+  const period = `last ${plural(data.days, "day")}`
   const { median, max } = data.duration
   const { tokens, cost } = data
   // The Usage page opens on the same window when it offers one.
