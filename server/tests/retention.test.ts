@@ -4,6 +4,7 @@ import type { ReviewStatus } from "../src/generated/prisma/client.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import {
   DELIVERIES_PER_TARGET,
+  pruneDeliveries,
   pruneReviews,
   purgeStaleChanges,
   runRetention,
@@ -354,6 +355,47 @@ describe("runRetention", () => {
     expect(await prisma.notificationDelivery.findMany({ where: { targetId: quiet.id } })).toMatchObject([
       { createdAt: RECENT },
     ]);
+  });
+
+  it("keeps a workspace's deliveries no longer than its privacy retention", async () => {
+    const other = await otherRepo();
+    await prisma.workspacePrivacy.create({ data: { workspaceId: other.workspaceId, retentionDays: 3 } });
+    const mine = await prisma.notificationTarget.create({ data: { workspaceId, kind: "slack", name: "mine", events: ["failed"] } });
+    const theirs = await prisma.notificationTarget.create({
+      data: { workspaceId: other.workspaceId, kind: "slack", name: "theirs", events: ["failed"] },
+    });
+    // 12 days old: past the other workspace's 3, inside the default 30.
+    await prisma.notificationDelivery.createMany({
+      data: [mine.id, theirs.id].map((targetId) => ({
+        targetId,
+        event: "failed",
+        status: "sent" as const,
+        createdAt: RECENT,
+        finishedAt: RECENT,
+      })),
+    });
+
+    const result = await runRetention({ now: NOW });
+
+    expect(result.deliveries).toBe(1);
+    expect(await prisma.notificationDelivery.count({ where: { targetId: mine.id } })).toBe(1);
+    expect(await prisma.notificationDelivery.count({ where: { targetId: theirs.id } })).toBe(0);
+  });
+
+  it("prunes deliveries in batches", async () => {
+    const target = await prisma.notificationTarget.create({ data: { workspaceId, kind: "slack", name: "t", events: ["failed"] } });
+    const row = (createdAt: Date) => ({ targetId: target.id, event: "failed", status: "sent" as const, createdAt, finishedAt: createdAt });
+    await prisma.notificationDelivery.createMany({
+      data: [
+        ...Array.from({ length: 7 }, () => row(OLD)),
+        ...Array.from({ length: DELIVERIES_PER_TARGET + 7 }, (_, i) => row(new Date(RECENT.getTime() + i * 1000))),
+      ],
+    });
+
+    const deleted = await pruneDeliveries(30, { now: NOW, batchSize: 3 });
+
+    expect(deleted).toBe(14);
+    expect(await prisma.notificationDelivery.count()).toBe(DELIVERIES_PER_TARGET);
   });
 
   it("purges audit rows past the instance's audit period", async () => {

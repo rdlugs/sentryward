@@ -305,7 +305,7 @@ describe("Notifications", () => {
               status: "failed",
               event: "test",
               httpStatus: 503,
-              error: "Responded with 503",
+              error: null,
               createdAt: minutesAgo(60),
             },
           },

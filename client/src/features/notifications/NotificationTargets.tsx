@@ -582,7 +582,7 @@ function DeliveriesSheet({
                             <OutcomeDot status={delivery.status} />
                             {deliveryOutcome(delivery)}
                           </span>
-                          {delivery.error && delivery.error !== `Responded with ${delivery.httpStatus}` && (
+                          {delivery.error && (
                             <span className="text-xs break-words text-muted-foreground">{delivery.error}</span>
                           )}
                         </div>

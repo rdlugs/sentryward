@@ -4,6 +4,7 @@ import type {
   NotificationDelivery,
   NotificationEvent,
   NotificationTarget,
+  Prisma,
   ReviewJob,
   ReviewStatus,
 } from "../generated/prisma/client.ts";
@@ -193,6 +194,9 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
         where: { workspaceId, userId: { in: target.recipientIds } },
         select: { user: { select: { email: true } } },
       });
+      // Sending to nobody is not a success: the log would show a dead target
+      // as healthy.
+      if (!members.length) throw new Error("None of this target's recipients are members of the workspace any more");
       const subject = describe(payload);
       const text = `${subject}\n\n${payload.review.url}\n`;
       // One message each, so recipients do not see each other's addresses.
@@ -210,6 +214,7 @@ function message(err: unknown): string {
 }
 
 const STORED_ERROR_LIMIT = 500;
+const MIN_REDACTED_PART = 8;
 
 // Members can read stored errors, and the URL (or its query) may be the
 // credential, so it is cut out of whatever a library put in the message
@@ -219,14 +224,49 @@ export function redactError(error: string, url: string | null): string {
   let text = error;
   if (url) {
     const forms = new Set([url]);
+    // Pieces of the URL, any of which may be the credential on its own. Short
+    // ones are skipped so a word like "in" is not cut out of every message.
+    const parts = new Set<string>();
+    const decoded = (value: string) => {
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    };
     try {
       const parsed = new URL(url);
       forms.add(parsed.href);
       forms.add(`${parsed.origin}${parsed.pathname}`);
-      if (parsed.pathname.length > 1) forms.add(parsed.pathname);
-      if (parsed.search) forms.add(parsed.search.slice(1));
+      if (parsed.pathname.length > 1) {
+        parts.add(parsed.pathname);
+        parts.add(decoded(parsed.pathname));
+        for (const segment of parsed.pathname.split("/")) {
+          parts.add(segment);
+          parts.add(decoded(segment));
+        }
+      }
+      if (parsed.search) {
+        parts.add(parsed.search.slice(1));
+        parts.add(decoded(parsed.search.slice(1)));
+        for (const raw of parsed.search.slice(1).split("&")) {
+          parts.add(raw);
+          parts.add(raw.slice(raw.indexOf("=") + 1));
+        }
+        for (const [key, value] of parsed.searchParams) {
+          parts.add(`${key}=${value}`);
+          parts.add(value);
+        }
+      }
+      if (parsed.hash) parts.add(parsed.hash.slice(1));
+      parts.add(decoded(parsed.username));
+      parts.add(decoded(parsed.password));
+      if (parsed.password) parts.add(`${parsed.username}:${parsed.password}`);
     } catch {
       // Not a URL we can take apart; the raw string is still removed.
+    }
+    for (const part of parts) {
+      if (part.length >= MIN_REDACTED_PART) forms.add(part);
     }
     // Longest first, so a shorter form never leaves the tail of a longer one.
     for (const form of [...forms].sort((a, b) => b.length - a.length)) {
@@ -237,10 +277,10 @@ export function redactError(error: string, url: string | null): string {
   return text.length > STORED_ERROR_LIMIT ? `${text.slice(0, STORED_ERROR_LIMIT - 1)}…` : text;
 }
 
+// The URL to redact, or null when there is none or it cannot be read.
 function storedUrl(target: NotificationTarget): string | null {
-  if (!target.encryptedUrl) return null;
   try {
-    return decrypt(target.encryptedUrl);
+    return targetUrl(target);
   } catch {
     return null;
   }
@@ -275,7 +315,9 @@ async function attempt(
         event: payload.event,
         status: outcome.ok ? "sent" : "failed",
         httpStatus,
-        error: outcome.ok ? null : outcome.error,
+        // An HTTP failure is fully described by its status; the message is
+        // only stored when there is no status to show.
+        error: outcome.ok || httpStatus !== null ? null : outcome.error,
         createdAt,
         finishedAt: new Date(),
       },
@@ -341,6 +383,37 @@ export async function testTarget(target: NotificationTarget): Promise<DeliveryOu
 }
 
 export type LastDelivery = Pick<NotificationDelivery, "status" | "event" | "httpStatus" | "error" | "createdAt">;
+
+// Newest first by when the attempt started (rows are stamped before sending),
+// with the id breaking ties. lastDeliveries uses the same order, so a target's
+// Last delivery is always the top row of its history.
+export const DELIVERY_ORDER = [{ createdAt: "desc" }, { id: "desc" }] satisfies Prisma.NotificationDeliveryOrderByWithRelationInput[];
+
+// Each target's newest delivery in one query, one row read per target.
+export async function lastDeliveries(targetIds: string[]): Promise<Map<string, LastDelivery>> {
+  if (!targetIds.length) return new Map();
+  const rows = await prisma.$queryRaw<
+    {
+      target_id: string;
+      status: LastDelivery["status"];
+      event: string;
+      http_status: number | null;
+      error: string | null;
+      created_at: Date;
+    }[]
+  >`
+    SELECT DISTINCT ON (target_id) target_id, status, event, http_status, error, created_at
+    FROM notification_deliveries
+    WHERE target_id = ANY(${targetIds}::uuid[])
+    ORDER BY target_id, created_at DESC, id DESC
+  `;
+  return new Map(
+    rows.map((row) => [
+      row.target_id,
+      { status: row.status, event: row.event, httpStatus: row.http_status, error: row.error, createdAt: row.created_at },
+    ]),
+  );
+}
 
 export function publicDelivery(delivery: NotificationDelivery) {
   return {

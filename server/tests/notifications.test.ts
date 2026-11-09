@@ -406,7 +406,8 @@ describe("delivery log", () => {
       event: "completed",
       status: "failed",
       httpStatus: 503,
-      error: "Responded with 503",
+      // The status says it all; only failures without one store a message.
+      error: null,
     });
   });
 
@@ -443,6 +444,44 @@ describe("delivery log", () => {
     const [row] = await deliveries();
     expect(row!.error).not.toMatch(/secret-token|hush/);
     expect(row!.error).toBe("request to [redacted] failed; path [redacted] [redacted]");
+  });
+
+  it("records an email target with no remaining members as failed", async () => {
+    vi.spyOn(mailer, "configured").mockReturnValue(true);
+    const send = vi.spyOn(mailer, "send").mockResolvedValue();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { user: gone } = await createUser("gone@example.com");
+    await prisma.notificationTarget.create({
+      data: { workspaceId, kind: "email", name: "Leads", events: ["failed"], recipientIds: [gone.id] },
+    });
+    const job = await finishedJob("failed", "error", "boom");
+
+    await notifyJob(job.id);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await deliveries()).toMatchObject([
+      {
+        status: "failed",
+        httpStatus: null,
+        error: "None of this target's recipients are members of the workspace any more",
+      },
+    ]);
+  });
+
+  it("redacts pieces of the URL that appear on their own", () => {
+    const url = "https://bot:hunter22pass@hooks.example.com/api/webhooks/123/tok3nSecretValue?token=abc12345xyz&mode=x";
+    const error = [
+      "token=abc12345xyz",
+      "abc12345xyz",
+      "hunter22pass",
+      "bot:hunter22pass",
+      "tok3nSecretValue",
+      "mode=x",
+    ].join(" | ");
+    expect(redactError(error, url)).toBe("[redacted] | [redacted] | [redacted] | [redacted] | [redacted] | mode=x");
+
+    const encoded = "https://hooks.example.com/in?sig=a%2Fb%2Bc%3Dd123";
+    expect(redactError("bad signature a/b+c=d123", encoded)).toBe("bad signature [redacted]");
   });
 
   it("flattens and clips stored errors", () => {
@@ -486,7 +525,7 @@ describe("delivery log", () => {
       data: { ...base, status: "sent", createdAt: new Date("2026-11-01T00:00:00Z") },
     });
     await prisma.notificationDelivery.create({
-      data: { ...base, status: "failed", httpStatus: 503, error: "Responded with 503", createdAt: new Date("2026-11-02T00:00:00Z") },
+      data: { ...base, status: "failed", httpStatus: 503, createdAt: new Date("2026-11-02T00:00:00Z") },
     });
 
     const res = await request(app).get("/api/notifications").set("Cookie", cookie);
@@ -496,10 +535,36 @@ describe("delivery log", () => {
       status: "failed",
       event: "failed",
       httpStatus: 503,
-      error: "Responded with 503",
+      error: null,
       createdAt: "2026-11-02T00:00:00.000Z",
     });
     expect(byId[quiet.id].lastDelivery).toBeNull();
+  });
+
+  it("agrees with the history on the newest delivery when two share a start time", async () => {
+    const hook = await target("webhook", ["failed"]);
+    const createdAt = new Date("2026-11-02T00:00:00Z");
+    for (const status of ["sent", "failed"] as const) {
+      await prisma.notificationDelivery.create({
+        data: { targetId: hook.id, event: "failed", status, createdAt, finishedAt: createdAt },
+      });
+    }
+
+    const list = await request(app).get("/api/notifications").set("Cookie", cookie);
+    const history = await request(app).get(`/api/notifications/${hook.id}/deliveries`).set("Cookie", cookie);
+
+    expect(list.body.targets[0].lastDelivery.status).toBe(history.body.deliveries[0].status);
+  });
+
+  it("returns the last delivery from PATCH", async () => {
+    const hook = await target("webhook", ["failed"]);
+    await prisma.notificationDelivery.create({
+      data: { targetId: hook.id, event: "test", status: "sent", createdAt: new Date("2026-11-02T00:00:00Z"), finishedAt: new Date() },
+    });
+
+    const res = await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ active: false });
+
+    expect(res.body.target.lastDelivery).toMatchObject({ status: "sent", event: "test", createdAt: "2026-11-02T00:00:00.000Z" });
   });
 
   it("pages a target's history newest first, for members too, within the workspace", async () => {

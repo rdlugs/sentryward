@@ -941,7 +941,9 @@ There are three kinds:
 outcome. Deliveries are best effort: the worker sends them once a review reaches
 its final status, a failed delivery is logged (`[notify] ...`) and never changes
 the review, and nothing is retried. URLs are stored encrypted, and only their
-host is ever shown again.
+host is ever shown again. In production a URL must be https and resolve only to
+public addresses, the same rule as self-hosted forge hosts, checked when the
+target is saved and again before each delivery; redirects are not followed.
 
 **Delivery log.** Every delivery, tests included, is recorded with its event,
 outcome (`sent` or `failed`), the HTTP status a failing endpoint answered with
@@ -950,10 +952,9 @@ shows each target's latest one (for example "Sent · 4 minutes ago" or
 "Failed · 503 · 1 hour ago", or "Never"), and **View deliveries** in a target's
 menu opens its history, linking each delivery to its review. Admins and members
 can both read it. Stored errors have the target URL cut out first, since the URL
-can be the credential. The worker's retention pass keeps the last 30 days, and
-at most the 100 newest deliveries per target; removing a target removes its log. In production a URL must be https and resolve only to
-public addresses, the same rule as self-hosted forge hosts, checked when the
-target is saved and again before each delivery; redirects are not followed.
+can be the credential. The worker's retention pass keeps the last 30 days (or
+the workspace's privacy retention, when that is shorter), and at most the 100
+newest deliveries per target; removing a target removes its log.
 
 ## Review configuration
 

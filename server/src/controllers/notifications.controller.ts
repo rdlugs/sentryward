@@ -10,7 +10,14 @@ import {
   notificationParamsSchema,
   updateNotificationSchema,
 } from "../schemas/notifications.schema.ts";
-import { newWebhookSecret, publicDelivery, publicTarget, testTarget } from "../services/notifications.ts";
+import {
+  DELIVERY_ORDER,
+  lastDeliveries,
+  newWebhookSecret,
+  publicDelivery,
+  publicTarget,
+  testTarget,
+} from "../services/notifications.ts";
 
 async function loadTarget(req: Request) {
   const { id } = notificationParamsSchema.parse(req.params);
@@ -34,11 +41,11 @@ export async function listNotifications(req: Request, res: Response) {
   const targets = await prisma.notificationTarget.findMany({
     where: { workspaceId: req.workspaceId },
     orderBy: { createdAt: "asc" },
-    include: { deliveries: { orderBy: { createdAt: "desc" }, take: 1 } },
   });
+  const last = await lastDeliveries(targets.map((target) => target.id));
   // Lets the dashboard explain why email targets cannot be added.
   res.json({
-    targets: targets.map(({ deliveries, ...target }) => publicTarget(target, deliveries[0] ?? null)),
+    targets: targets.map((target) => publicTarget(target, last.get(target.id) ?? null)),
     mailConfigured: mailer.configured(),
   });
 }
@@ -52,7 +59,7 @@ export async function listDeliveries(req: Request, res: Response) {
   const [deliveries, total] = await prisma.$transaction([
     prisma.notificationDelivery.findMany({
       where,
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      orderBy: DELIVERY_ORDER,
       skip: (page - 1) * limit,
       take: limit,
     }),
@@ -62,7 +69,8 @@ export async function listDeliveries(req: Request, res: Response) {
 }
 
 // A webhook's signing secret is in this response only; the dashboard never
-// shows it again.
+// shows it again. A new target has never delivered, so its lastDelivery is
+// null without a lookup.
 export async function createNotification(req: Request, res: Response) {
   const input = createNotificationSchema.parse(req.body);
   const workspaceId = req.workspaceId!;
@@ -103,7 +111,8 @@ export async function updateNotification(req: Request, res: Response) {
     await assertMembers(target.workspaceId, input.recipientIds);
   }
   const updated = await prisma.notificationTarget.update({ where: { id: target.id }, data: input });
-  res.json({ target: publicTarget(updated) });
+  const last = await lastDeliveries([updated.id]);
+  res.json({ target: publicTarget(updated, last.get(updated.id) ?? null) });
 }
 
 // Sends a sample; a delivery that fails is reported as the result, not an error.
