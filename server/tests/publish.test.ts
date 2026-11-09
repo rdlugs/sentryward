@@ -5,7 +5,8 @@ import { DESCRIPTION_END, DESCRIPTION_START, WALKTHROUGH_MARKER, markersIn } fro
 import type { Finding, ReviewResult } from "../src/review/core/models.ts";
 import type { CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
 import { inlineBody, inlineComments } from "../src/review/publish/inline.ts";
-import { publishReview, summaryPlacement } from "../src/review/publish/publisher.ts";
+import { inlineSelection } from "../src/review/core/buckets.ts";
+import { publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
 import { commitStatus } from "../src/review/publish/status.ts";
 import { toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
 import { makeChangeSet } from "./helpers/changeSet.ts";
@@ -54,8 +55,10 @@ describe("inlineComments", () => {
     const minor = finding(result, "c is never negative");
     // The minor finding first, so the cap has to pick by severity, not order.
     const findings = [minor, ...result.findings.filter((f) => f !== minor)];
-    const prints = (limits: { minSeverity: "info" | "major"; max: number | null }, posted = new Set<string>()) =>
-      inlineComments(findings, changeSet, "github", posted, { limits }).map((c) => c.fingerprint);
+    const prints = (limits: { minSeverity: "info" | "major"; max: number | null }, posted = new Set<string>()) => {
+      const heldBack = new Set(inlineSelection(findings, limits, posted).heldBack.map((f) => f.fingerprint));
+      return inlineComments(findings, changeSet, "github", posted, { heldBack }).map((c) => c.fingerprint);
+    };
 
     expect(prints({ minSeverity: "info", max: null })).toEqual([minor.fingerprint, sql.fingerprint]);
     expect(prints({ minSeverity: "major", max: null })).toEqual([sql.fingerprint]);
@@ -325,20 +328,53 @@ describe("inline limits and the summary", () => {
 
     const all = toMarkdown(result, { walkthrough: false });
     expect(all).not.toContain("Not posted inline");
-    expect(toMarkdown(result, { walkthrough: false, inline: { minSeverity: "info", max: null } })).toBe(all);
+    expect(toMarkdown({ ...result, heldBack: [] }, { walkthrough: false })).toBe(all);
 
-    const limited = toMarkdown(result, { walkthrough: false, inline: { minSeverity: "major", max: null } });
+    const limited = toMarkdown({ ...result, heldBack: [minor.fingerprint] }, { walkthrough: false });
     expect(limited).toContain("Actionable comments (1)");
     expect(limited).toContain("Not posted inline (1)");
     // In full, under its own heading, as the nitpick and outside-diff sections are.
     expect(limited).toMatch(new RegExp(`#### .*: ${minor.title}`));
+    // Counted on its own, since it is written out below rather than inline.
+    expect(limited).toMatch(/: 1 inline, 1 not posted inline, \d+ in the other sections below\./);
+  });
+
+  it("gives a held-back finding the rule wording and prompt its thread would have had", async () => {
+    const result = await sampleResult();
+    const minor = { ...finding(result, "c is never negative"), source: "rule" as const, ruleId: "no-dead-checks" };
+    const held = { ...result, findings: result.findings.map((f) => (f.fingerprint === minor.fingerprint ? minor : f)), heldBack: [minor.fingerprint] };
+    const rules = [{ id: "no-dead-checks", description: "Remove checks that can never be true." }];
+
+    const withExtras = toMarkdown(held, { walkthrough: false, agentPrompt: false, rules, findingPrompts: true });
+    expect(withExtras).toContain("📏 Rule no-dead-checks");
+    expect(withExtras).toContain("Remove checks that can never be true.");
+    expect(withExtras).toContain("Prompt for AI agents");
+
+    const plain = toMarkdown(held, { walkthrough: false, agentPrompt: false, rules, findingPrompts: false });
+    expect(plain).not.toContain("Prompt for AI agents");
+  });
+
+  it("keeps a finding's existing thread and counts it toward the cap", async () => {
+    const result = await sampleResult();
+    const sql = finding(result, "SQL");
+    const minor = finding(result, "c is never negative");
+    const cap = (minSeverity: "info" | "critical", max: number | null, posted: string[]) =>
+      inlineSelection(result.findings, { minSeverity, max }, new Set(posted));
+
+    // The minor finding's thread is already there: it stays inline and fills
+    // the only slot, so the more severe new finding is held back.
+    expect(cap("info", 1, [minor.fingerprint]).heldBack).toEqual([sql]);
+    // A floor raised after the thread went up does not hide it either.
+    expect(cap("critical", null, [minor.fingerprint]).inline).toContain(minor);
+    // More threads than the cap: no new ones, and the slots never go negative.
+    expect(cap("info", 1, [minor.fingerprint, sql.fingerprint]).heldBack).toEqual([]);
   });
 
   it("publishes the inline limits and holds the rest back to the summary", async () => {
     const result = await sampleResult();
     const { publisher, calls } = recordingPublisher();
 
-    await publishReview({
+    const publication = await publishReview({
       publisher,
       changeSet: makeChangeSet(),
       result,
@@ -348,12 +384,40 @@ describe("inline limits and the summary", () => {
 
     expect(calls.inline.map((c) => c.fingerprint)).toEqual([finding(result, "SQL").fingerprint]);
     expect(calls.summaries[0]).toContain("Not posted inline (1)");
+    // Returned so the worker stores it in the result for re-renders.
+    expect(publication.heldBack).toEqual([finding(result, "c is never negative").fingerprint]);
+  });
+
+  it("never opens more threads than the cap, counting those already on the change", async () => {
+    const result = await sampleResult();
+    const sql = finding(result, "SQL");
+    const minor = finding(result, "c is never negative");
+    // An earlier run posted the minor finding's thread, by the forge's markers.
+    const { publisher, calls } = recordingPublisher({ onForge: [minor.fingerprint] });
+
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result,
+      config: config({ output: { maxInlineComments: 1 } }),
+      postedFingerprints: new Set(),
+    });
+
+    expect(calls.inline).toEqual([]);
+    expect(publication.inlineSkipped).toBe(1);
+    expect(publication.heldBack).toEqual([sql.fingerprint]);
+    // Only the finding without a thread is written out, not the one that has one.
+    expect(calls.summaries[0]).toContain("Not posted inline (1)");
+    expect(calls.summaries[0]).toMatch(/#### .*: SQL built from/);
+    expect(calls.summaries[0]).not.toMatch(new RegExp(`#### .*: ${minor.title}`));
   });
 
   it("holds nothing back when inline comments are off", async () => {
     const result = await sampleResult();
-    const placement = summaryPlacement(config({ output: { postInline: false, inlineMinSeverity: "critical" } }), result);
-    expect(placement.summary).not.toContain("Not posted inline");
+    const off = config({ output: { postInline: false, inlineMinSeverity: "critical" } });
+    const selected = withInlineSelection(off, result, new Set());
+    expect(selected.heldBack).toBeUndefined();
+    expect(summaryPlacement(off, selected).summary).not.toContain("Not posted inline");
   });
 });
 

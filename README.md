@@ -632,9 +632,11 @@ it finishes it publishes, each step independently:
 - **Inline comments** for actionable findings only.
   - `output.inline_min_severity` (default `info`) posts threads only for
     findings at or above that severity, and `output.max_inline_comments`
-    (default none) caps the threads per review, the most severe first. Threads
-    posted by earlier runs count toward the cap. Findings either one holds back
-    are written out in full in the summary comment, under "Not posted inline".
+    (default none) caps the threads on the change, the most severe first.
+    Threads posted by earlier runs keep their place and count toward the cap,
+    so a later run only opens threads for the slots left. Findings either one
+    holds back are written out in full in the summary comment, under "Not
+    posted inline"; a finding that already has a thread never is.
   - GitHub: one review posted as `COMMENT`, never approve or request changes.
     GitLab: one discussion per finding.
   - Suggestions use each forge's suggestion syntax.

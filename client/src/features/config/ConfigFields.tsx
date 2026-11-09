@@ -443,7 +443,8 @@ const DISPLAY_PRESETS: { value: DisplayPreset; label: string }[] = [
   { value: "standard", label: "Standard" },
   { value: "everything", label: "Everything" },
 ]
-const MINIMAL_ON = new Set<FlagName>(["postInline", "resolveFixedThreads"])
+// Only a summary with findings in it, should the summary comment be turned back on.
+const MINIMAL_ON = new Set<FlagName>(["postInline", "resolveFixedThreads", "summaryOnlyWithFindings"])
 // Switches that post less when on, which Everything leaves off.
 const LESS_FLAGS = new Set<FlagName>(["summaryOnlyWithFindings"])
 
@@ -576,7 +577,7 @@ const NUMBER_INFO: Record<NumberName, { label: string; description: string }> = 
   maxInlineComments: {
     label: "Max inline comments",
     description:
-      'At most this many inline comments per review, the most severe first. The rest are written out in the summary comment. "none" posts every one.',
+      'At most this many inline comments on the change, the most severe first, counting those earlier reviews posted. The rest are written out in the summary comment. "none" posts every one.',
   },
 }
 
@@ -1756,7 +1757,9 @@ export function ConfigFields(props: {
     const spec = NUMBERS.find((number) => number.name === name)!
     const path = `${spec.section}.${name}`
     const typed = form.numbers[name].trim()
-    const raw = fromRepoFile(path) ? at(config, path) : disabled || !typed ? at(inherited, path) : Number(typed)
+    // The word for null ("auto", "none") is no number, not NaN.
+    const typedNumber = spec.nullable && typed.toLowerCase() === spec.nullable ? null : Number(typed)
+    const raw = fromRepoFile(path) ? at(config, path) : disabled || !typed ? at(inherited, path) : typedNumber
     return typeof raw === "number" ? raw : undefined
   }
   function resolvedText(key: "severityFloor" | "blockOn") {
@@ -1810,6 +1813,14 @@ export function ConfigFields(props: {
       ]),
     ) as Partial<Record<FlagName, boolean>>
   }
+  // Standard and Everything also lift the inline limits (the defaults: every
+  // severity, no cap), or "Everything" could show as picked while comments
+  // are still held back. Minimal only turns things off, so it leaves them.
+  const liftsLimits = (preset: DisplayPreset) => preset !== "minimal"
+  const limitsLifted = () => {
+    const severity = resolvedChoice("inlineMinSeverity")
+    return (severity === undefined || severity === "info") && resolvedNumber("maxInlineComments") === undefined
+  }
   function applyPreset(preset: DisplayPreset) {
     const values = presetFlags(preset)
     if (!values) return
@@ -1817,13 +1828,23 @@ export function ConfigFields(props: {
     for (const name of DISPLAY_FLAGS) {
       if (!locked(`output.${name}`)) flags[name] = values[name]
     }
+    const choices = { ...form.choices }
+    const numbers = { ...form.numbers }
+    if (liftsLimits(preset)) {
+      if (!locked("output.inlineMinSeverity")) choices.inlineMinSeverity = "info"
+      if (!locked("output.maxInlineComments")) numbers.maxInlineComments = NUMBERS.find((n) => n.name === "maxInlineComments")!.nullable!
+    }
     focusPreview("summary")
-    props.onChange({ ...form, flags })
+    props.onChange({ ...form, flags, choices, numbers })
   }
   // The preset the settings match right now, if any.
   const activePreset = DISPLAY_PRESETS.find((preset) => {
     const values = presetFlags(preset.value)
-    return values && DISPLAY_FLAGS.every((name) => resolvedFlag(name) === values[name])
+    return (
+      values &&
+      DISPLAY_FLAGS.every((name) => resolvedFlag(name) === values[name]) &&
+      (!liftsLimits(preset.value) || limitsLifted())
+    )
   })?.value
 
   // With the summary comment off, the PR summary is still posted as a comment
@@ -2233,7 +2254,7 @@ export function ConfigFields(props: {
       <>
         <Section
           title="Presets"
-          description="Set every switch on this tab at once, then adjust. Minimal posts inline comments only, Standard is the defaults (inline comments, one summary comment and a short PR summary, without the extra lines, labels, diagrams or commit status), Everything turns every option on, labels included. Nothing is saved until you save, and fields the repository file sets are left alone."
+          description="Set every switch on this tab at once, then adjust. Minimal posts inline comments only, Standard is the defaults (inline comments, one summary comment and a short PR summary, without the extra lines, labels, diagrams or commit status), Everything turns every option on, labels included, and posts every finding inline. Nothing is saved until you save, and fields the repository file sets are left alone."
         >
           <SegmentedControl
             label="Display preset"
@@ -2620,7 +2641,15 @@ export function ConfigFields(props: {
                 tabIndex={0}
                 className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/50 @5xl:min-h-0 @5xl:overflow-y-auto"
               >
-                <ReviewPreview request={previewRequest} focus={previewFocus} />
+                <ReviewPreview
+                  request={previewRequest}
+                  focus={previewFocus}
+                  summaryNote={
+                    postSummaryOn && resolvedFlag("summaryOnlyWithFindings")
+                      ? "A completed review with no findings starts no summary comment. The sample below has findings."
+                      : undefined
+                  }
+                />
               </CardContent>
             </Card>
           ),

@@ -364,6 +364,12 @@ export const reviewResultSchema = z.object({
     .optional(),
   // Absent on a change's first review, a failed one, and results stored before it existed.
   lifecycle: lifecycleSchema.optional(),
+  // Fingerprints of the actionable findings the inline limits left without a
+  // thread (core/buckets.ts inlineSelection), decided when publishing because
+  // it depends on the threads already on the change. Stored so the summary
+  // and any later re-render of it hold back the same findings. Absent when
+  // nothing was held back, inline comments were off, or before it existed.
+  heldBack: z.array(z.string()).optional(),
   coverage: z.object({
     reviewedFiles: z.array(z.string()),
     omissions: z.array(omissionSchema),

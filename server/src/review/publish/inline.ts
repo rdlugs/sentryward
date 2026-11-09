@@ -1,6 +1,5 @@
 import type { Rule } from "../config/schema.ts";
 import type { ChangeSet, Finding, ForgeProvider } from "../core/models.ts";
-import { inlineSelection, type InlineLimits } from "../core/buckets.ts";
 import { fingerprintMarker } from "../core/markers.ts";
 import { FORGE_INFO } from "../forge/providers.ts";
 import type { InlineComment } from "../forge/types.ts";
@@ -9,9 +8,9 @@ import {
   BRAND_FOOTER,
   SEVERITY_ICON,
   fixRationaleLines,
-  htmlBlockText,
   affectedLines,
   impactLines,
+  ruleLines,
   sanitize,
   ruleSuffix,
   toolSuffix,
@@ -29,22 +28,9 @@ export interface InlineOptions {
   agentPrompt?: boolean;
   // The resolved config's rules, to spell out the one a rule finding broke.
   rules?: Rule[];
-  // output.inlineMinSeverity and output.maxInlineComments; every actionable
-  // finding when absent.
-  limits?: InlineLimits;
-}
-
-// Rules set in the dashboard are not in the repository, so a developer
-// without dashboard access would otherwise see only the rule's id. Collapsed:
-// the finding already says what is wrong; this is the rule's own wording.
-function ruleLines(finding: Finding, rules: Rule[] | undefined): string[] {
-  if (finding.source !== "rule" || !finding.ruleId) return [];
-  const rule = rules?.find((candidate) => candidate.id === finding.ruleId);
-  if (!rule) return [];
-  const lines = ["", "<details>", `<summary>📏 Rule ${rule.id}</summary>`, "", htmlBlockText(rule.description.trim())];
-  if (rule.paths?.length) lines.push("", `Applies to: ${rule.paths.map((path) => `\`${sanitize(path).replace(/`/g, "")}\``).join(", ")}`);
-  lines.push("", "</details>");
-  return lines;
+  // Fingerprints the inline limits held back to the summary
+  // (core/buckets.ts inlineSelection, decided once by the caller).
+  heldBack?: ReadonlySet<string>;
 }
 
 export function inlineBody(finding: Finding, provider: ForgeProvider, options: InlineOptions = {}): string {
@@ -68,8 +54,8 @@ export function inlineBody(finding: Finding, provider: ForgeProvider, options: I
 }
 
 // Only actionable findings become inline threads, and of those only the ones
-// the inline limits select; everything else lives in the summary. The bucket
-// was decided once, when the finding was validated.
+// the inline limits did not hold back; everything else lives in the summary.
+// The bucket was decided once, when the finding was validated.
 export function inlineComments(
   findings: Finding[],
   changeSet: ChangeSet,
@@ -79,8 +65,9 @@ export function inlineComments(
 ): InlineComment[] {
   const files = new Map(changeSet.files.map((file) => [file.path, file]));
   const comments: InlineComment[] = [];
-  for (const finding of inlineSelection(findings, options.limits).inline) {
-    if (alreadyPosted.has(finding.fingerprint)) continue;
+  for (const finding of findings) {
+    if (finding.bucket !== "actionable" || alreadyPosted.has(finding.fingerprint)) continue;
+    if (options.heldBack?.has(finding.fingerprint)) continue;
     const file = files.get(finding.file);
     if (!file) continue;
     const oldLine = file.hunks

@@ -138,7 +138,8 @@ const outputShape = {
   // Inline threads only for actionable findings at or above this severity;
   // the rest are written out in the summary instead.
   inlineMinSeverity: severitySchema,
-  // At most this many inline threads per review, the most severe first; null
+  // At most this many inline threads on the change, the most severe first,
+  // threads from earlier runs included (core/buckets.ts inlineSelection); null
   // posts every one. The rest are written out in the summary.
   maxInlineComments: z.number().int().min(1).max(100).nullable(),
   postSummary: z.boolean(),

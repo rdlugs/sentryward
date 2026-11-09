@@ -39,19 +39,27 @@ export interface InlineLimits {
   max: number | null;
 }
 
-// Which actionable findings get an inline thread and which are held back to
-// the summary. Decided from the findings and the limits alone, so the
-// publisher, the preview and a re-rendered stored review always agree.
-// Threads posted by earlier runs count toward the cap like new ones, or the
-// selection would depend on what is already on the change.
-export function inlineSelection(findings: Finding[], limits?: InlineLimits): { inline: Finding[]; heldBack: Finding[] } {
+// Which actionable findings have an inline thread and which are held back to
+// the summary. `posted` holds the fingerprints of threads already on the
+// change: those findings keep their thread whatever the limits say (it exists
+// either way, so holding it back would only repeat it in the summary), and
+// they use up the cap, which counts threads per change, not per run. New
+// threads fill the slots left, most severe first. The publisher stores the
+// outcome in the result (ReviewResult.heldBack) so a re-render agrees with it.
+export function inlineSelection(
+  findings: Finding[],
+  limits?: InlineLimits,
+  posted: ReadonlySet<string> = new Set(),
+): { inline: Finding[]; heldBack: Finding[] } {
   const actionable = findings.filter((f) => f.bucket === "actionable");
   if (!limits) return { inline: actionable, heldBack: [] };
+  const existing = actionable.filter((f) => posted.has(f.fingerprint));
   // Sort is stable, so findings of one severity keep the review's order.
   const eligible = actionable
-    .filter((f) => atLeast(f.severity, limits.minSeverity))
+    .filter((f) => !posted.has(f.fingerprint) && atLeast(f.severity, limits.minSeverity))
     .sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
-  const chosen = new Set(limits.max === null ? eligible : eligible.slice(0, limits.max));
+  const slots = limits.max === null ? eligible.length : Math.max(0, limits.max - existing.length);
+  const chosen = new Set([...existing, ...eligible.slice(0, slots)]);
   // Both lists keep the review's order; the cap only decides membership.
   return {
     inline: actionable.filter((f) => chosen.has(f)),

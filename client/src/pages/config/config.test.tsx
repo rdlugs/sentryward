@@ -2052,6 +2052,8 @@ describe("Display tab", { timeout: 20_000 }, () => {
     for (const name of ["Post summary comment", "Post commit status", "PR summary", "Prompt for AI agents per comment"]) {
       expect(screen.getByRole("switch", { name })).not.toBeChecked()
     }
+    // Quiet even if the summary comment is turned back on.
+    expect(screen.getByRole("switch", { name: "Only when there are findings" })).toBeChecked()
     // A manual change leaves the preset.
     await userEvent.click(screen.getByRole("switch", { name: "Post commit status" }))
     expect(within(presets).queryByRole("button", { pressed: true })).not.toBeInTheDocument()
@@ -2085,6 +2087,37 @@ describe("Display tab", { timeout: 20_000 }, () => {
         },
       }),
     )
+  })
+
+  it("lifts the inline limits with Everything, and only then shows it as picked", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration?tab=display" })
+    const presets = await screen.findByRole("group", { name: "Display preset" })
+    await waitFor(() => expect(within(presets).getByRole("button", { name: "Standard" })).toHaveAttribute("aria-pressed", "true"))
+
+    await userEvent.click(within(presets).getByRole("button", { name: "Everything" }))
+    expect(within(presets).getByRole("button", { name: "Everything" })).toHaveAttribute("aria-pressed", "true")
+    // A cap is a limit Everything does not have.
+    await userEvent.type(screen.getByLabelText("Max inline comments"), "{selectall}1")
+    expect(within(presets).queryByRole("button", { pressed: true })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("combobox", { name: "Inline comments from" }))
+    await userEvent.click(screen.getByRole("option", { name: "Critical only" }))
+
+    await userEvent.click(within(presets).getByRole("button", { name: "Everything" }))
+    expect(within(presets).getByRole("button", { name: "Everything" })).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByLabelText("Max inline comments")).toHaveValue("none")
+    expect(screen.getByRole("combobox", { name: "Inline comments from" })).toHaveTextContent("Every severity")
+  })
+
+  it("says in the preview that a clean review posts no summary comment", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration?tab=display" })
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Only when there are findings" })).toBeEnabled())
+    const note = /A completed review with no findings starts no summary comment/
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole("switch", { name: "Only when there are findings" }))
+    expect(screen.getByText(note)).toBeInTheDocument()
   })
 
   it("leaves fields the repository file sets alone when applying a preset", async () => {

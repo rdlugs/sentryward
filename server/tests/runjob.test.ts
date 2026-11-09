@@ -573,6 +573,26 @@ describe("runJob", () => {
     expect(await prisma.postedFinding.count({ where: { repositoryId, number: 42 } })).toBe(1);
   });
 
+  it("stores what the inline limits held back, so a re-render of the summary matches it", async () => {
+    const job = await claimedJob();
+    await prisma.repository.update({ where: { id: repositoryId }, data: { settings: { output: { inlineMinSeverity: "critical" } } } });
+    const findings = [
+      modelFinding({ severity: "critical", title: "SQL built from @input" }),
+      modelFinding({ severity: "minor", startLine: 12, endLine: 12, title: "c is never negative", evidence: "contract" }),
+    ];
+    const { runDeps, published } = deps({}, { code_review: { findings }, walkthrough: WALKTHROUGH });
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    const result = stored.result as { findings: { title: string; fingerprint: string }[]; heldBack?: string[] };
+    const minor = result.findings.find((f) => f.title.startsWith("c is never negative"))!;
+    expect(published.inline).toHaveLength(1);
+    expect(result.heldBack).toEqual([minor.fingerprint]);
+    expect(stored.publication).toMatchObject({ heldBack: [minor.fingerprint] });
+    expect(published.summaries.at(-1)).toContain("Not posted inline (1)");
+  });
+
   describe("with summaryOnlyWithFindings", () => {
     async function run(findings: unknown[], summaryOnForge: boolean) {
       const job = await claimedJob();

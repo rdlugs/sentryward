@@ -540,6 +540,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
       proceed: ownsClaim,
     });
     if (publication.summaryCommentId) summaryPosted = true;
+    // Like the lifecycle: the summary was rendered with it, so a re-render
+    // from the stored result must hold back the same findings.
+    if (publication.heldBack) result = { ...result, heldBack: publication.heldBack };
     if (resolvesThreads(config)) {
       threadOutcome = { attempted: [...threads.resolve, ...threads.reopen], failed: publication.threadsFailed ?? [] };
     }
