@@ -28,6 +28,7 @@ import {
   type ThreadResult,
   type ThreadRoot,
   type ThreadTarget,
+  type UpsertOptions,
 } from "./types.ts";
 
 // search_code terms come from the model and can be steered by PR content, and
@@ -558,14 +559,15 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return new Set(comments.filter((c) => this.isSelf(c)).flatMap((c) => markersIn(c.body)));
   }
 
-  upsertSummaryComment(ref: ForgeRef, body: string): Promise<string> {
-    return this.upsertComment(ref, SUMMARY_MARKER, body);
+  upsertSummaryComment(ref: ForgeRef, body: string, options?: UpsertOptions): Promise<string | null> {
+    return this.upsertComment(ref, SUMMARY_MARKER, body, options);
   }
 
-  async upsertComment(ref: ForgeRef, marker: string, body: string): Promise<string> {
+  async upsertComment(ref: ForgeRef, marker: string, body: string, options: UpsertOptions = {}): Promise<string | null> {
     const issue = `${repoApiPath(ref.project)}/issues/${ref.number}`;
     const comments = await this.http.paginate<GhComment>(`${issue}/comments?per_page=100`, linkHeaderNext);
     const existing = comments.filter((c) => this.isSelf(c) && c.body.includes(marker)).at(-1);
+    if (!existing && options.create === false) return null;
     const saved = existing
       ? await this.http.json<GhComment>(`${repoApiPath(ref.project)}/issues/comments/${existing.id}`, {
           method: "PATCH",

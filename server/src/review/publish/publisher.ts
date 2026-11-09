@@ -1,6 +1,7 @@
 import type { Config } from "../config/schema.ts";
 import type { ChangeSet, ReviewResult } from "../core/models.ts";
 import type { ForgePublisher, PostedComment } from "../forge/types.ts";
+import { inlineLimits, inlineSelection } from "../core/buckets.ts";
 import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
 import { inlineComments } from "./inline.ts";
@@ -41,6 +42,9 @@ export interface Publication {
   threadsFailed?: string[];
   // Publishing stopped partway because proceed() said so.
   stopped?: boolean;
+  // ReviewResult.heldBack as this run decided it; the caller stores it in the
+  // result so a re-render of the summary holds back the same findings.
+  heldBack?: string[];
   errors: string[];
 }
 
@@ -53,8 +57,17 @@ function message(err: unknown): string {
 // recorded rather than thrown. A cancel is checked between steps: a write
 // already under way still finishes, but nothing after it is sent.
 export async function publishReview(input: PublishInput): Promise<Publication> {
-  const { publisher, changeSet, result, config } = input;
+  const { publisher, changeSet, config } = input;
   const ref = changeSet.forgeRef;
+  // Which findings get a thread depends on the threads already on the change,
+  // so it is decided before the summary, which lists the rest. The forge's
+  // own markers cover a database row that was never written.
+  let posted = input.postedFingerprints;
+  if (config.output.postInline) {
+    const onForge = await publisher.listPostedFingerprints(ref).catch(() => new Set<string>());
+    posted = new Set([...posted, ...onForge]);
+  }
+  const result = withInlineSelection(config, input.result, posted);
   const publication: Publication = {
     inlinePosted: [],
     inlineSkipped: 0,
@@ -67,6 +80,7 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
     threadsReopened: [],
     threadsFailed: [],
     errors: [],
+    ...(result.heldBack ? { heldBack: result.heldBack } : {}),
   };
   const placement = summaryPlacement(config, result);
   const halted = async () => {
@@ -80,8 +94,12 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
   if (await halted()) return publication;
   if (placement.summary !== null) {
     try {
-      publication.summaryCommentId = await publisher.upsertSummaryComment(ref, placement.summary);
-      if (placement.walkthrough) publication.walkthroughLocation = "comment";
+      // A clean review under output.summaryOnlyWithFindings only updates a
+      // summary an earlier run left, so it stops showing findings now gone.
+      publication.summaryCommentId = await publisher.upsertSummaryComment(ref, placement.summary, {
+        create: placement.summaryCreate,
+      });
+      if (publication.summaryCommentId && placement.walkthrough) publication.walkthroughLocation = "comment";
     } catch (err) {
       publication.errors.push(`Summary comment failed: ${message(err)}`);
     }
@@ -100,13 +118,14 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
   if (config.output.postInline) {
     if (await halted()) return publication;
     try {
-      // The forge's own markers cover a database row that was never written.
-      const onForge = await publisher.listPostedFingerprints(ref).catch(() => new Set<string>());
-      const posted = new Set([...input.postedFingerprints, ...onForge]);
+      const heldBack = new Set(result.heldBack ?? []);
       const comments = inlineComments(result.findings, changeSet, ref.provider, posted, {
         agentPrompt: config.output.agentPrompts,
         rules: config.rules,
+        heldBack,
       });
+      // A finding with a thread is never held back, so this counts every
+      // thread this review stands behind that was already there.
       publication.inlineSkipped = result.findings.filter((f) => f.bucket === "actionable" && posted.has(f.fingerprint)).length;
       const outcome = await publisher.postInlineComments(ref, comments);
       publication.inlinePosted = outcome.posted;
@@ -185,6 +204,9 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
 export interface SummaryPlacement {
   // The review comment's body, or null when it is turned off.
   summary: string | null;
+  // Whether the review comment may be started, or only an existing one
+  // updated: false for a clean review under output.summaryOnlyWithFindings.
+  summaryCreate: boolean;
   // The walkthrough as rendered on its own; empty when the review has none.
   walkthrough: string;
   // A comment of its own for the walkthrough, only while the review comment
@@ -196,7 +218,10 @@ export interface SummaryPlacement {
 export function summaryPlacement(config: Config, result: ReviewResult): SummaryPlacement {
   const options = walkthroughOptions(config.output);
   const walkthrough = walkthroughMarkdown(result, options);
-  const { postSummary, findingCounts, reviewStats, findingLifecycle, agentPromptAll } = config.output;
+  const { postSummary, findingCounts, reviewStats, findingLifecycle, agentPromptAll, summaryOnlyWithFindings } = config.output;
+  // Only a completed review is clean: a partial or failed one with no
+  // findings still has its coverage or failure to report.
+  const clean = result.status === "completed" && result.findings.length === 0;
   return {
     summary: postSummary
       ? toMarkdown(result, {
@@ -205,12 +230,25 @@ export function summaryPlacement(config: Config, result: ReviewResult): SummaryP
           stats: reviewStats,
           lifecycle: findingLifecycle,
           agentPrompt: agentPromptAll,
+          rules: config.rules,
+          findingPrompts: config.output.agentPrompts,
           ...options,
         })
       : null,
+    summaryCreate: !(summaryOnlyWithFindings && clean),
     walkthrough,
     walkthroughComment: !postSummary && walkthrough ? `${walkthrough}\n${WALKTHROUGH_MARKER}\n` : null,
   };
+}
+
+// The result with ReviewResult.heldBack set from the inline limits, given the
+// fingerprints of the threads already on the change. Nothing is held back
+// from threads that are not posted at all. Shared with the preview.
+export function withInlineSelection(config: Config, result: ReviewResult, posted: ReadonlySet<string>): ReviewResult {
+  const { heldBack: _stale, ...rest } = result;
+  if (!config.output.postInline) return rest;
+  const { heldBack } = inlineSelection(result.findings, inlineLimits(config.output), posted);
+  return heldBack.length ? { ...rest, heldBack: heldBack.map((f) => f.fingerprint) } : rest;
 }
 
 // The block for the description: the summary to write, "" to remove an old

@@ -160,6 +160,11 @@ const FLAG_INFO: Record<FlagName, { label: string; description: ReactNode; cost?
   },
   postInline: { label: "Post inline comments", description: "Comment on the lines each finding refers to." },
   postSummary: { label: "Post summary comment", description: "Post the review summary as a comment on the change." },
+  summaryOnlyWithFindings: {
+    label: "Only when there are findings",
+    description:
+      "Start no summary comment, PR summary included, for a completed review that found nothing. One an earlier review posted is still updated, and the commit status still reports the verdict.",
+  },
   postCheck: { label: "Post commit status", description: "Report the verdict as the sentryward/review status." },
   resolveFixedThreads: {
     label: "Resolve fixed threads",
@@ -317,6 +322,16 @@ const CHOICE_INFO: Record<
       { value: "published", label: "Published PRs" },
     ],
   },
+  inlineMinSeverity: {
+    label: "Inline comments from",
+    description: "Comment inline only on findings at or above this severity. The rest are written out in the summary comment.",
+    options: [
+      { value: "critical", label: "Critical only" },
+      { value: "major", label: "Major and above" },
+      { value: "minor", label: "Minor and above" },
+      { value: "info", label: "Every severity" },
+    ],
+  },
   highLevelSummaryPlacement: {
     label: "Summary placement",
     description: "Where the high-level summary is written.",
@@ -414,6 +429,9 @@ const DISPLAY_FLAGS: FlagName[] = FLAGS.filter((flag) => flag.section === "outpu
 // Settings whose effect only shows in the preview's inline thread; changing
 // one switches the preview there, any other Display setting to the summary.
 const INLINE_FLAGS = new Set<FlagName>(["postInline", "agentPrompts", "resolveFixedThreads"])
+// The inline limits, which decide which findings get a thread.
+const INLINE_CHOICES = new Set<ChoiceName>(["inlineMinSeverity"])
+const INLINE_NUMBERS = new Set<NumberName>(["maxInlineComments"])
 
 type DisplayPreset = "minimal" | "standard" | "everything"
 
@@ -425,7 +443,10 @@ const DISPLAY_PRESETS: { value: DisplayPreset; label: string }[] = [
   { value: "standard", label: "Standard" },
   { value: "everything", label: "Everything" },
 ]
-const MINIMAL_ON = new Set<FlagName>(["postInline", "resolveFixedThreads"])
+// Only a summary with findings in it, should the summary comment be turned back on.
+const MINIMAL_ON = new Set<FlagName>(["postInline", "resolveFixedThreads", "summaryOnlyWithFindings"])
+// Switches that post less when on, which Everything leaves off.
+const LESS_FLAGS = new Set<FlagName>(["summaryOnlyWithFindings"])
 
 // Whether the Display tab shows its preview, per browser. Storage can throw
 // (private mode, blocked site data), so it falls back to shown.
@@ -553,6 +574,11 @@ const NUMBER_INFO: Record<NumberName, { label: string; description: string }> = 
   maxSteps: { label: "Agent steps", description: "Model calls per agentic pass, the final report included." },
   maxToolTokens: { label: "Agent tool tokens", description: "What tools may return in one pass before the model must report." },
   maxSearches: { label: "Agent searches", description: "Code searches across the whole review. GitHub rate-limits search." },
+  maxInlineComments: {
+    label: "Max inline comments",
+    description:
+      'At most this many inline comments on the change, the most severe first, counting those earlier reviews posted. The rest are written out in the summary comment. "none" posts every one.',
+  },
 }
 
 // "x (from y)" for any config value, e.g. "critical (from global config)".
@@ -1462,8 +1488,10 @@ export function ConfigFields(props: {
     if (DISPLAY_FLAGS.includes(name)) focusPreview(INLINE_FLAGS.has(name) ? "inline" : "summary")
     props.onChange({ ...form, flags: { ...form.flags, [name]: value } })
   }
-  const setNumber = (name: NumberName) => (value: string) =>
+  const setNumber = (name: NumberName) => (value: string) => {
+    if (INLINE_NUMBERS.has(name)) focusPreview("inline")
     props.onChange({ ...form, numbers: { ...form.numbers, [name]: value } })
+  }
 
   // Only worth showing when the value comes from somewhere else (a profile, a
   // default, the repository file): what this scope sets is already in its input.
@@ -1596,7 +1624,7 @@ export function ConfigFields(props: {
         label={info.label}
         value={form.choices[name]}
         onChange={(value) => {
-          if (spec.section === "output") focusPreview("summary")
+          if (spec.section === "output") focusPreview(INLINE_CHOICES.has(name) ? "inline" : "summary")
           props.onChange({ ...form, choices: { ...form.choices, [name]: value } })
         }}
         options={info.options}
@@ -1659,6 +1687,8 @@ export function ConfigFields(props: {
     const spec = NUMBERS.find((number) => number.name === name)!
     const path = `${spec.section}.${name}`
     const fallback = inherited ? (at(inherited, path) as number | null) : undefined
+    // A saved null is shown as the word typed for it, e.g. "auto" or "none".
+    const shown = (value: unknown) => (value === null && spec.nullable ? spec.nullable : value)
     const { label, description } = NUMBER_INFO[name]
     return (
       <TextField
@@ -1667,15 +1697,15 @@ export function ConfigFields(props: {
         value={form.numbers[name]}
         onChange={setNumber(name)}
         description={description}
-        emptyHint={emptyHint(path, fallback)}
-        placeholder={fallback === undefined ? undefined : fallback === null ? AUTO : String(fallback)}
-        // The context budget also takes "auto", which a number input would reject.
+        emptyHint={emptyHint(path, shown(fallback))}
+        placeholder={fallback === undefined ? undefined : String(shown(fallback))}
+        // A word for null, such as the context budget's "auto", would be rejected by a number input.
         type={spec.nullable ? "text" : "number"}
         inputMode={spec.integer ? "numeric" : "decimal"}
         min={spec.nullable ? undefined : spec.min}
         max={spec.nullable ? undefined : spec.max}
         step={spec.nullable ? undefined : spec.step}
-        effective={config && effective(path, at(config, path))}
+        effective={config && effective(path, shown(at(config, path)))}
         extra={extra}
         error={errors[name]}
         disabled={locked(path) || off}
@@ -1727,7 +1757,9 @@ export function ConfigFields(props: {
     const spec = NUMBERS.find((number) => number.name === name)!
     const path = `${spec.section}.${name}`
     const typed = form.numbers[name].trim()
-    const raw = fromRepoFile(path) ? at(config, path) : disabled || !typed ? at(inherited, path) : Number(typed)
+    // The word for null ("auto", "none") is no number, not NaN.
+    const typedNumber = spec.nullable && typed.toLowerCase() === spec.nullable ? null : Number(typed)
+    const raw = fromRepoFile(path) ? at(config, path) : disabled || !typed ? at(inherited, path) : typedNumber
     return typeof raw === "number" ? raw : undefined
   }
   function resolvedText(key: "severityFloor" | "blockOn") {
@@ -1777,9 +1809,17 @@ export function ConfigFields(props: {
     return Object.fromEntries(
       DISPLAY_FLAGS.map((name) => [
         name,
-        preset === "everything" ? true : preset === "minimal" ? MINIMAL_ON.has(name) : Boolean(defaults![name]),
+        preset === "everything" ? !LESS_FLAGS.has(name) : preset === "minimal" ? MINIMAL_ON.has(name) : Boolean(defaults![name]),
       ]),
     ) as Partial<Record<FlagName, boolean>>
+  }
+  // Standard and Everything also lift the inline limits (the defaults: every
+  // severity, no cap), or "Everything" could show as picked while comments
+  // are still held back. Minimal only turns things off, so it leaves them.
+  const liftsLimits = (preset: DisplayPreset) => preset !== "minimal"
+  const limitsLifted = () => {
+    const severity = resolvedChoice("inlineMinSeverity")
+    return (severity === undefined || severity === "info") && resolvedNumber("maxInlineComments") === undefined
   }
   function applyPreset(preset: DisplayPreset) {
     const values = presetFlags(preset)
@@ -1788,13 +1828,23 @@ export function ConfigFields(props: {
     for (const name of DISPLAY_FLAGS) {
       if (!locked(`output.${name}`)) flags[name] = values[name]
     }
+    const choices = { ...form.choices }
+    const numbers = { ...form.numbers }
+    if (liftsLimits(preset)) {
+      if (!locked("output.inlineMinSeverity")) choices.inlineMinSeverity = "info"
+      if (!locked("output.maxInlineComments")) numbers.maxInlineComments = NUMBERS.find((n) => n.name === "maxInlineComments")!.nullable!
+    }
     focusPreview("summary")
-    props.onChange({ ...form, flags })
+    props.onChange({ ...form, flags, choices, numbers })
   }
   // The preset the settings match right now, if any.
   const activePreset = DISPLAY_PRESETS.find((preset) => {
     const values = presetFlags(preset.value)
-    return values && DISPLAY_FLAGS.every((name) => resolvedFlag(name) === values[name])
+    return (
+      values &&
+      DISPLAY_FLAGS.every((name) => resolvedFlag(name) === values[name]) &&
+      (!liftsLimits(preset.value) || limitsLifted())
+    )
   })?.value
 
   // With the summary comment off, the PR summary is still posted as a comment
@@ -2204,7 +2254,7 @@ export function ConfigFields(props: {
       <>
         <Section
           title="Presets"
-          description="Set every switch on this tab at once, then adjust. Minimal posts inline comments only, Standard is the defaults (inline comments, one summary comment and a short PR summary, without the extra lines, labels, diagrams or commit status), Everything turns every option on, labels included. Nothing is saved until you save, and fields the repository file sets are left alone."
+          description="Set every switch on this tab at once, then adjust. Minimal posts inline comments only, Standard is the defaults (inline comments, one summary comment and a short PR summary, without the extra lines, labels, diagrams or commit status), Everything turns every option on, labels included, and posts every finding inline. Nothing is saved until you save, and fields the repository file sets are left alone."
         >
           <SegmentedControl
             label="Display preset"
@@ -2222,7 +2272,11 @@ export function ConfigFields(props: {
           <ToggleList>
             {toggles(["postInline"])}
             {/* Only threads Sentryward opened are resolved. */}
-            <Nested>{toggles(["agentPrompts", "resolveFixedThreads"], !postInlineOn, "Post inline comments")}</Nested>
+            <Nested>
+              {toggles(["agentPrompts", "resolveFixedThreads"], !postInlineOn, "Post inline comments")}
+              {choiceField("inlineMinSeverity", !postInlineOn, <OffHint setting="Post inline comments" onTabChange={props.onTabChange} />)}
+              {numberField("maxInlineComments", undefined, !postInlineOn)}
+            </Nested>
             {toggles(["postSummary"], false, undefined, {
               postSummary: standaloneSummary && (
                 <FieldDescription className="text-xs">
@@ -2233,7 +2287,7 @@ export function ConfigFields(props: {
             {/* The counts, lifecycle, details and the combined prompt are part of the summary comment. */}
             <Nested>
               {toggles(
-                ["findingCounts", "findingLifecycle", "reviewStats", "agentPromptAll"],
+                ["summaryOnlyWithFindings", "findingCounts", "findingLifecycle", "reviewStats", "agentPromptAll"],
                 !postSummaryOn,
                 "Post summary comment",
               )}
@@ -2587,7 +2641,15 @@ export function ConfigFields(props: {
                 tabIndex={0}
                 className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/50 @5xl:min-h-0 @5xl:overflow-y-auto"
               >
-                <ReviewPreview request={previewRequest} focus={previewFocus} />
+                <ReviewPreview
+                  request={previewRequest}
+                  focus={previewFocus}
+                  summaryNote={
+                    postSummaryOn && resolvedFlag("summaryOnlyWithFindings")
+                      ? "A completed review with no findings starts no summary comment. The sample below has findings."
+                      : undefined
+                  }
+                />
               </CardContent>
             </Card>
           ),

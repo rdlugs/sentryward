@@ -8,9 +8,9 @@ import {
   BRAND_FOOTER,
   SEVERITY_ICON,
   fixRationaleLines,
-  htmlBlockText,
   affectedLines,
   impactLines,
+  ruleLines,
   sanitize,
   ruleSuffix,
   toolSuffix,
@@ -28,19 +28,9 @@ export interface InlineOptions {
   agentPrompt?: boolean;
   // The resolved config's rules, to spell out the one a rule finding broke.
   rules?: Rule[];
-}
-
-// Rules set in the dashboard are not in the repository, so a developer
-// without dashboard access would otherwise see only the rule's id. Collapsed:
-// the finding already says what is wrong; this is the rule's own wording.
-function ruleLines(finding: Finding, rules: Rule[] | undefined): string[] {
-  if (finding.source !== "rule" || !finding.ruleId) return [];
-  const rule = rules?.find((candidate) => candidate.id === finding.ruleId);
-  if (!rule) return [];
-  const lines = ["", "<details>", `<summary>📏 Rule ${rule.id}</summary>`, "", htmlBlockText(rule.description.trim())];
-  if (rule.paths?.length) lines.push("", `Applies to: ${rule.paths.map((path) => `\`${sanitize(path).replace(/`/g, "")}\``).join(", ")}`);
-  lines.push("", "</details>");
-  return lines;
+  // Fingerprints the inline limits held back to the summary
+  // (core/buckets.ts inlineSelection, decided once by the caller).
+  heldBack?: ReadonlySet<string>;
 }
 
 export function inlineBody(finding: Finding, provider: ForgeProvider, options: InlineOptions = {}): string {
@@ -63,8 +53,9 @@ export function inlineBody(finding: Finding, provider: ForgeProvider, options: I
   return lines.join("\n");
 }
 
-// Only actionable findings become inline threads; everything else lives in
-// the summary. The bucket was decided once, when the finding was validated.
+// Only actionable findings become inline threads, and of those only the ones
+// the inline limits did not hold back; everything else lives in the summary.
+// The bucket was decided once, when the finding was validated.
 export function inlineComments(
   findings: Finding[],
   changeSet: ChangeSet,
@@ -76,6 +67,7 @@ export function inlineComments(
   const comments: InlineComment[] = [];
   for (const finding of findings) {
     if (finding.bucket !== "actionable" || alreadyPosted.has(finding.fingerprint)) continue;
+    if (options.heldBack?.has(finding.fingerprint)) continue;
     const file = files.get(finding.file);
     if (!file) continue;
     const oldLine = file.hunks

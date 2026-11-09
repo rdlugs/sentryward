@@ -118,6 +118,18 @@ describe("GitHub publishing", () => {
     expect(calls.at(-1)!.method).toBe("POST");
   });
 
+  it("with create: false, edits an existing summary but never starts one", async () => {
+    const none = github([{ url: /\/issues\/42\/comments\?per_page=100$/, body: [] }]);
+    expect(await none.gh.upsertSummaryComment(ghRef, "hello", { create: false })).toBeNull();
+    expect(none.calls.map((c) => c.method ?? "GET")).not.toContain("POST");
+
+    const existing = github([
+      { url: /\/issues\/42\/comments\?per_page=100$/, body: [{ id: 2, body: `old ${SUMMARY_MARKER}`, user: { login: "sentryward[bot]" } }] },
+      { method: "PATCH", url: /\/issues\/comments\/2$/, body: { id: 2 } },
+    ]);
+    expect(await existing.gh.upsertSummaryComment(ghRef, "new", { create: false })).toBe("2");
+  });
+
   it("reads fingerprints only from its own inline comments", async () => {
     const { gh } = github([
       {
@@ -325,6 +337,12 @@ describe("GitLab publishing", () => {
     ]);
     expect(await gl.upsertSummaryComment(glRef, "new")).toBe("3");
     expect(body(calls.at(-1)!)).toEqual({ body: "new" });
+  });
+
+  it("with create: false, never starts a summary note", async () => {
+    const { gl, calls } = gitlab([{ url: /\/merge_requests\/42\/notes\?per_page=100&sort=asc$/, body: [] }]);
+    expect(await gl.upsertSummaryComment(glRef, "hello", { create: false })).toBeNull();
+    expect(calls.map((c) => c.method ?? "GET")).not.toContain("POST");
   });
 
   it("resolves and reopens only its own diff discussions", async () => {

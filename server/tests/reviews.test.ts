@@ -600,6 +600,27 @@ describe("GET /api/reviews/:id and /markdown", () => {
     expect(res.text).not.toContain("in the sections below.");
   });
 
+  it("holds back what the stored result says was left without a thread, whatever the config says", async () => {
+    const job = await completedJob();
+    const sample = await sampleResult();
+    const minor = sample.findings.find((f) => f.title.startsWith("c is never negative"))!;
+    const result = { ...sample, heldBack: [minor.fingerprint] };
+    await prisma.reviewJob.update({
+      where: { id: job.id },
+      data: {
+        result,
+        // Limits that would hold back nothing: the stored selection wins,
+        // since it depended on the threads already on the change.
+        resolvedConfig: { config: { output: { postInline: true, inlineMinSeverity: "info", maxInlineComments: null, agentPrompts: false } } },
+      },
+    });
+
+    const res = await request(app).get(`/api/reviews/${job.id}/markdown`).set("Cookie", cookie);
+
+    expect(res.text).toBe(toMarkdown(result, { agentPrompt: false, findingPrompts: false }));
+    expect(res.text).toContain("Not posted inline (1)");
+  });
+
   it("409s for markdown before there is a result", async () => {
     const job = await prisma.reviewJob.create({
       data: { repositoryId: repoId, number: 7, headSha: "h", trigger: "manual" },

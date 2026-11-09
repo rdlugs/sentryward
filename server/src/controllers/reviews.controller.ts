@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { z } from "zod";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { median } from "../lib/stats.ts";
@@ -366,6 +367,8 @@ export async function getReview(req: Request, res: Response) {
   });
 }
 
+const storedRulesSchema = z.array(z.object({ id: z.string(), description: z.string(), paths: z.array(z.string()).optional() }));
+
 export async function getReviewMarkdown(req: Request, res: Response) {
   const { id } = reviewIdParamSchema.parse(req.params);
   const review = await loadOwnedReview(req.workspaceId!, id);
@@ -380,7 +383,9 @@ export async function getReviewMarkdown(req: Request, res: Response) {
   // stored before output.findingCounts or output.reviewStats existed showed
   // those lines, and before output.walkthroughLabels or
   // output.walkthroughBlastRadius those segments; jobs stored before
-  // output.agentPromptAll existed had no prompt.
+  // output.agentPromptAll existed had no prompt. What the inline limits held
+  // back is in the result itself (ReviewResult.heldBack), since it depended on
+  // the threads already on the change.
   const stored = review.resolvedConfig as {
     config?: {
       output?: {
@@ -392,7 +397,9 @@ export async function getReviewMarkdown(req: Request, res: Response) {
         highLevelSummaryPlacement?: string;
         walkthroughLabels?: boolean;
         walkthroughBlastRadius?: boolean;
+        agentPrompts?: boolean;
       };
+      rules?: unknown;
     };
   } | null;
   const output = stored?.config?.output;
@@ -401,9 +408,15 @@ export async function getReviewMarkdown(req: Request, res: Response) {
   // Results stored before output.findingLifecycle existed have no lifecycle.
   const lifecycle = output?.findingLifecycle !== false;
   const agentPrompt = output?.agentPromptAll === true;
+  // Only held-back findings use these, as summaryPlacement passes them.
+  const findingPrompts = output?.agentPrompts !== false;
+  // Only what the rule's wording needs, so a rule stored under an older
+  // schema still renders.
+  const parsedRules = storedRulesSchema.safeParse(stored?.config?.rules);
+  const rules = parsedRules.success ? parsedRules.data : undefined;
   res
     .type("text/markdown; charset=utf-8")
-    .send(toMarkdown(result, { counts, stats, lifecycle, agentPrompt, ...walkthroughOptions(output) }));
+    .send(toMarkdown(result, { counts, stats, lifecycle, agentPrompt, rules, findingPrompts, ...walkthroughOptions(output) }));
 }
 
 export async function rerunReview(req: Request, res: Response) {

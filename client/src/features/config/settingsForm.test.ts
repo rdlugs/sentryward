@@ -43,7 +43,10 @@ const schema: ConfigSchema = {
     output: {
       walkthrough: true,
       postInline: true,
+      inlineMinSeverity: "info",
+      maxInlineComments: null,
       postSummary: true,
+      summaryOnlyWithFindings: false,
       postCheck: true,
       resolveFixedThreads: true,
       findingCounts: true,
@@ -134,6 +137,7 @@ describe("toSettings", () => {
       review: INHERIT,
       summary: INHERIT,
       highLevelSummaryPlacement: INHERIT,
+      inlineMinSeverity: INHERIT,
       verify: INHERIT,
       context: INHERIT,
       thinking: INHERIT,
@@ -177,6 +181,27 @@ describe("toSettings", () => {
     const form = toForm(saved)
     expect(form.numbers.contextBudget).toBe("auto")
     expect(toSettings(saved, form)).toEqual(saved)
+  })
+
+  it("round-trips the inline limits and summary only with findings, saving no cap as null", () => {
+    const saved = { output: { inlineMinSeverity: "major", maxInlineComments: 5, summaryOnlyWithFindings: true } }
+    const form = toForm(saved)
+    expect(form.choices.inlineMinSeverity).toBe("major")
+    expect(form.numbers.maxInlineComments).toBe("5")
+    expect(form.flags.summaryOnlyWithFindings).toBe(true)
+    expect(toSettings(saved, form)).toEqual(saved)
+
+    const uncapped = { output: { maxInlineComments: null } }
+    expect(toForm(uncapped).numbers.maxInlineComments).toBe("none")
+    expect(toSettings({}, { ...toForm({}), numbers: { ...toForm({}).numbers, maxInlineComments: "None" } })).toEqual(uncapped)
+  })
+
+  it("holds back an inline cap out of range or not a number", () => {
+    const numbers = (maxInlineComments: string) => ({ ...toForm({}), numbers: { ...toForm({}).numbers, maxInlineComments } })
+    expect(validateForm(numbers("0")).maxInlineComments).toBe("Must be between 1 and 100")
+    expect(validateForm(numbers("101")).maxInlineComments).toBe("Must be between 1 and 100")
+    expect(validateForm(numbers("lots")).maxInlineComments).toBe('Enter a whole number or "none"')
+    expect(validateForm(numbers("none")).maxInlineComments).toBeUndefined()
   })
 
   it("trims lists, keeps commas in globs and drops incomplete language rows", () => {

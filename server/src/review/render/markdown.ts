@@ -1,3 +1,4 @@
+import type { Rule } from "../config/schema.ts";
 import { BUCKET_TITLE, SUMMARY_BUCKETS } from "../core/buckets.ts";
 import type {
   Bucket,
@@ -12,7 +13,7 @@ import type {
 } from "../core/models.ts";
 import { SEVERITIES, type Severity } from "../core/severity.ts";
 import { DESCRIPTION_SUMMARY_END, DESCRIPTION_SUMMARY_START, SUMMARY_MARKER } from "../core/markers.ts";
-import { agentPromptBlock, allFindingsPrompt } from "./agentPrompt.ts";
+import { agentPromptBlock, allFindingsPrompt, findingPrompt } from "./agentPrompt.ts";
 import { summarize } from "./json.ts";
 import { RISK_KIND_TEXT } from "../context/risk.ts";
 
@@ -46,6 +47,19 @@ const BUCKET_ICON: Record<Bucket, string> = {
   outside_diff: "📍",
   nitpick: "🧹",
 };
+
+// Actionable findings the inline limits left without a thread.
+const HELD_BACK_ICON = "📥";
+
+// What ruleLines prints of a rule.
+export type RuleText = Pick<Rule, "id" | "description" | "paths">;
+
+export interface HeldBackOptions {
+  // The resolved config's rules, to spell out the one a held-back rule finding broke.
+  rules?: RuleText[];
+  // output.agentPrompts: each held-back finding gets the prompt its thread would have had.
+  findingPrompts?: boolean;
+}
 
 const OMISSION_TEXT: Record<Omission["reason"], string> = {
   ignored: "ignored by configuration",
@@ -195,9 +209,15 @@ function countsLine(result: ReviewResult): string {
   const severities = SEVERITIES.filter((s) => summary.bySeverity[s])
     .map((s) => `${summary.bySeverity[s]} ${s}`)
     .join(", ");
-  const inlineCount = summary.byBucket.actionable ?? 0;
-  const rest = summary.total - inlineCount;
-  return `${plural(summary.total, "finding")} (${severities}): ${inlineCount} actionable, ${rest} in the sections below.`;
+  const actionable = summary.byBucket.actionable ?? 0;
+  const rest = summary.total - actionable;
+  const held = heldBackFindings(result).length;
+  // Held-back findings are actionable but written out below like the rest,
+  // so they are counted on their own.
+  if (held) {
+    return `${plural(summary.total, "finding")} (${severities}): ${actionable - held} inline, ${held} not posted inline, ${rest} in the other sections below.`;
+  }
+  return `${plural(summary.total, "finding")} (${severities}): ${actionable} actionable, ${rest} in the sections below.`;
 }
 
 const ASSESSMENT_TEXT: Record<IssueAssessment, string> = {
@@ -324,9 +344,41 @@ function findingDetail(finding: Finding): string[] {
   return lines;
 }
 
-function bucketSections(result: ReviewResult): string[] {
+function detailSection(summary: string, findings: Finding[]): string[] {
+  const lines = ["", "<details>", summary, ""];
+  findings.forEach((finding, index) => {
+    if (index) lines.push("");
+    lines.push(...findingDetail(finding));
+  });
+  lines.push("", "</details>");
+  return lines;
+}
+
+// The actionable findings the publisher left without a thread, in the
+// review's order. Read from the result, not re-decided from the config: which
+// ones have a thread depended on the threads already on the change.
+function heldBackFindings(result: ReviewResult): Finding[] {
+  const prints = new Set(result.heldBack ?? []);
+  return result.findings.filter((f) => f.bucket === "actionable" && prints.has(f.fingerprint));
+}
+
+// Rules set in the dashboard are not in the repository, so a developer
+// without dashboard access would otherwise see only the rule's id. Collapsed:
+// the finding already says what is wrong; this is the rule's own wording.
+export function ruleLines(finding: Finding, rules: RuleText[] | undefined): string[] {
+  if (finding.source !== "rule" || !finding.ruleId) return [];
+  const rule = rules?.find((candidate) => candidate.id === finding.ruleId);
+  if (!rule) return [];
+  const lines = ["", "<details>", `<summary>📏 Rule ${rule.id}</summary>`, "", htmlBlockText(rule.description.trim())];
+  if (rule.paths?.length) lines.push("", `Applies to: ${rule.paths.map((path) => `\`${sanitize(path).replace(/`/g, "")}\``).join(", ")}`);
+  lines.push("", "</details>");
+  return lines;
+}
+
+function bucketSections(result: ReviewResult, options: HeldBackOptions): string[] {
   const lines: string[] = [];
-  const actionable = result.findings.filter((f) => f.bucket === "actionable");
+  const heldBack = heldBackFindings(result);
+  const actionable = result.findings.filter((f) => f.bucket === "actionable" && !heldBack.includes(f));
   if (actionable.length) {
     // Each has its own inline thread; the summary only indexes them.
     lines.push("", "<details>", bucketSummary("actionable", actionable.length), "");
@@ -335,15 +387,24 @@ function bucketSections(result: ReviewResult): string[] {
     }
     lines.push("", "</details>");
   }
+  // Below the inline threshold or over the cap: no thread holds them, so the
+  // summary carries them in full.
+  // What the thread would have carried beyond the finding itself goes with
+  // it: the rule's wording and, under output.agentPrompts, its own prompt.
+  // A suggestion stays a plain fence, since none can be applied from here.
+  if (heldBack.length) {
+    lines.push("", "<details>", `<summary>${HELD_BACK_ICON} Not posted inline (${heldBack.length})</summary>`, "");
+    heldBack.forEach((finding, index) => {
+      if (index) lines.push("");
+      lines.push(...findingDetail(finding), ...ruleLines(finding, options.rules));
+      if (options.findingPrompts) lines.push("", ...agentPromptBlock("Prompt for AI agents", findingPrompt(finding)));
+    });
+    lines.push("", "</details>");
+  }
   for (const bucket of SUMMARY_BUCKETS) {
     const findings = result.findings.filter((f) => f.bucket === bucket);
     if (!findings.length) continue;
-    lines.push("", "<details>", bucketSummary(bucket, findings.length), "");
-    findings.forEach((finding, index) => {
-      if (index) lines.push("");
-      lines.push(...findingDetail(finding));
-    });
-    lines.push("", "</details>");
+    lines.push(...detailSection(bucketSummary(bucket, findings.length), findings));
   }
   return lines;
 }
@@ -461,11 +522,21 @@ function footer(result: ReviewResult): string {
 // counting the findings (output.findingCounts), `stats: false` the line
 // naming the commit, models and coverage (output.reviewStats), `lifecycle:
 // false` the comparison with the earlier reviews (output.findingLifecycle),
-// and `agentPrompt: false` the one prompt covering every finding
-// (output.agentPromptAll). The rest shape the walkthrough (walkthroughOptions).
+// `agentPrompt: false` the one prompt covering every finding
+// (output.agentPromptAll). The findings held back from inline threads come
+// from the result (ReviewResult.heldBack); `rules` and `findingPrompts`
+// (output.agentPrompts) add to each what its thread would have carried. The
+// rest shape the walkthrough (walkthroughOptions).
 export function toMarkdown(
   result: ReviewResult,
-  options: { walkthrough?: boolean; counts?: boolean; stats?: boolean; lifecycle?: boolean; agentPrompt?: boolean } & WalkthroughOptions = {},
+  options: {
+    walkthrough?: boolean;
+    counts?: boolean;
+    stats?: boolean;
+    lifecycle?: boolean;
+    agentPrompt?: boolean;
+  } & HeldBackOptions &
+    WalkthroughOptions = {},
 ): string {
   const walkthrough = options.walkthrough === false ? null : walkthroughSection(result, options);
   const lines = [walkthrough?.heading ?? "## Summary", ...(walkthrough?.lines ?? [])];
@@ -473,7 +544,7 @@ export function toMarkdown(
   if (options.counts !== false) lines.push("", countsLine(result));
   lines.push(...incrementalNote(result));
   if (options.lifecycle !== false) lines.push(...lifecycleSection(result));
-  lines.push(...bucketSections(result));
+  lines.push(...bucketSections(result, options));
   if (options.agentPrompt !== false && result.findings.length) {
     lines.push("", ...agentPromptBlock(`Prompt for AI agents (${plural(result.findings.length, "finding")})`, allFindingsPrompt(result.findings)));
   }

@@ -5,7 +5,8 @@ import { DESCRIPTION_END, DESCRIPTION_START, WALKTHROUGH_MARKER, markersIn } fro
 import type { Finding, ReviewResult } from "../src/review/core/models.ts";
 import type { CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
 import { inlineBody, inlineComments } from "../src/review/publish/inline.ts";
-import { publishReview, summaryPlacement } from "../src/review/publish/publisher.ts";
+import { inlineSelection } from "../src/review/core/buckets.ts";
+import { publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
 import { commitStatus } from "../src/review/publish/status.ts";
 import { toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
 import { makeChangeSet } from "./helpers/changeSet.ts";
@@ -47,6 +48,25 @@ describe("inlineComments", () => {
     expect(rest.map((c) => c.fingerprint)).toEqual([actionable[1]!.fingerprint]);
   });
 
+  it("posts only findings at or above the inline severity, up to the cap, most severe first", async () => {
+    const result = await sampleResult();
+    const changeSet = makeChangeSet();
+    const sql = finding(result, "SQL");
+    const minor = finding(result, "c is never negative");
+    // The minor finding first, so the cap has to pick by severity, not order.
+    const findings = [minor, ...result.findings.filter((f) => f !== minor)];
+    const prints = (limits: { minSeverity: "info" | "major"; max: number | null }, posted = new Set<string>()) => {
+      const heldBack = new Set(inlineSelection(findings, limits, posted).heldBack.map((f) => f.fingerprint));
+      return inlineComments(findings, changeSet, "github", posted, { heldBack }).map((c) => c.fingerprint);
+    };
+
+    expect(prints({ minSeverity: "info", max: null })).toEqual([minor.fingerprint, sql.fingerprint]);
+    expect(prints({ minSeverity: "major", max: null })).toEqual([sql.fingerprint]);
+    expect(prints({ minSeverity: "info", max: 1 })).toEqual([sql.fingerprint]);
+    // A thread an earlier run posted still takes its place under the cap.
+    expect(prints({ minSeverity: "info", max: 1 }, new Set([sql.fingerprint]))).toEqual([]);
+  });
+
   it("adds the old line for a finding on an unchanged context line", async () => {
     const result = await sampleResult();
     const onContext: Finding = { ...finding(result, "SQL"), startLine: 13, endLine: 13 };
@@ -79,6 +99,8 @@ function recordingPublisher(
     description?: string;
     failDescription?: boolean;
     failThreads?: boolean;
+    // Whether a summary comment from an earlier run is on the change.
+    summaryOnForge?: boolean;
   } = {},
 ) {
   const calls = {
@@ -100,7 +122,9 @@ function recordingPublisher(
       calls.order.push("inline");
       return { posted: comments.map((c) => ({ fingerprint: c.fingerprint, forgeCommentId: "1" })), failed: [] };
     },
-    upsertSummaryComment: async (_ref, body) => {
+    upsertSummaryComment: async (_ref, body, upsert) => {
+      // Like the adapters: create: false only edits a comment already there.
+      if (upsert?.create === false && options.summaryOnForge === false) return null;
       calls.summaries.push(body);
       calls.order.push("summary");
       return "s1";
@@ -294,6 +318,145 @@ describe("publishReview", () => {
     expect(calls.inline).toEqual([]);
     expect(calls.statuses).toEqual([]);
     expect(calls.summaries).toHaveLength(1);
+  });
+});
+
+describe("inline limits and the summary", () => {
+  it("writes the findings held back from inline out in full in the summary", async () => {
+    const result = await sampleResult();
+    const minor = finding(result, "c is never negative");
+
+    const all = toMarkdown(result, { walkthrough: false });
+    expect(all).not.toContain("Not posted inline");
+    expect(toMarkdown({ ...result, heldBack: [] }, { walkthrough: false })).toBe(all);
+
+    const limited = toMarkdown({ ...result, heldBack: [minor.fingerprint] }, { walkthrough: false });
+    expect(limited).toContain("Actionable comments (1)");
+    expect(limited).toContain("Not posted inline (1)");
+    // In full, under its own heading, as the nitpick and outside-diff sections are.
+    expect(limited).toMatch(new RegExp(`#### .*: ${minor.title}`));
+    // Counted on its own, since it is written out below rather than inline.
+    expect(limited).toMatch(/: 1 inline, 1 not posted inline, \d+ in the other sections below\./);
+  });
+
+  it("gives a held-back finding the rule wording and prompt its thread would have had", async () => {
+    const result = await sampleResult();
+    const minor = { ...finding(result, "c is never negative"), source: "rule" as const, ruleId: "no-dead-checks" };
+    const held = { ...result, findings: result.findings.map((f) => (f.fingerprint === minor.fingerprint ? minor : f)), heldBack: [minor.fingerprint] };
+    const rules = [{ id: "no-dead-checks", description: "Remove checks that can never be true." }];
+
+    const withExtras = toMarkdown(held, { walkthrough: false, agentPrompt: false, rules, findingPrompts: true });
+    expect(withExtras).toContain("📏 Rule no-dead-checks");
+    expect(withExtras).toContain("Remove checks that can never be true.");
+    expect(withExtras).toContain("Prompt for AI agents");
+
+    const plain = toMarkdown(held, { walkthrough: false, agentPrompt: false, rules, findingPrompts: false });
+    expect(plain).not.toContain("Prompt for AI agents");
+  });
+
+  it("keeps a finding's existing thread and counts it toward the cap", async () => {
+    const result = await sampleResult();
+    const sql = finding(result, "SQL");
+    const minor = finding(result, "c is never negative");
+    const cap = (minSeverity: "info" | "critical", max: number | null, posted: string[]) =>
+      inlineSelection(result.findings, { minSeverity, max }, new Set(posted));
+
+    // The minor finding's thread is already there: it stays inline and fills
+    // the only slot, so the more severe new finding is held back.
+    expect(cap("info", 1, [minor.fingerprint]).heldBack).toEqual([sql]);
+    // A floor raised after the thread went up does not hide it either.
+    expect(cap("critical", null, [minor.fingerprint]).inline).toContain(minor);
+    // More threads than the cap: no new ones, and the slots never go negative.
+    expect(cap("info", 1, [minor.fingerprint, sql.fingerprint]).heldBack).toEqual([]);
+  });
+
+  it("publishes the inline limits and holds the rest back to the summary", async () => {
+    const result = await sampleResult();
+    const { publisher, calls } = recordingPublisher();
+
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result,
+      config: config({ output: { maxInlineComments: 1 } }),
+      postedFingerprints: new Set(),
+    });
+
+    expect(calls.inline.map((c) => c.fingerprint)).toEqual([finding(result, "SQL").fingerprint]);
+    expect(calls.summaries[0]).toContain("Not posted inline (1)");
+    // Returned so the worker stores it in the result for re-renders.
+    expect(publication.heldBack).toEqual([finding(result, "c is never negative").fingerprint]);
+  });
+
+  it("never opens more threads than the cap, counting those already on the change", async () => {
+    const result = await sampleResult();
+    const sql = finding(result, "SQL");
+    const minor = finding(result, "c is never negative");
+    // An earlier run posted the minor finding's thread, by the forge's markers.
+    const { publisher, calls } = recordingPublisher({ onForge: [minor.fingerprint] });
+
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result,
+      config: config({ output: { maxInlineComments: 1 } }),
+      postedFingerprints: new Set(),
+    });
+
+    expect(calls.inline).toEqual([]);
+    expect(publication.inlineSkipped).toBe(1);
+    expect(publication.heldBack).toEqual([sql.fingerprint]);
+    // Only the finding without a thread is written out, not the one that has one.
+    expect(calls.summaries[0]).toContain("Not posted inline (1)");
+    expect(calls.summaries[0]).toMatch(/#### .*: SQL built from/);
+    expect(calls.summaries[0]).not.toMatch(new RegExp(`#### .*: ${minor.title}`));
+  });
+
+  it("holds nothing back when inline comments are off", async () => {
+    const result = await sampleResult();
+    const off = config({ output: { postInline: false, inlineMinSeverity: "critical" } });
+    const selected = withInlineSelection(off, result, new Set());
+    expect(selected.heldBack).toBeUndefined();
+    expect(summaryPlacement(off, selected).summary).not.toContain("Not posted inline");
+  });
+});
+
+describe("summary only with findings", () => {
+  async function clean(status: ReviewResult["status"] = "completed"): Promise<ReviewResult> {
+    return { ...(await sampleResult()), findings: [], status };
+  }
+
+  async function publishClean(result: ReviewResult, output: ConfigOverride["output"], summaryOnForge: boolean) {
+    const { publisher, calls } = recordingPublisher({ summaryOnForge });
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result,
+      config: config({ output }),
+      postedFingerprints: new Set(),
+    });
+    return { publication, calls };
+  }
+
+  it("starts no summary comment for a clean review, but still reports the status", async () => {
+    const { publication, calls } = await publishClean(await clean(), { summaryOnlyWithFindings: true }, false);
+    expect(calls.summaries).toEqual([]);
+    expect(publication.summaryCommentId).toBeNull();
+    expect(publication.walkthroughLocation).toBeNull();
+    expect(calls.statuses).toHaveLength(1);
+    expect(publication.errors).toEqual([]);
+  });
+
+  it("updates a summary an earlier run left on the change", async () => {
+    const { publication, calls } = await publishClean(await clean(), { summaryOnlyWithFindings: true }, true);
+    expect(calls.summaries).toHaveLength(1);
+    expect(publication.summaryCommentId).toBe("s1");
+  });
+
+  it("still posts the summary for a partial review, a review with findings, or with the option off", async () => {
+    expect((await publishClean(await clean("partial"), { summaryOnlyWithFindings: true }, false)).calls.summaries).toHaveLength(1);
+    expect((await publishClean(await sampleResult(), { summaryOnlyWithFindings: true }, false)).calls.summaries).toHaveLength(1);
+    expect((await publishClean(await clean(), {}, false)).calls.summaries).toHaveLength(1);
   });
 });
 

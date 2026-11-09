@@ -10,6 +10,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Output settings for how much a review posts (#246), each set from the Display
+  tab or `.sentryward.yaml`, defaulting to today's behaviour:
+  `output.inline_min_severity` posts inline comments only at or above a
+  severity, `output.max_inline_comments` caps inline comments on the change (the
+  most severe first, threads from earlier runs included), and findings either one holds back are written out in
+  full in the summary under "Not posted inline".
+  `output.summary_only_with_findings` starts no summary comment for a completed
+  review with no findings, while still updating one an earlier run posted; the
+  commit status still reports the verdict.
 - Sign up and log in with a GitHub or GitLab account (gitlab.com or
   self-managed), alongside email and password (#230). Each provider appears on
   the login and register pages once its `GITHUB_LOGIN_*` or `GITLAB_LOGIN_*`

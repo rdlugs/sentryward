@@ -344,8 +344,11 @@ interface Transition {
 export function ReviewPreview(props: {
   request: Omit<PreviewRequest, "provider"> | null
   focus?: { view: View; seq: number }
+  // Shown above the summary view: what the sample change cannot show, such as
+  // output.summaryOnlyWithFindings, since the sample always has findings.
+  summaryNote?: string
 }) {
-  const { request, focus } = props
+  const { request, focus, summaryNote } = props
   const [provider, setProvider] = useState<ForgeProvider>("github")
   // Only filters the loaded preview, so switching never refetches.
   const [view, setView] = useState<View>("summary")
@@ -419,6 +422,7 @@ export function ReviewPreview(props: {
         <SegmentedControl label="Forge" options={FORGES} value={provider} onChange={setProvider} />
         <SegmentedControl label="View" options={VIEWS} value={view} onChange={setView} />
       </div>
+      {summaryNote && view === "summary" && <p className="text-xs text-muted-foreground">{summaryNote}</p>}
       {!request && preview.data && (
         <p className="text-xs text-muted-foreground">Fix the highlighted fields to update the preview.</p>
       )}

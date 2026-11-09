@@ -373,10 +373,15 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     // Best effort: a review must not fail because its progress note did.
     if (config.output.postSummary) {
       const outputs = { walkthrough, inline: config.output.postInline, status: config.output.postCheck };
+      // Whether this review will have findings is not known yet, so under
+      // output.summaryOnlyWithFindings the note only replaces a summary an
+      // earlier run left and never starts one a clean run would leave behind.
       await forge
-        .upsertSummaryComment(ref, progressMarkdown(changeSet, outputs))
-        .then(() => {
-          summaryPosted = true;
+        .upsertSummaryComment(ref, progressMarkdown(changeSet, outputs), {
+          create: !config.output.summaryOnlyWithFindings,
+        })
+        .then((id) => {
+          if (id) summaryPosted = true;
         })
         .catch((err: unknown) => {
           warnings.push(`Progress comment failed: ${message(err)}`);
@@ -535,6 +540,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
       proceed: ownsClaim,
     });
     if (publication.summaryCommentId) summaryPosted = true;
+    // Like the lifecycle: the summary was rendered with it, so a re-render
+    // from the stored result must hold back the same findings.
+    if (publication.heldBack) result = { ...result, heldBack: publication.heldBack };
     if (resolvesThreads(config)) {
       threadOutcome = { attempted: [...threads.resolve, ...threads.reopen], failed: publication.threadsFailed ?? [] };
     }
@@ -561,6 +569,10 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   // stands, and the job says what did not reach the forge.
   const errors = [...result.errors, ...(publication?.errors ?? [])];
   const status = result.status === "completed" && publication?.errors.length ? "partial" : result.status;
+  // recordProgress only writes running jobs, so a stage still queued behind
+  // an earlier write (publishing, after a quick publish) would be dropped
+  // once the job is stored. Waiting here lets the last stage reach the row.
+  await progress.flush();
   const stored = await complete(job.id, job.attempts, {
     status,
     verdict: result.verdict.verdict,

@@ -80,7 +80,10 @@ export interface ConfigOverride {
   output?: {
     walkthrough?: boolean
     postInline?: boolean
+    inlineMinSeverity?: string
+    maxInlineComments?: number | null
     postSummary?: boolean
+    summaryOnlyWithFindings?: boolean
     postCheck?: boolean
     resolveFixedThreads?: boolean
     findingCounts?: boolean
@@ -170,7 +173,10 @@ export interface EffectiveConfig {
   output: {
     walkthrough: boolean
     postInline: boolean
+    inlineMinSeverity: string
+    maxInlineComments: number | null
     postSummary: boolean
+    summaryOnlyWithFindings: boolean
     postCheck: boolean
     resolveFixedThreads: boolean
     findingCounts: boolean

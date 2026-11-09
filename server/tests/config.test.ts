@@ -402,6 +402,24 @@ describe("parseRepoFile", () => {
     expect(parseRepoFile(".sentryward.yaml", "review:\n  verify: sometimes\n").override).toBeUndefined();
   });
 
+  it("reads the inline limits and summary only with findings, defaulting to posting everything", () => {
+    expect(DEFAULT_CONFIG.output).toMatchObject({
+      inlineMinSeverity: "info",
+      maxInlineComments: null,
+      summaryOnlyWithFindings: false,
+    });
+    const yaml = "output:\n  inline_min_severity: major\n  max_inline_comments: 5\n  summary_only_with_findings: true\n";
+    expect(parseRepoFile(".sentryward.yaml", yaml)).toEqual({
+      override: { output: { inlineMinSeverity: "major", maxInlineComments: 5, summaryOnlyWithFindings: true } },
+      warnings: [],
+    });
+    const resolved = resolveConfig({ repoFile: parseRepoFile(".sentryward.yaml", yaml).override });
+    expect(resolved.sources["output.maxInlineComments"]).toBe("repoFile");
+    for (const bad of ["inline_min_severity: huge", "max_inline_comments: 0", "max_inline_comments: 101"]) {
+      expect(parseRepoFile(".sentryward.yaml", `output:\n  ${bad}\n`).override).toBeUndefined();
+    }
+  });
+
   it("reads the per-purpose models", () => {
     const file = "llm:\n  walkthrough_model: anthropic/claude-haiku-5-5\n  verify_model: anthropic/claude-opus-5-5\n";
     expect(parseRepoFile(".sentryward.yaml", file)).toEqual({

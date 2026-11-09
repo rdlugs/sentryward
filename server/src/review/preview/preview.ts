@@ -5,7 +5,7 @@ import { runReview } from "../pipeline.ts";
 import { inlineComments } from "../publish/inline.ts";
 import { labelChanges } from "../publish/labels.ts";
 import { withDescriptionSummary } from "../core/markers.ts";
-import { descriptionSummary, summaryPlacement } from "../publish/publisher.ts";
+import { descriptionSummary, summaryPlacement, withInlineSelection } from "../publish/publisher.ts";
 import { commitStatus } from "../publish/status.ts";
 import { SAMPLE_NOW, sampleChange, sampleGenerate, sampleIssues } from "./sample.ts";
 
@@ -73,9 +73,11 @@ function diffAbove(file: ChangedFile, endLine: number): DiffLine[] {
 // preview cannot drift from the real output.
 export async function previewPublication(config: Config, provider: ForgeProvider): Promise<PreviewPublication> {
   const change = sampleChange(provider);
-  const result = await runReview(
-    { changeSet: change, config, issues: sampleIssues(provider) },
-    { generate: sampleGenerate, now: () => SAMPLE_NOW },
+  // The sample change has no threads yet, so the limits alone decide.
+  const result = withInlineSelection(
+    config,
+    await runReview({ changeSet: change, config, issues: sampleIssues(provider) }, { generate: sampleGenerate, now: () => SAMPLE_NOW }),
+    new Set(),
   );
   const { output } = config;
 
@@ -94,10 +96,15 @@ export async function previewPublication(config: Config, provider: ForgeProvider
       description: withDescriptionSummary(change.description, descriptionSummary(config, result)),
     },
     status: output.postCheck ? commitStatus(result) : null,
-    summaryComment: placement.summary,
+    // The sample change has no earlier summary to update.
+    summaryComment: placement.summaryCreate ? placement.summary : null,
     walkthroughComment: placement.walkthroughComment,
     inline: output.postInline
-      ? inlineComments(result.findings, change, provider, new Set(), { agentPrompt: output.agentPrompts, rules: config.rules }).map((comment) => ({
+      ? inlineComments(result.findings, change, provider, new Set(), {
+          agentPrompt: output.agentPrompts,
+          rules: config.rules,
+          heldBack: new Set(result.heldBack ?? []),
+        }).map((comment) => ({
           path: comment.path,
           startLine: comment.startLine,
           endLine: comment.endLine,
