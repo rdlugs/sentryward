@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "@/lib/api"
 
 const NOTIFICATIONS_KEY = ["notifications"]
@@ -18,6 +18,28 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   email: "Email",
 }
 
+export type DeliveryStatus = "sent" | "failed"
+// A NotificationEvent, or "test" for a delivery sent from the dashboard.
+export type DeliveryEvent = NotificationEvent | "test"
+
+export interface LastDelivery {
+  status: DeliveryStatus
+  event: DeliveryEvent
+  // Set when the far end answered with a non-2xx status.
+  httpStatus: number | null
+  // Never contains the target URL; the server redacts it before storing.
+  error: string | null
+  createdAt: string
+}
+
+export interface NotificationDelivery extends LastDelivery {
+  id: string
+  attempts: number
+  // Null for test deliveries, and once the review itself was pruned.
+  jobId: string | null
+  finishedAt: string
+}
+
 export interface NotificationTarget {
   id: string
   kind: NotificationKind
@@ -30,6 +52,8 @@ export interface NotificationTarget {
   recipientIds: string[]
   // A paused target keeps its settings but gets no deliveries.
   active: boolean
+  // Null until the target gets its first delivery (tests included).
+  lastDelivery: LastDelivery | null
   createdAt: string
   updatedAt: string
 }
@@ -76,10 +100,26 @@ export function useUpdateNotificationTarget() {
   })
 }
 
+// A test is recorded like any delivery, so the list's last delivery and an open
+// history both refetch afterwards, whatever the outcome.
 export function useTestNotificationTarget() {
+  const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: string) =>
       api<{ result: TestResult }>(`/notifications/${id}/test`, { method: "POST" }).then((body) => body.result),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY }),
+  })
+}
+
+export function useNotificationDeliveries(id: string, page: number, limit: number) {
+  return useQuery({
+    queryKey: [...NOTIFICATIONS_KEY, id, "deliveries", { page, limit }],
+    queryFn: () =>
+      api<{ deliveries: NotificationDelivery[]; total: number; page: number; limit: number }>(
+        `/notifications/${id}/deliveries?page=${page}&limit=${limit}`,
+      ),
+    // Keeps the current page on screen while the next one loads.
+    placeholderData: keepPreviousData,
   })
 }
 

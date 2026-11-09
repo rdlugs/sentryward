@@ -109,8 +109,11 @@ describe("execute", () => {
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).leaseExpiresAt).toEqual(held);
 
     finish();
-    await sleep(30);
-    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).leaseExpiresAt).toBeNull();
+    // The release is a DB write after the run settles; poll rather than guess
+    // how long a slow CI runner takes.
+    await vi.waitFor(async () => {
+      expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).leaseExpiresAt).toBeNull();
+    });
   });
 
   it("records a thrown error as the failure", async () => {

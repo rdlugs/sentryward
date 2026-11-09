@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
@@ -14,6 +14,7 @@ const webhook = {
   undecryptable: false,
   recipientIds: [],
   active: true,
+  lastDelivery: null,
   createdAt: "2026-10-01T00:00:00.000Z",
   updatedAt: "2026-10-01T00:00:00.000Z",
 }
@@ -284,7 +285,107 @@ describe("Notifications", () => {
     const toggle = await screen.findByRole("switch", { name: "Active: CI alerts" })
     expect(toggle).not.toBeChecked()
     expect(toggle).toBeDisabled()
-    expect(screen.queryByRole("button", { name: "Actions for CI alerts" })).not.toBeInTheDocument()
+    // The menu is there for the delivery history only.
+    await userEvent.click(screen.getByRole("button", { name: "Actions for CI alerts" }))
+    expect(await screen.findByRole("menuitem", { name: "View deliveries" })).toBeInTheDocument()
+    for (const name of ["Send test", "Edit", "Remove"]) {
+      expect(screen.queryByRole("menuitem", { name })).not.toBeInTheDocument()
+    }
+  })
+
+  it("shows each target's last delivery", async () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+    mockApi({
+      "GET /api/notifications": {
+        targets: [
+          { ...webhook, lastDelivery: { status: "sent", event: "blocked", httpStatus: null, error: null, createdAt: minutesAgo(4) } },
+          {
+            ...slackTarget,
+            lastDelivery: {
+              status: "failed",
+              event: "test",
+              httpStatus: 503,
+              error: null,
+              createdAt: minutesAgo(60),
+            },
+          },
+          { ...emailTarget, lastDelivery: null },
+        ],
+        mailConfigured: true,
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const cell = (name: string, column: number) => {
+      const row = screen.getAllByRole("row").find((r) => within(r).queryByText(name))!
+      return within(row).getAllByRole("cell")[column]!.textContent
+    }
+    expect(await screen.findByRole("columnheader", { name: "Last delivery" })).toBeInTheDocument()
+    expect(cell("CI alerts", 4)).toBe("Sent · 4 minutes ago")
+    expect(cell("Team channel", 4)).toBe("Failed · 503 · 1 hour ago")
+    expect(cell("Leads", 4)).toBe("Never")
+  })
+
+  it("opens a target's delivery history and pages through it", async () => {
+    const delivery = {
+      id: "d1",
+      event: "failed",
+      status: "failed",
+      httpStatus: null,
+      error: "getaddrinfo ENOTFOUND ci.example.com",
+      attempts: 1,
+      jobId: "job-1",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      finishedAt: "2026-11-01T10:00:01.000Z",
+    }
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "GET /api/notifications/n1/deliveries?page=1&limit=20": {
+        deliveries: [
+          delivery,
+          { ...delivery, id: "d2", event: "test", status: "sent", error: null, jobId: null },
+        ],
+        total: 21,
+        page: 1,
+        limit: 20,
+      },
+      "GET /api/notifications/n1/deliveries?page=2&limit=20": {
+        deliveries: [{ ...delivery, id: "d3", event: "completed", status: "sent", error: null }],
+        total: 21,
+        page: 2,
+        limit: 20,
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "View deliveries" }))
+
+    const sheet = await screen.findByRole("dialog", { name: "Deliveries to CI alerts" })
+    expect(await within(sheet).findByText("getaddrinfo ENOTFOUND ci.example.com")).toBeInTheDocument()
+    expect(within(sheet).getByText("Test")).toBeInTheDocument()
+    expect(within(sheet).getAllByRole("link", { name: "View review" })[0]).toHaveAttribute("href", "/reviews/job-1")
+
+    await userEvent.click(within(sheet).getByRole("button", { name: /next/i }))
+    expect(await within(sheet).findByText("Completed")).toBeInTheDocument()
+    expect(calls(fetchSpy, "GET", "/api/notifications/n1/deliveries?page=2&limit=20")).toHaveLength(1)
+  })
+
+  it("refreshes the last delivery after a test", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "POST /api/notifications/n1/test": { result: { ok: true } },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Send test" }))
+
+    expect(await screen.findByText("Test sent to CI alerts")).toBeInTheDocument()
+    await vi.waitFor(() => expect(calls(fetchSpy, "GET", "/api/notifications")).toHaveLength(2))
   })
 
   it("asks before removing a target", async () => {

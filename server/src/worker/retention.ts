@@ -199,6 +199,53 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
 export interface RetentionResult extends PruneResult, PurgeResult {
   auditRows: number;
   oauthStates: number;
+  deliveries: number;
+}
+
+// The delivery log answers "is this target working", so recent rows are all it
+// needs; a fixed window keeps a busy target from growing it without bound. A
+// workspace whose privacy retention is shorter keeps its log for that long
+// instead, since a delivery row describes a review that is already gone.
+export const DELIVERY_RETENTION_DAYS = 30;
+export const DELIVERIES_PER_TARGET = 100;
+
+// Deletes deliveries older than `days`, a batch at a time like pruneReviews.
+// Unscoped (every workspace) it also enforces the per-target cap; that cap is
+// the same for everyone, so the scoped passes leave it to the unscoped one.
+export async function pruneDeliveries(
+  days: number,
+  { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - days * DAY_MS);
+  const where: Prisma.NotificationDeliveryWhereInput = {
+    createdAt: { lt: cutoff },
+    ...(workspaceIds ? { target: { workspaceId: { in: workspaceIds } } } : {}),
+  };
+  let deleted = 0;
+  for (;;) {
+    const rows = await prisma.notificationDelivery.findMany({ where, select: { id: true }, take: batchSize });
+    if (rows.length) {
+      deleted += (await prisma.notificationDelivery.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } })).count;
+    }
+    if (rows.length < batchSize) break;
+  }
+  if (workspaceIds) return deleted;
+
+  for (;;) {
+    const surplus = await prisma.$executeRaw`
+      DELETE FROM notification_deliveries WHERE id IN (
+        SELECT id FROM (
+          SELECT id, row_number() OVER (PARTITION BY target_id ORDER BY created_at DESC, id DESC) AS rank
+          FROM notification_deliveries
+        ) ranked
+        WHERE rank > ${DELIVERIES_PER_TARGET}
+        LIMIT ${batchSize}
+      )
+    `;
+    deleted += surplus;
+    if (surplus < batchSize) break;
+  }
+  return deleted;
 }
 
 // One retention pass: each workspace by its effective period (the shorter of
@@ -225,6 +272,7 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     replies: 0,
     auditRows: 0,
     oauthStates: 0,
+    deliveries: 0,
   };
   for (const [days, workspaceIds] of byDays) {
     const pruned = await pruneReviews(days, { now, workspaceIds });
@@ -235,6 +283,9 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     result.findings += purged.findings;
     result.postedFindings += purged.postedFindings;
     result.replies += purged.replies;
+    if (days < DELIVERY_RETENTION_DAYS) {
+      result.deliveries += await pruneDeliveries(days, { now, workspaceIds });
+    }
   }
 
   if (instance.auditRetentionDays !== null) {
@@ -254,5 +305,6 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
   const expired = { expiresAt: { lt: now } };
   result.oauthStates += (await prisma.signInState.deleteMany({ where: expired })).count;
   result.oauthStates += (await prisma.oAuthState.deleteMany({ where: expired })).count;
+  result.deliveries += await pruneDeliveries(DELIVERY_RETENTION_DAYS, { now });
   return result;
 }

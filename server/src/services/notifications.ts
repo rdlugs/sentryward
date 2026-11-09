@@ -1,8 +1,10 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { env } from "../config/env.ts";
 import type {
+  NotificationDelivery,
   NotificationEvent,
   NotificationTarget,
+  Prisma,
   ReviewJob,
   ReviewStatus,
 } from "../generated/prisma/client.ts";
@@ -141,6 +143,13 @@ export function newWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
 
+// A delivery the far end answered with a non-2xx status.
+export class DeliveryError extends Error {
+  constructor(readonly httpStatus: number) {
+    super(`Responded with ${httpStatus}`);
+  }
+}
+
 // Checked on every delivery, not only when saved, since the name can resolve
 // elsewhere later. Redirects are not followed, so one cannot lead past the check.
 async function post(url: string, body: string, headers: Record<string, string> = {}): Promise<void> {
@@ -153,7 +162,7 @@ async function post(url: string, body: string, headers: Record<string, string> =
     signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
   });
   if (!res.ok) {
-    throw new Error(`Responded with ${res.status}`);
+    throw new DeliveryError(res.status);
   }
 }
 
@@ -185,6 +194,9 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
         where: { workspaceId, userId: { in: target.recipientIds } },
         select: { user: { select: { email: true } } },
       });
+      // Sending to nobody is not a success: the log would show a dead target
+      // as healthy.
+      if (!members.length) throw new Error("None of this target's recipients are members of the workspace any more");
       const subject = describe(payload);
       const text = `${subject}\n\n${payload.review.url}\n`;
       // One message each, so recipients do not see each other's addresses.
@@ -197,7 +209,123 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
 }
 
 function message(err: unknown): string {
+  if (err instanceof DecryptError) return "The stored URL can't be decrypted; add the target again";
   return err instanceof Error ? err.message : String(err);
+}
+
+const STORED_ERROR_LIMIT = 500;
+const MIN_REDACTED_PART = 8;
+
+// Members can read stored errors, and the URL (or its query) may be the
+// credential, so it is cut out of whatever a library put in the message
+// before anything is stored. Nothing we throw names the URL today; this keeps
+// it that way if a dependency starts to.
+export function redactError(error: string, url: string | null): string {
+  let text = error;
+  if (url) {
+    const forms = new Set([url]);
+    // Pieces of the URL, any of which may be the credential on its own. Short
+    // ones are skipped so a word like "in" is not cut out of every message.
+    const parts = new Set<string>();
+    const decoded = (value: string) => {
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    };
+    try {
+      const parsed = new URL(url);
+      forms.add(parsed.href);
+      forms.add(`${parsed.origin}${parsed.pathname}`);
+      if (parsed.pathname.length > 1) {
+        parts.add(parsed.pathname);
+        parts.add(decoded(parsed.pathname));
+        for (const segment of parsed.pathname.split("/")) {
+          parts.add(segment);
+          parts.add(decoded(segment));
+        }
+      }
+      if (parsed.search) {
+        parts.add(parsed.search.slice(1));
+        parts.add(decoded(parsed.search.slice(1)));
+        for (const raw of parsed.search.slice(1).split("&")) {
+          parts.add(raw);
+          parts.add(raw.slice(raw.indexOf("=") + 1));
+        }
+        for (const [key, value] of parsed.searchParams) {
+          parts.add(`${key}=${value}`);
+          parts.add(value);
+        }
+      }
+      if (parsed.hash) parts.add(parsed.hash.slice(1));
+      parts.add(decoded(parsed.username));
+      parts.add(decoded(parsed.password));
+      if (parsed.password) parts.add(`${parsed.username}:${parsed.password}`);
+    } catch {
+      // Not a URL we can take apart; the raw string is still removed.
+    }
+    for (const part of parts) {
+      if (part.length >= MIN_REDACTED_PART) forms.add(part);
+    }
+    // Longest first, so a shorter form never leaves the tail of a longer one.
+    for (const form of [...forms].sort((a, b) => b.length - a.length)) {
+      text = text.split(form).join("[redacted]");
+    }
+  }
+  text = oneLine(text) || "Unknown error";
+  return text.length > STORED_ERROR_LIMIT ? `${text.slice(0, STORED_ERROR_LIMIT - 1)}…` : text;
+}
+
+// The URL to redact, or null when there is none or it cannot be read.
+function storedUrl(target: NotificationTarget): string | null {
+  try {
+    return targetUrl(target);
+  } catch {
+    return null;
+  }
+}
+
+export type DeliveryOutcome = { ok: true } | { ok: false; error: string };
+
+// Delivers and records the outcome. Recording is best effort: a row that cannot
+// be written is logged and the outcome still returned, so neither a review nor
+// a test answer ever depends on the log.
+async function attempt(
+  target: NotificationTarget,
+  workspaceId: string,
+  payload: NotificationPayload,
+  jobId: string | null,
+): Promise<DeliveryOutcome> {
+  const createdAt = new Date();
+  let outcome: DeliveryOutcome;
+  let httpStatus: number | null = null;
+  try {
+    await deliver(target, workspaceId, payload);
+    outcome = { ok: true };
+  } catch (err) {
+    if (err instanceof DeliveryError) httpStatus = err.httpStatus;
+    outcome = { ok: false, error: redactError(message(err), storedUrl(target)) };
+  }
+  try {
+    await prisma.notificationDelivery.create({
+      data: {
+        targetId: target.id,
+        jobId,
+        event: payload.event,
+        status: outcome.ok ? "sent" : "failed",
+        httpStatus,
+        // An HTTP failure is fully described by its status; the message is
+        // only stored when there is no status to show.
+        error: outcome.ok || httpStatus !== null ? null : outcome.error,
+        createdAt,
+        finishedAt: new Date(),
+      },
+    });
+  } catch (err) {
+    console.error(`[notify] could not record a delivery to target ${target.id}`, err);
+  }
+  return outcome;
 }
 
 // Best effort and at most once per job: called when a job reaches its final
@@ -225,10 +353,9 @@ export async function notifyJob(jobId: string): Promise<void> {
     await Promise.all(
       targets.map(async (target) => {
         const event = eventForTarget(events, target)!;
-        try {
-          await deliver(target, workspaceId, payloadFor(job, job.repository, event));
-        } catch (err) {
-          console.error(`[notify] target ${target.id} job ${jobId}: ${message(err)}`);
+        const outcome = await attempt(target, workspaceId, payloadFor(job, job.repository, event), job.id);
+        if (!outcome.ok) {
+          console.error(`[notify] target ${target.id} job ${jobId}: ${outcome.error}`);
         }
       }),
     );
@@ -238,7 +365,7 @@ export async function notifyJob(jobId: string): Promise<void> {
 }
 
 // A sample delivery from the dashboard; the outcome is the answer either way.
-export async function testTarget(target: NotificationTarget): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function testTarget(target: NotificationTarget): Promise<DeliveryOutcome> {
   const sample: NotificationPayload = {
     event: "test",
     review: {
@@ -252,17 +379,59 @@ export async function testTarget(target: NotificationTarget): Promise<{ ok: true
     change: { number: 1, title: "Test notification from Sentryward", url: null },
     findings: { total: 0, bySeverity: {} },
   };
-  try {
-    await deliver(target, target.workspaceId, sample);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof DecryptError ? "The stored URL can't be decrypted; add the target again" : message(err) };
-  }
+  return attempt(target, target.workspaceId, sample, null);
+}
+
+export type LastDelivery = Pick<NotificationDelivery, "status" | "event" | "httpStatus" | "error" | "createdAt">;
+
+// Newest first by when the attempt started (rows are stamped before sending),
+// with the id breaking ties. lastDeliveries uses the same order, so a target's
+// Last delivery is always the top row of its history.
+export const DELIVERY_ORDER = [{ createdAt: "desc" }, { id: "desc" }] satisfies Prisma.NotificationDeliveryOrderByWithRelationInput[];
+
+// Each target's newest delivery in one query, one row read per target.
+export async function lastDeliveries(targetIds: string[]): Promise<Map<string, LastDelivery>> {
+  if (!targetIds.length) return new Map();
+  const rows = await prisma.$queryRaw<
+    {
+      target_id: string;
+      status: LastDelivery["status"];
+      event: string;
+      http_status: number | null;
+      error: string | null;
+      created_at: Date;
+    }[]
+  >`
+    SELECT DISTINCT ON (target_id) target_id, status, event, http_status, error, created_at
+    FROM notification_deliveries
+    WHERE target_id = ANY(${targetIds}::uuid[])
+    ORDER BY target_id, created_at DESC, id DESC
+  `;
+  return new Map(
+    rows.map((row) => [
+      row.target_id,
+      { status: row.status, event: row.event, httpStatus: row.http_status, error: row.error, createdAt: row.created_at },
+    ]),
+  );
+}
+
+export function publicDelivery(delivery: NotificationDelivery) {
+  return {
+    id: delivery.id,
+    event: delivery.event,
+    status: delivery.status,
+    httpStatus: delivery.httpStatus,
+    error: delivery.error,
+    attempts: delivery.attempts,
+    jobId: delivery.jobId,
+    createdAt: delivery.createdAt,
+    finishedAt: delivery.finishedAt,
+  };
 }
 
 // Only the host of a URL ever leaves the server: the full Slack URL is the
 // credential, and a webhook URL may carry one in its query.
-export function publicTarget(target: NotificationTarget) {
+export function publicTarget(target: NotificationTarget, lastDelivery: LastDelivery | null = null) {
   let host: string | null = null;
   let undecryptable = false;
   if (target.encryptedUrl) {
@@ -282,6 +451,13 @@ export function publicTarget(target: NotificationTarget) {
     undecryptable,
     recipientIds: target.recipientIds,
     active: target.active,
+    lastDelivery: lastDelivery && {
+      status: lastDelivery.status,
+      event: lastDelivery.event,
+      httpStatus: lastDelivery.httpStatus,
+      error: lastDelivery.error,
+      createdAt: lastDelivery.createdAt,
+    },
     createdAt: target.createdAt,
     updatedAt: target.updatedAt,
   };
