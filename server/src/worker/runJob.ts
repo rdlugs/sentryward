@@ -569,6 +569,10 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   // stands, and the job says what did not reach the forge.
   const errors = [...result.errors, ...(publication?.errors ?? [])];
   const status = result.status === "completed" && publication?.errors.length ? "partial" : result.status;
+  // recordProgress only writes running jobs, so a stage still queued behind
+  // an earlier write (publishing, after a quick publish) would be dropped
+  // once the job is stored. Waiting here lets the last stage reach the row.
+  await progress.flush();
   const stored = await complete(job.id, job.attempts, {
     status,
     verdict: result.verdict.verdict,
