@@ -217,7 +217,9 @@ export async function pruneDeliveries(
   { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - days * DAY_MS);
+  // Pending rows are still being sent; giving up bounds how long they last.
   const where: Prisma.NotificationDeliveryWhereInput = {
+    status: { not: "pending" },
     createdAt: { lt: cutoff },
     ...(workspaceIds ? { target: { workspaceId: { in: workspaceIds } } } : {}),
   };
@@ -237,6 +239,7 @@ export async function pruneDeliveries(
         SELECT id FROM (
           SELECT id, row_number() OVER (PARTITION BY target_id ORDER BY created_at DESC, id DESC) AS rank
           FROM notification_deliveries
+          WHERE status <> 'pending'
         ) ranked
         WHERE rank > ${DELIVERIES_PER_TARGET}
         LIMIT ${batchSize}

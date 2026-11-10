@@ -35,6 +35,11 @@ export const updateNotificationSchema = z
     path: ["name"],
   });
 
+// How many failed deliveries in a row pause a target; 0 never does.
+export const notificationSettingsSchema = z.object({
+  autoPauseAfter: z.number().int("Enter a whole number").min(0, "Enter 0 or more").max(50, "Enter 50 or fewer"),
+});
+
 export const notificationParamsSchema = z.object({ id: z.uuid() });
 
 export const deliveriesQuerySchema = z.object({

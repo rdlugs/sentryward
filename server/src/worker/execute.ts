@@ -71,7 +71,9 @@ export async function execute(job: ReviewJob, deps: ExecuteDeps = defaultDeps): 
     clearInterval(beat);
     clearTimeout(timer);
     // After the job is stored, so a delivery cannot change its outcome. It
-    // only sends for a job left completed, partial or failed.
+    // only queues deliveries for a job left completed, partial or failed; the
+    // poll loop sends them, so a slow endpoint never holds this slot. If this
+    // never runs (a crash) or fails, queueMissedNotifications picks the job up.
     await deps.notify(job.id);
   }
 }

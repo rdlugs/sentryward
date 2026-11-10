@@ -7,6 +7,7 @@ import { decrypt, encrypt } from "../src/lib/crypto.ts";
 import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { escapeSlack, eventsFor, notifyJob, redactError, signature } from "../src/services/notifications.ts";
+import { claimDueDeliveries, runDelivery } from "../src/worker/deliveryQueue.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { addMember, createUser, inWorkspace } from "./helpers/users.ts";
 
@@ -91,6 +92,13 @@ function target(kind: "webhook" | "slack", events: NotificationEvent[], url = "h
   });
 }
 
+// Queues the job's deliveries and sends whatever is due, as one worker poll
+// would.
+async function notifyAndSend(jobId: string) {
+  await notifyJob(jobId);
+  for (const id of await claimDueDeliveries(100)) await runDelivery(id);
+}
+
 describe("eventsFor", () => {
   it.each([
     ["completed", "pass", ["completed"]],
@@ -113,7 +121,7 @@ describe("notifyJob", () => {
     await target("webhook", ["failed"], "https://hooks.example.com/failures");
     const job = await finishedJob("completed", "blocked");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(stub.calls).toHaveLength(1);
     const [call] = stub.calls;
@@ -143,7 +151,7 @@ describe("notifyJob", () => {
     await prisma.notificationTarget.update({ where: { id: paused.id }, data: { active: false } });
     const job = await finishedJob("completed", "pass");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(stub.calls.map((call) => call.url)).toEqual(["https://hooks.example.com/sw"]);
   });
@@ -154,7 +162,7 @@ describe("notifyJob", () => {
     await target("webhook", ["blocked", "completed"]);
     const job = await finishedJob("completed", "blocked");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(stub.calls).toHaveLength(1);
     expect(JSON.parse(stub.calls[0]!.body!).event).toBe("blocked");
@@ -166,7 +174,7 @@ describe("notifyJob", () => {
     await target("slack", ["failed"], "https://hooks.slack.com/services/T/B/X");
     const job = await finishedJob("failed", "error", "No API key for anthropic");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
       text: "Review failed: acme/web#7",
@@ -187,7 +195,7 @@ describe("notifyJob", () => {
     await target("slack", ["blocked"], "https://hooks.slack.com/services/T/B/X");
     const job = await finishedJob("completed", "blocked");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     const { text, blocks } = JSON.parse(stub.calls[0]!.body!);
     expect(text).toBe("Review blocked: acme/web#7");
@@ -242,8 +250,8 @@ describe("notifyJob", () => {
     });
     const failed = await finishedJob("failed", "error", hostile);
 
-    await notifyJob(blocked.id);
-    await notifyJob(failed.id);
+    await notifyAndSend(blocked.id);
+    await notifyAndSend(failed.id);
 
     const flat = hostile.replace(/\s+/g, " ").trim();
     const jobs = [blocked, failed];
@@ -265,7 +273,7 @@ describe("notifyJob", () => {
     const stub = fetchStub([{ method: "POST", url: /hooks\.slack\.com/ }]);
     vi.stubGlobal("fetch", stub.fetch);
     await target("slack", ["failed"], "https://hooks.slack.com/services/T/B/X");
-    await notifyJob((await finishedJob("failed", "error", "x".repeat(5000))).id);
+    await notifyAndSend((await finishedJob("failed", "error", "x".repeat(5000))).id);
 
     const strings = slackStrings(JSON.parse(stub.calls[0]!.body!));
     for (const s of strings) expect(s.text.length).toBeLessThanOrEqual(2000);
@@ -281,10 +289,25 @@ describe("notifyJob", () => {
     vi.stubGlobal("fetch", stub.fetch);
     await target("webhook", ["blocked", "failed", "completed"]);
 
-    await notifyJob((await finishedJob("skipped", null)).id);
-    await notifyJob((await finishedJob("cancelled", null)).id);
+    await notifyAndSend((await finishedJob("skipped", null)).id);
+    await notifyAndSend((await finishedJob("cancelled", null)).id);
 
     expect(stub.calls).toHaveLength(0);
+  });
+
+  it("queues a row per target without sending anything itself", async () => {
+    const stub = fetchStub([]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const hook = await target("webhook", ["completed"]);
+    const job = await finishedJob("completed", "pass");
+
+    await notifyJob(job.id);
+    await notifyJob(job.id);
+
+    expect(stub.calls).toHaveLength(0);
+    expect(await prisma.notificationDelivery.findMany()).toMatchObject([
+      { targetId: hook.id, jobId: job.id, event: "completed", status: "pending", attempts: 0, finishedAt: null },
+    ]);
   });
 
   it("notifies a job once", async () => {
@@ -293,8 +316,8 @@ describe("notifyJob", () => {
     await target("webhook", ["failed"]);
     const job = await finishedJob("failed", "error", "Worker stopped responding");
 
-    await notifyJob(job.id);
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
+    await notifyAndSend(job.id);
 
     expect(stub.calls).toHaveLength(1);
   });
@@ -310,12 +333,14 @@ describe("notifyJob", () => {
     await target("slack", ["failed"]);
     const job = await finishedJob("failed", "error", "Forge unreachable");
 
-    await expect(notifyJob(job.id)).resolves.toBeUndefined();
+    await expect(notifyAndSend(job.id)).resolves.toBeUndefined();
 
     expect(stub.calls.map((call) => call.url)).toEqual(
       expect.arrayContaining(["https://broken.example.com/sw", "https://hooks.example.com/sw"]),
     );
-    expect(errors).toHaveBeenCalledWith(`[notify] target ${broken.id} job ${job.id}: Responded with 500`);
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`^\\[notify\\] target ${broken.id} delivery \\S+ attempt 1 failed \\(HTTP 500\\); retrying at `)),
+    );
     expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
       status: "failed",
       error: "Forge unreachable",
@@ -333,9 +358,10 @@ describe("notifyJob", () => {
     const hook = await target("webhook", ["completed"]);
     const job = await finishedJob("completed", "pass");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
-    expect(errors).toHaveBeenCalledWith(`[notify] target ${hook.id} job ${job.id}: getaddrinfo ENOTFOUND`);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining(`[notify] target ${hook.id} delivery `));
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("attempt 1 failed (getaddrinfo ENOTFOUND)"));
   });
 
   it("emails only recipients who are still members", async () => {
@@ -347,7 +373,7 @@ describe("notifyJob", () => {
     });
     const job = await finishedJob("completed", "blocked");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith({
@@ -365,7 +391,7 @@ describe("notifyJob", () => {
     });
     const job = await finishedJob("failed", "error", "boom\r\n\nBcc: x@evil.example");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ subject: "Review failed: acme/web#7 - boom Bcc: x@evil.example" }),
@@ -389,7 +415,7 @@ describe("delivery log", () => {
     const broken = await target("webhook", ["completed"], "https://broken.example.com/sw");
     const job = await finishedJob("completed", "blocked");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     const rows = await deliveries();
     expect(rows).toHaveLength(2);
@@ -401,13 +427,16 @@ describe("delivery log", () => {
       error: null,
       attempts: 1,
     });
+    // A 503 is worth another try: the row waits for it, showing why.
     expect(rows.find((row) => row.targetId === broken.id)).toMatchObject({
       jobId: job.id,
       event: "completed",
-      status: "failed",
+      status: "pending",
       httpStatus: 503,
       // The status says it all; only failures without one store a message.
       error: null,
+      attempts: 1,
+      finishedAt: null,
     });
   });
 
@@ -420,10 +449,11 @@ describe("delivery log", () => {
     });
     const job = await finishedJob("failed", "error", "boom");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
+    // No one got it, so sending again cannot mail anyone twice.
     expect(await deliveries()).toMatchObject([
-      { status: "failed", httpStatus: null, error: "1 of 1 emails could not be sent" },
+      { status: "pending", httpStatus: null, error: "1 of 1 emails could not be sent" },
     ]);
   });
 
@@ -439,7 +469,7 @@ describe("delivery log", () => {
     await target("slack", ["completed"], url);
     const job = await finishedJob("completed", "pass");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     const [row] = await deliveries();
     expect(row!.error).not.toMatch(/secret-token|hush/);
@@ -456,7 +486,7 @@ describe("delivery log", () => {
     });
     const job = await finishedJob("failed", "error", "boom");
 
-    await notifyJob(job.id);
+    await notifyAndSend(job.id);
 
     expect(send).not.toHaveBeenCalled();
     expect(await deliveries()).toMatchObject([
@@ -490,16 +520,16 @@ describe("delivery log", () => {
     expect(redactError("   ", null)).toBe("Unknown error");
   });
 
-  it("still delivers when the delivery cannot be recorded", async () => {
+  it("still answers a test when the delivery cannot be recorded", async () => {
     const stub = fetchStub([{ method: "POST", url: /hooks\.example\.com/ }]);
     vi.stubGlobal("fetch", stub.fetch);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(prisma.notificationDelivery, "create").mockRejectedValue(new Error("db down"));
     const hook = await target("webhook", ["completed"]);
-    const job = await finishedJob("completed", "pass");
 
-    await notifyJob(job.id);
+    const res = await request(app).post(`/api/notifications/${hook.id}/test`).set("Cookie", cookie);
 
+    expect(res.body.result).toEqual({ ok: true });
     expect(stub.calls).toHaveLength(1);
     expect(errors).toHaveBeenCalledWith(`[notify] could not record a delivery to target ${hook.id}`, expect.any(Error));
   });
@@ -536,6 +566,8 @@ describe("delivery log", () => {
       event: "failed",
       httpStatus: 503,
       error: null,
+      attempts: 0,
+      nextAttemptAt: null,
       createdAt: "2026-11-02T00:00:00.000Z",
     });
     expect(byId[quiet.id].lastDelivery).toBeNull();
@@ -575,6 +607,7 @@ describe("delivery log", () => {
           targetId: hook.id,
           event: "failed",
           status: "sent",
+          attempts: 1,
           createdAt: new Date(`2026-11-0${day}T00:00:00Z`),
           finishedAt: new Date(`2026-11-0${day}T00:00:01Z`),
         },
@@ -600,6 +633,7 @@ describe("delivery log", () => {
       httpStatus: null,
       error: null,
       attempts: 1,
+      nextAttemptAt: null,
       jobId: null,
       createdAt: "2026-11-03T00:00:00.000Z",
       finishedAt: "2026-11-03T00:00:01.000Z",

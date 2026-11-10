@@ -8,11 +8,13 @@ import {
   createNotificationSchema,
   deliveriesQuerySchema,
   notificationParamsSchema,
+  notificationSettingsSchema,
   updateNotificationSchema,
 } from "../schemas/notifications.schema.ts";
 import {
   DELIVERY_ORDER,
-  lastDeliveries,
+  deliveryStates,
+  dropPendingDeliveries,
   newWebhookSecret,
   publicDelivery,
   publicTarget,
@@ -38,16 +40,29 @@ async function assertMembers(workspaceId: string, userIds: string[]) {
 }
 
 export async function listNotifications(req: Request, res: Response) {
-  const targets = await prisma.notificationTarget.findMany({
-    where: { workspaceId: req.workspaceId },
-    orderBy: { createdAt: "asc" },
-  });
-  const last = await lastDeliveries(targets.map((target) => target.id));
-  // Lets the dashboard explain why email targets cannot be added.
+  const [targets, workspace] = await Promise.all([
+    prisma.notificationTarget.findMany({ where: { workspaceId: req.workspaceId }, orderBy: { createdAt: "asc" } }),
+    prisma.workspace.findUniqueOrThrow({ where: { id: req.workspaceId }, select: { notifyAutoPauseAfter: true } }),
+  ]);
+  const states = await deliveryStates(targets.map((target) => target.id));
+  // mailConfigured lets the dashboard explain why email targets cannot be added.
   res.json({
-    targets: targets.map((target) => publicTarget(target, last.get(target.id) ?? null)),
+    targets: targets.map((target) => publicTarget(target, states.last(target.id), states.pending(target.id))),
     mailConfigured: mailer.configured(),
+    settings: { autoPauseAfter: workspace.notifyAutoPauseAfter },
   });
+}
+
+// Applies from the next delivery that fails for good; targets already past a
+// lowered limit are paused then, not now.
+export async function updateNotificationSettings(req: Request, res: Response) {
+  const { autoPauseAfter } = notificationSettingsSchema.parse(req.body);
+  const workspace = await prisma.workspace.update({
+    where: { id: req.workspaceId },
+    data: { notifyAutoPauseAfter: autoPauseAfter },
+    select: { notifyAutoPauseAfter: true },
+  });
+  res.json({ settings: { autoPauseAfter: workspace.notifyAutoPauseAfter } });
 }
 
 // Newest first. Members can read it like the list: stored errors never carry
@@ -110,9 +125,17 @@ export async function updateNotification(req: Request, res: Response) {
     }
     await assertMembers(target.workspaceId, input.recipientIds);
   }
-  const updated = await prisma.notificationTarget.update({ where: { id: target.id }, data: input });
-  const last = await lastDeliveries([updated.id]);
-  res.json({ target: publicTarget(updated, last.get(updated.id) ?? null) });
+  // An admin switching a target either way takes over from auto-pause: the
+  // reason no longer applies and the failure count starts again.
+  const data = input.active === undefined ? input : { ...input, pausedReason: null, consecutiveFailures: 0 };
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.notificationTarget.update({ where: { id: target.id }, data });
+    // Paused means its queued deliveries are dropped, not held for a resume.
+    if (input.active === false) await dropPendingDeliveries(tx, target.id);
+    return row;
+  });
+  const states = await deliveryStates([updated.id]);
+  res.json({ target: publicTarget(updated, states.last(updated.id), states.pending(updated.id)) });
 }
 
 // Sends a sample; a delivery that fails is reported as the result, not an error.

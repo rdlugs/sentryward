@@ -18,7 +18,11 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   email: "Email",
 }
 
-export type DeliveryStatus = "sent" | "failed"
+// Pending: queued, or waiting to be retried after a failed attempt.
+export type DeliveryStatus = "pending" | "sent" | "failed"
+
+// The server's MAX_DELIVERY_ATTEMPTS: a delivery is sent at most this often.
+export const MAX_DELIVERY_ATTEMPTS = 5
 // A NotificationEvent, or "test" for a delivery sent from the dashboard.
 export type DeliveryEvent = NotificationEvent | "test"
 
@@ -29,15 +33,36 @@ export interface LastDelivery {
   httpStatus: number | null
   // Never contains the target URL; the server redacts it before storing.
   error: string | null
+  // Sends started so far; 0 while a delivery is queued for its first.
+  attempts: number
+  // When a pending delivery is next tried; null once it is sent or failed.
+  nextAttemptAt: string | null
   createdAt: string
+}
+
+// A queued delivery that already failed at least once and is due again.
+export interface PendingRetry {
+  attempts: number
+  httpStatus: number | null
+  error: string | null
+  nextAttemptAt: string | null
+}
+
+// What a target still has queued. Kept apart from lastDelivery, since a newer
+// delivery (a test, or a later review) can go through while an older one is
+// still being retried.
+export interface PendingDeliveries {
+  count: number
+  // The retry due soonest; null when every queued delivery is still untried.
+  retry: PendingRetry | null
 }
 
 export interface NotificationDelivery extends LastDelivery {
   id: string
-  attempts: number
   // Null for test deliveries, and once the review itself was pruned.
   jobId: string | null
-  finishedAt: string
+  // Null while pending.
+  finishedAt: string | null
 }
 
 export interface NotificationTarget {
@@ -52,8 +77,17 @@ export interface NotificationTarget {
   recipientIds: string[]
   // A paused target keeps its settings but gets no deliveries.
   active: boolean
+  // Why the server paused it after failed deliveries; null otherwise, and
+  // cleared when an admin switches the target.
+  pausedReason: string | null
+  // "gone" when the endpoint said it no longer exists, "failures" when the
+  // limit was reached; null when not auto-paused.
+  pauseCause: "gone" | "failures" | null
+  // Deliveries in a row that failed for good; a success resets it.
+  consecutiveFailures: number
   // Null until the target gets its first delivery (tests included).
   lastDelivery: LastDelivery | null
+  pending: PendingDeliveries
   createdAt: string
   updatedAt: string
 }
@@ -69,12 +103,36 @@ export interface NotificationTargetUpdate {
   active?: boolean
 }
 
+export interface NotificationSettings {
+  // Failed deliveries in a row that pause a target; 0 never does.
+  autoPauseAfter: number
+}
+
 export type TestResult = { ok: true } | { ok: false; error: string }
+
+// How often the list refreshes while a delivery is waiting to be sent, so a
+// retry's outcome shows up without a reload.
+const PENDING_POLL_MS = 30_000
 
 export function useNotificationTargets() {
   return useQuery({
     queryKey: NOTIFICATIONS_KEY,
-    queryFn: () => api<{ targets: NotificationTarget[]; mailConfigured: boolean }>("/notifications"),
+    queryFn: () =>
+      api<{ targets: NotificationTarget[]; mailConfigured: boolean; settings: NotificationSettings }>("/notifications"),
+    refetchInterval: (query) =>
+      query.state.data?.targets.some((target) => target.pending.count > 0) ? PENDING_POLL_MS : false,
+  })
+}
+
+export function useUpdateNotificationSettings() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: NotificationSettings) =>
+      api<{ settings: NotificationSettings }>("/notifications/settings", {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY }),
   })
 }
 

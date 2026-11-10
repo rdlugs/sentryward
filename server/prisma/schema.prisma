@@ -75,6 +75,9 @@ model Workspace {
   // The LLM Connections page's dragged order of provider names. Kept here, not
   // on llm_credentials, because a provider without a stored key has a card too.
   llmProviderOrder String[] @default([]) @map("llm_provider_order")
+  // Notification targets are paused after this many deliveries in a row fail
+  // for good (retries exhausted or refused); 0 never pauses them.
+  notifyAutoPauseAfter Int  @default(5) @map("notify_auto_pause_after")
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -715,6 +718,12 @@ model NotificationTarget {
   recipientIds    String[]            @default([]) @map("recipient_ids") @db.Uuid
   // Paused targets keep their settings but get no deliveries.
   active          Boolean             @default(true)
+  // Deliveries in a row that failed for good, across jobs; a success (tests
+  // included) resets it, and so does switching the target on or off.
+  consecutiveFailures Int             @default(0) @map("consecutive_failures")
+  // Why the worker paused the target; null when it is active or an admin
+  // paused it. Cleared whenever an admin switches it.
+  pausedReason    String?             @map("paused_reason")
   createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -726,6 +735,8 @@ model NotificationTarget {
 }
 
 enum NotificationDeliveryStatus {
+  // Waiting for its first send or a retry (worker/deliveryQueue.ts).
+  pending
   sent
   failed
 
@@ -733,8 +744,10 @@ enum NotificationDeliveryStatus {
 }
 
 // One delivery to one target, test deliveries included, so the dashboard can
-// show a revoked Slack URL or an endpoint that keeps failing. Retention keeps
-// the last DELIVERIES_PER_TARGET rows per target, none older than
+// show a revoked Slack URL or an endpoint that keeps failing. Job deliveries
+// are also the outbox: inserted pending when the job finishes, in the step
+// that stamps its notifiedAt, then sent and retried by the worker. Retention
+// keeps the last DELIVERIES_PER_TARGET rows per target, none older than
 // DELIVERY_RETENTION_DAYS (worker/retention.ts).
 model NotificationDelivery {
   id         String                     @id @default(uuid()) @db.Uuid
@@ -748,16 +761,28 @@ model NotificationDelivery {
   // Redacted of the target URL before it is stored: the URL may be the
   // credential, and members can read this.
   error      String?
-  // Always 1 until deliveries are retried.
-  attempts   Int                        @default(1)
+  // Sends started so far; a claim counts one before sending.
+  attempts   Int                        @default(0)
+  // When a pending row is next due; null once it is final.
+  nextAttemptAt DateTime?               @map("next_attempt_at") @db.Timestamptz
+  // Set while a worker is sending it; a stale lock means that worker died.
+  lockedAt   DateTime?                  @map("locked_at") @db.Timestamptz
+  // The NotificationPayload, built when the row is queued so a retry sends
+  // what the first attempt did; cleared once the row is final.
+  payload    Json?
   createdAt  DateTime                   @default(now()) @map("created_at") @db.Timestamptz
-  finishedAt DateTime                   @map("finished_at") @db.Timestamptz
+  // Null while pending.
+  finishedAt DateTime?                  @map("finished_at") @db.Timestamptz
 
   target NotificationTarget @relation(fields: [targetId], references: [id], onDelete: Cascade)
   job    ReviewJob?         @relation(fields: [jobId], references: [id], onDelete: SetNull)
 
+  // A job is queued once per target. Test rows have no job, and Postgres lets
+  // nulls repeat.
+  @@unique([targetId, jobId])
   @@index([targetId, createdAt])
   @@index([createdAt])
+  @@index([status, nextAttemptAt])
   @@map("notification_deliveries")
 }
 
