@@ -97,6 +97,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- The Failing targets tab groups each row's actions (View deliveries, Send
+  test, Resume) in a "..." menu, matching the Targets tab.
 - The output defaults are now a quiet setup, which the Display tab offers as its
   Standard preset: inline comments, one summary comment and a short PR summary
   with related issues and the blast radius. The commit status, finding counts,
