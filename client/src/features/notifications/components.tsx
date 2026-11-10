@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Link } from "react-router"
 import { AlertTriangle } from "lucide-react"
 import { toast } from "sonner"
@@ -8,6 +8,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { useRepos } from "@/features/forge/api"
 import { timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import {
@@ -18,13 +19,14 @@ import {
   type LastDelivery,
   type NotificationTarget,
 } from "./api"
-import { deliveryOutcome, retryNote } from "./delivery"
+import { deliveryOutcome, retryNote, scopeSummary } from "./delivery"
 
 // Pieces both tabs of the Notifications page use.
 
 const DELIVERY_EVENT_LABELS: Record<DeliveryEvent, string> = {
   blocked: "Blocked",
   failed: "Failed",
+  resolved: "Resolved",
   completed: "Completed",
   test: "Test",
 }
@@ -187,10 +189,17 @@ export function TargetActiveSwitch({ target, canManage }: { target: Notification
 }
 
 // The name, and under it why the server paused the target, if it did.
+function useRepoNames() {
+  const { data } = useRepos()
+  return useMemo(() => new Map((data?.repos ?? []).map((repo) => [repo.id, repo.fullPath])), [data])
+}
+
 export function TargetName({ target }: { target: NotificationTarget }) {
+  const scope = scopeSummary(target, useRepoNames())
   return (
     <div className="flex flex-col gap-1">
       <span className="font-medium">{target.name}</span>
+      {scope && <span className="text-xs text-muted-foreground">{scope}</span>}
       {target.pausedReason && (
         <span className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
           <AlertTriangle className="size-3.5 shrink-0" aria-hidden />

@@ -1,5 +1,5 @@
 import { timeAgo } from "@/lib/time"
-import { MAX_DELIVERY_ATTEMPTS, type LastDelivery, type NotificationTarget } from "./api"
+import { MAX_DELIVERY_ATTEMPTS, type LastDelivery, type NotificationTarget, type TargetFilters } from "./api"
 
 // "Sent", "Failed · 503", "Queued" or "Retrying · 503"; the error text is
 // shown separately, since it can be long.
@@ -77,6 +77,9 @@ export function causeHint(target: NotificationTarget) {
       : "The endpoint says it no longer exists. Check it, then remove and add the target again."
   }
   if (target.pauseCause === "failures") return "Check the delivery errors, send a test, then resume."
+  if (target.pauseCause === "scope") {
+    return "Every repository it was limited to was removed. Choose repositories, or All, when editing it and save, then resume."
+  }
   return null
 }
 
@@ -99,3 +102,18 @@ export function failingTargets(targets: NotificationTarget[]) {
 }
 
 export type FailingRow = ReturnType<typeof failingTargets>[number]
+
+// "acme/payments · ≥ major · verdict changes", or null for a target that hears
+// about everything. Repositories the list does not know (still loading, or
+// not readable) are left out rather than shown as ids.
+export function scopeSummary(target: TargetFilters, repoNames: Map<string, string>) {
+  const parts: string[] = []
+  if (target.repositoryIds.length) {
+    const names = target.repositoryIds.flatMap((id) => repoNames.get(id) ?? [])
+    const count = target.repositoryIds.length
+    parts.push(names.length ? names.join(", ") : `${count} ${count === 1 ? "repository" : "repositories"}`)
+  }
+  if (target.minSeverity) parts.push(`≥ ${target.minSeverity}`)
+  if (target.onlyVerdictChanges) parts.push("verdict changes")
+  return parts.length ? parts.join(" · ") : null
+}

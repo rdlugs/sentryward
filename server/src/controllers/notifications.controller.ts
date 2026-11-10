@@ -18,6 +18,7 @@ import {
   newWebhookSecret,
   publicDelivery,
   publicTarget,
+  SCOPE_REASON,
   testTarget,
 } from "../services/notifications.ts";
 
@@ -36,6 +37,18 @@ async function assertMembers(workspaceId: string, userIds: string[]) {
   const count = await prisma.membership.count({ where: { workspaceId, userId: { in: userIds } } });
   if (count !== userIds.length) {
     throw new HttpError(400, "Validation failed", { recipientIds: ["Choose members of this workspace"] });
+  }
+}
+
+// Only the workspace's own repositories can be named, so a target cannot be
+// pointed at (or reveal the existence of) another workspace's.
+async function assertRepositories(workspaceId: string, repositoryIds: string[]) {
+  if (!repositoryIds.length) return;
+  const count = await prisma.repository.count({
+    where: { id: { in: repositoryIds }, connection: { workspaceId } },
+  });
+  if (count !== repositoryIds.length) {
+    throw new HttpError(400, "Validation failed", { repositoryIds: ["Choose repositories in this workspace"] });
   }
 }
 
@@ -89,7 +102,16 @@ export async function listDeliveries(req: Request, res: Response) {
 export async function createNotification(req: Request, res: Response) {
   const input = createNotificationSchema.parse(req.body);
   const workspaceId = req.workspaceId!;
-  const base = { workspaceId, kind: input.kind, name: input.name, events: input.events };
+  const base = {
+    workspaceId,
+    kind: input.kind,
+    name: input.name,
+    events: input.events,
+    repositoryIds: input.repositoryIds,
+    minSeverity: input.minSeverity,
+    onlyVerdictChanges: input.onlyVerdictChanges,
+  };
+  await assertRepositories(workspaceId, input.repositoryIds);
 
   if (input.kind === "email") {
     if (!mailer.configured()) {
@@ -125,9 +147,26 @@ export async function updateNotification(req: Request, res: Response) {
     }
     await assertMembers(target.workspaceId, input.recipientIds);
   }
+  if (input.repositoryIds) await assertRepositories(target.workspaceId, input.repositoryIds);
+  // Paused because its repositories were deleted: an empty list now means
+  // every repository, so it stays off until an admin saves a choice (All
+  // included) on purpose. Saving one clears the reason; it stays paused.
+  const scopePaused = target.pausedReason === SCOPE_REASON && input.repositoryIds === undefined;
+  if (scopePaused && input.active === true) {
+    throw new HttpError(400, "Validation failed", {
+      repositoryIds: ["Its repositories were removed; choose repositories, or All, before switching it on"],
+    });
+  }
   // An admin switching a target either way takes over from auto-pause: the
-  // reason no longer applies and the failure count starts again.
-  const data = input.active === undefined ? input : { ...input, pausedReason: null, consecutiveFailures: 0 };
+  // reason no longer applies and the failure count starts again. A scope
+  // reason stays until repositories are saved, or switching it off and on
+  // again would get round the check above.
+  const clearReason = input.active !== undefined ? !scopePaused : target.pausedReason === SCOPE_REASON && !scopePaused;
+  const data = {
+    ...input,
+    ...(input.active !== undefined ? { consecutiveFailures: 0 } : {}),
+    ...(clearReason ? { pausedReason: null } : {}),
+  };
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.notificationTarget.update({ where: { id: target.id }, data });
     // Paused means its queued deliveries are dropped, not held for a resume.
