@@ -49,12 +49,22 @@ import {
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TextField } from "@/features/auth/TextField"
 import { applyServerErrors } from "@/features/auth/applyServerErrors"
 import { useAuth } from "@/features/auth/useAuth"
+import { useRepos } from "@/features/forge/api"
 import { useMembers, type Member } from "@/features/workspaces/api"
 import { paginate, usePagination } from "@/hooks/use-pagination"
 import { useSort } from "@/hooks/use-sort"
@@ -64,6 +74,7 @@ import { timeAgo } from "@/lib/time"
 import {
   EVENT_OPTIONS,
   KIND_LABELS,
+  MIN_SEVERITY_LABELS,
   useCreateNotificationTarget,
   useDeleteNotificationTarget,
   useNotificationTargets,
@@ -71,13 +82,60 @@ import {
   useUpdateNotificationTarget,
   type NotificationEvent,
   type NotificationKind,
+  type MinSeverity,
   type NotificationTarget,
+  type TargetFilters,
 } from "./api"
 import { DeliveriesSheet, LastDeliveryCell, TargetActiveSwitch, TargetName } from "./components"
 import { causeHint, failingTargets } from "./delivery"
 import { FailingTargets } from "./FailingTargets"
 
-const eventsSchema = z.array(z.enum(["blocked", "failed", "completed"])).min(1, "Choose at least one event")
+const eventsSchema = z
+  .array(z.enum(["blocked", "failed", "resolved", "completed"]))
+  .min(1, "Choose at least one event")
+
+// The scope as the form holds it; toFilters turns it into what the API takes.
+const scopeFields = {
+  repoScope: z.enum(["all", "only"]),
+  // The server's limit, checked here so the form says so before saving.
+  repositoryIds: z.array(z.string()).max(100, "Choose 100 repositories or fewer, or All"),
+  minSeverity: z.enum(["any", "minor", "major", "critical"]),
+  onlyVerdictChanges: z.boolean(),
+}
+type ScopeInput = z.infer<z.ZodObject<typeof scopeFields>>
+
+function checkScope(data: ScopeInput, ctx: z.RefinementCtx) {
+  if (data.repoScope === "only" && data.repositoryIds.length === 0) {
+    ctx.addIssue({ code: "custom", path: ["repositoryIds"], message: "Choose at least one repository" })
+  }
+}
+
+function toFilters({ repoScope, repositoryIds, minSeverity, onlyVerdictChanges }: ScopeInput): TargetFilters {
+  return {
+    repositoryIds: repoScope === "all" ? [] : repositoryIds,
+    minSeverity: minSeverity === "any" ? null : minSeverity,
+    onlyVerdictChanges,
+  }
+}
+
+// A target paused because its repositories were removed starts on "Only
+// these" with nothing ticked, so saving it means choosing again (All included).
+function scopeDefaults(target?: NotificationTarget): ScopeInput {
+  return {
+    repoScope: target && (target.repositoryIds.length > 0 || target.pauseCause === "scope") ? "only" : "all",
+    repositoryIds: target?.repositoryIds ?? [],
+    minSeverity: target?.minSeverity ?? "any",
+    onlyVerdictChanges: target?.onlyVerdictChanges ?? false,
+  }
+}
+
+const SEVERITY_OPTIONS: { value: "any" | MinSeverity; label: string }[] = [
+  { value: "any", label: "Any" },
+  ...(Object.keys(MIN_SEVERITY_LABELS) as MinSeverity[]).map((value) => ({
+    value,
+    label: `${MIN_SEVERITY_LABELS[value]} or worse`,
+  })),
+]
 
 const createSchema = z
   .object({
@@ -86,8 +144,10 @@ const createSchema = z
     url: z.string().trim(),
     events: eventsSchema,
     recipientIds: z.array(z.string()),
+    ...scopeFields,
   })
   .superRefine((data, ctx) => {
+    checkScope(data, ctx)
     if (data.kind === "email") {
       if (data.recipientIds.length === 0) {
         ctx.addIssue({ code: "custom", path: ["recipientIds"], message: "Choose at least one member" })
@@ -98,11 +158,14 @@ const createSchema = z
   })
 type CreateInput = z.infer<typeof createSchema>
 
-const editSchema = z.object({
-  name: z.string().trim().min(1, "Name is required").max(100),
-  events: eventsSchema,
-  recipientIds: z.array(z.string()),
-})
+const editSchema = z
+  .object({
+    name: z.string().trim().min(1, "Name is required").max(100),
+    events: eventsSchema,
+    recipientIds: z.array(z.string()),
+    ...scopeFields,
+  })
+  .superRefine(checkScope)
 type EditInput = z.infer<typeof editSchema>
 
 const URL_PLACEHOLDERS: Record<Exclude<NotificationKind, "email">, string> = {
@@ -193,22 +256,106 @@ function CheckboxList<T extends FieldValues>({
   )
 }
 
+// Repositories, minimum severity and verdict changes, shared by both sheets.
+// Failed and resolved deliveries ignore the last two, as the server does.
+function ScopeFields<T extends FieldValues & ScopeInput>({ control }: { control: Control<T> }) {
+  const repoScope = useWatch({ control, name: "repoScope" as Path<T> })
+  const { data } = useRepos()
+  const repoOptions = (data?.repos ?? []).map((repo) => ({ value: repo.id, label: repo.fullPath }))
+  return (
+    <FieldSet>
+      <FieldLegend variant="label">Scope</FieldLegend>
+      <FieldDescription>Failed and resolved reviews are always sent, whatever the severity or verdict.</FieldDescription>
+      <Controller
+        control={control}
+        name={"repoScope" as Path<T>}
+        render={({ field }) => (
+          <Field>
+            <FieldLabel htmlFor="notification-repo-scope">Repositories</FieldLabel>
+            <Select value={field.value} onValueChange={field.onChange}>
+              <SelectTrigger id="notification-repo-scope" className="w-full" onBlur={field.onBlur}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="all">All repositories</SelectItem>
+                <SelectItem value="only">Only these</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
+      />
+      {repoScope === "only" && (
+        <CheckboxList control={control} name={"repositoryIds" as Path<T>} legend="Only these repositories" options={repoOptions} />
+      )}
+      <Controller
+        control={control}
+        name={"minSeverity" as Path<T>}
+        render={({ field }) => (
+          <Field>
+            <FieldLabel htmlFor="notification-min-severity">Minimum severity</FieldLabel>
+            <Select value={field.value} onValueChange={field.onChange}>
+              <SelectTrigger id="notification-min-severity" className="w-full" onBlur={field.onBlur}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                {SEVERITY_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FieldDescription>Send only reviews with at least one finding this severe.</FieldDescription>
+          </Field>
+        )}
+      />
+      <Controller
+        control={control}
+        name={"onlyVerdictChanges" as Path<T>}
+        render={({ field }) => (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="notification-verdict-changes"
+              checked={field.value}
+              onCheckedChange={(on) => field.onChange(on === true)}
+            />
+            <FieldContent>
+              <FieldLabel htmlFor="notification-verdict-changes" className="font-normal">
+                Only when the verdict changes
+              </FieldLabel>
+              <FieldDescription>
+                Skip a review whose verdict matches the previous review of the same pull or merge request.
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+        )}
+      />
+    </FieldSet>
+  )
+}
+
 function memberOptions(members: Member[] | undefined) {
   return (members ?? []).map((member) => ({ value: member.id, label: member.name, description: member.email }))
 }
 
+// The add and edit sheets: the fields scroll between a fixed header and a
+// footer, so Save stays in view however long the form gets.
+const FORM_CLASS = "flex min-h-0 flex-1 flex-col"
+const BODY_CLASS = "flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4"
+const FOOTER_CLASS = "flex-row justify-end border-t"
+
 // The secret appears only here: the server never returns it again.
 function CreatedSecretView({ secret }: { secret: string }) {
   return (
-    <div className="flex flex-col gap-4">
-      <DialogHeader>
-        <DialogTitle>Webhook added</DialogTitle>
-        <DialogDescription>
+    <>
+      <SheetHeader>
+        <SheetTitle>Webhook added</SheetTitle>
+        <SheetDescription>
           Each delivery carries an <code className="font-mono text-xs">X-Sentryward-Signature</code> header: the
           HMAC-SHA256 of the body with this secret. Copy it now; it's shown only once.
-        </DialogDescription>
-      </DialogHeader>
-      <div className="flex gap-2">
+        </SheetDescription>
+      </SheetHeader>
+      <div className="flex gap-2 px-4">
         <Input
           readOnly
           value={secret}
@@ -221,16 +368,16 @@ function CreatedSecretView({ secret }: { secret: string }) {
           Copy
         </Button>
       </div>
-      <DialogFooter>
-        <DialogClose asChild>
+      <SheetFooter className="flex-row justify-end border-t">
+        <SheetClose asChild>
           <Button type="button">Done</Button>
-        </DialogClose>
-      </DialogFooter>
-    </div>
+        </SheetClose>
+      </SheetFooter>
+    </>
   )
 }
 
-function AddTargetDialog({
+function AddTargetSheet({
   open,
   onOpenChange,
   mailConfigured,
@@ -245,14 +392,25 @@ function AddTargetDialog({
   const createTarget = useCreateNotificationTarget()
   const form = useForm<CreateInput>({
     resolver: zodResolver(createSchema),
-    defaultValues: { kind: "webhook", name: "", url: "", events: ["blocked", "failed"], recipientIds: [] },
+    defaultValues: {
+      kind: "webhook",
+      name: "",
+      url: "",
+      events: ["blocked", "failed"],
+      recipientIds: [],
+      ...scopeDefaults(),
+    },
   })
   const kind = useWatch({ control: form.control, name: "kind" })
 
-  async function onSubmit({ kind, name, url, events, recipientIds }: CreateInput) {
+  async function onSubmit(input: CreateInput) {
+    const { kind, name, url, events, recipientIds } = input
+    const filters = toFilters(input)
     try {
       const result = await createTarget.mutateAsync(
-        kind === "email" ? { kind, name, events, recipientIds } : { kind, name, events, url },
+        kind === "email"
+          ? { kind, name, events, recipientIds, ...filters }
+          : { kind, name, events, url, ...filters },
       )
       if (result.secret) {
         setSecret(result.secret)
@@ -274,70 +432,73 @@ function AddTargetDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent>
+    <Sheet open={open} onOpenChange={handleOpenChange}>
+      <SheetContent className="data-[side=right]:sm:max-w-lg">
         {secret ? (
           <CreatedSecretView secret={secret} />
         ) : (
-          <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-            <DialogHeader>
-              <DialogTitle>Add a notification target</DialogTitle>
-              <DialogDescription>Choose where finished reviews are reported, and which ones.</DialogDescription>
-            </DialogHeader>
-            <Controller
-              control={form.control}
-              name="kind"
-              render={({ field }) => (
-                <Field>
-                  <FieldLabel htmlFor="notification-kind">Type</FieldLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <SelectTrigger id="notification-kind" className="w-full" onBlur={field.onBlur}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent position="popper">
-                      <SelectItem value="webhook">Webhook</SelectItem>
-                      <SelectItem value="slack">Slack</SelectItem>
-                      <SelectItem value="email" disabled={!mailConfigured}>
-                        Email{!mailConfigured && " (mail is not configured)"}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-              )}
-            />
-            <TextField control={form.control} name="name" label="Name" autoComplete="off" placeholder="Team alerts" />
-            {kind === "email" ? (
-              <CheckboxList control={form.control} name="recipientIds" legend="Recipients" options={memberOptions(members)} />
-            ) : (
-              <TextField
+          <form onSubmit={form.handleSubmit(onSubmit)} noValidate className={FORM_CLASS}>
+            <SheetHeader>
+              <SheetTitle>Add a notification target</SheetTitle>
+              <SheetDescription>Choose where finished reviews are reported, and which ones.</SheetDescription>
+            </SheetHeader>
+            <div className={BODY_CLASS}>
+              <Controller
                 control={form.control}
-                name="url"
-                label={kind === "slack" ? "Incoming webhook URL" : "URL"}
-                type="url"
-                autoComplete="off"
-                placeholder={URL_PLACEHOLDERS[kind]}
+                name="kind"
+                render={({ field }) => (
+                  <Field>
+                    <FieldLabel htmlFor="notification-kind">Type</FieldLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger id="notification-kind" className="w-full" onBlur={field.onBlur}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value="webhook">Webhook</SelectItem>
+                        <SelectItem value="slack">Slack</SelectItem>
+                        <SelectItem value="email" disabled={!mailConfigured}>
+                          Email{!mailConfigured && " (mail is not configured)"}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                )}
               />
-            )}
-            <CheckboxList control={form.control} name="events" legend="Events" options={EVENT_OPTIONS} />
-            <DialogFooter>
-              <DialogClose asChild>
+              <TextField control={form.control} name="name" label="Name" autoComplete="off" placeholder="Team alerts" />
+              {kind === "email" ? (
+                <CheckboxList control={form.control} name="recipientIds" legend="Recipients" options={memberOptions(members)} />
+              ) : (
+                <TextField
+                  control={form.control}
+                  name="url"
+                  label={kind === "slack" ? "Incoming webhook URL" : "URL"}
+                  type="url"
+                  autoComplete="off"
+                  placeholder={URL_PLACEHOLDERS[kind]}
+                />
+              )}
+              <CheckboxList control={form.control} name="events" legend="Events" options={EVENT_OPTIONS} />
+              <ScopeFields control={form.control} />
+            </div>
+            <SheetFooter className={FOOTER_CLASS}>
+              <SheetClose asChild>
                 <Button type="button" variant="outline">
                   Cancel
                 </Button>
-              </DialogClose>
+              </SheetClose>
               <Button type="submit" disabled={form.formState.isSubmitting}>
                 {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
                 Add target
               </Button>
-            </DialogFooter>
+            </SheetFooter>
           </form>
         )}
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   )
 }
 
-function EditTargetDialog({
+function EditTargetSheet({
   target,
   members,
   onOpenChange,
@@ -349,10 +510,16 @@ function EditTargetDialog({
   const updateTarget = useUpdateNotificationTarget()
   const form = useForm<EditInput>({
     resolver: zodResolver(editSchema),
-    defaultValues: { name: target.name, events: target.events, recipientIds: target.recipientIds },
+    defaultValues: {
+      name: target.name,
+      events: target.events,
+      recipientIds: target.recipientIds,
+      ...scopeDefaults(target),
+    },
   })
 
-  async function onSubmit({ name, events, recipientIds }: EditInput) {
+  async function onSubmit(input: EditInput) {
+    const { name, events, recipientIds } = input
     if (target.kind === "email" && recipientIds.length === 0) {
       form.setError("recipientIds", { message: "Choose at least one member" })
       return
@@ -363,6 +530,7 @@ function EditTargetDialog({
         name,
         events,
         ...(target.kind === "email" ? { recipientIds } : {}),
+        ...toFilters(input),
       })
       toast.success(`Saved ${name}`)
       onOpenChange(false)
@@ -372,45 +540,51 @@ function EditTargetDialog({
   }
 
   return (
-    <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-          <DialogHeader>
-            <DialogTitle>Edit {target.name}</DialogTitle>
-            <DialogDescription>
+    <Sheet open onOpenChange={onOpenChange}>
+      <SheetContent className="data-[side=right]:sm:max-w-lg">
+        <form onSubmit={form.handleSubmit(onSubmit)} noValidate className={FORM_CLASS}>
+          <SheetHeader>
+            <SheetTitle>Edit {target.name}</SheetTitle>
+            <SheetDescription>
               {target.kind === "email"
                 ? "Change who is emailed and about which reviews."
                 : "To change the URL, remove this target and add it again."}
-            </DialogDescription>
-          </DialogHeader>
-          {target.pausedReason && (
-            <Alert>
-              <AlertTriangle />
-              <AlertTitle>{target.pausedReason}</AlertTitle>
-              <AlertDescription>
-                {causeHint(target)} Switching it back on in the list clears this notice and the failure count.
-              </AlertDescription>
-            </Alert>
-          )}
-          <TextField control={form.control} name="name" label="Name" autoComplete="off" />
-          {target.kind === "email" && (
-            <CheckboxList control={form.control} name="recipientIds" legend="Recipients" options={memberOptions(members)} />
-          )}
-          <CheckboxList control={form.control} name="events" legend="Events" options={EVENT_OPTIONS} />
-          <DialogFooter>
-            <DialogClose asChild>
+            </SheetDescription>
+          </SheetHeader>
+          <div className={BODY_CLASS}>
+            {target.pausedReason && (
+              <Alert>
+                <AlertTriangle />
+                <AlertTitle>{target.pausedReason}</AlertTitle>
+                <AlertDescription>
+                  {causeHint(target)}{" "}
+                  {target.pauseCause === "scope"
+                    ? "Saving a choice here clears this notice."
+                    : "Switching it back on in the list clears this notice and the failure count."}
+                </AlertDescription>
+              </Alert>
+            )}
+            <TextField control={form.control} name="name" label="Name" autoComplete="off" />
+            {target.kind === "email" && (
+              <CheckboxList control={form.control} name="recipientIds" legend="Recipients" options={memberOptions(members)} />
+            )}
+            <CheckboxList control={form.control} name="events" legend="Events" options={EVENT_OPTIONS} />
+            <ScopeFields control={form.control} />
+          </div>
+          <SheetFooter className={FOOTER_CLASS}>
+            <SheetClose asChild>
               <Button type="button" variant="outline">
                 Cancel
               </Button>
-            </DialogClose>
+            </SheetClose>
             <Button type="submit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
               Save
             </Button>
-          </DialogFooter>
+          </SheetFooter>
         </form>
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -633,7 +807,7 @@ function TargetTable({
         />
       )}
       {editing && (
-        <EditTargetDialog
+        <EditTargetSheet
           key={editing.id}
           target={editing}
           members={members}
@@ -794,10 +968,10 @@ function TargetList({
         </Card>
       )}
 
-      {/* One dialog outside the empty-state/table switch, so adding the first
+      {/* One sheet outside the empty-state/table switch, so adding the first
           target does not remount it and lose the shown secret. */}
       {canManage && (
-        <AddTargetDialog open={adding} onOpenChange={setAdding} mailConfigured={mailConfigured} members={members} />
+        <AddTargetSheet open={adding} onOpenChange={setAdding} mailConfigured={mailConfigured} members={members} />
       )}
     </>
   )

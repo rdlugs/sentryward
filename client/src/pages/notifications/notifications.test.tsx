@@ -16,6 +16,9 @@ const webhook = {
   host: "ci.example.com",
   undecryptable: false,
   recipientIds: [],
+  repositoryIds: [],
+  minSeverity: null,
+  onlyVerdictChanges: false,
   active: true,
   pausedReason: null,
   pauseCause: null,
@@ -40,6 +43,8 @@ const members = {
   members: [{ id: testUser.id, name: testUser.name, email: testUser.email, role: "owner", joinedAt: "" }],
 }
 const MEMBERS_ROUTE = `GET /api/workspaces/${personalWorkspace.id}/members`
+
+const repos = [{ id: "r1", fullPath: "acme/payments" }]
 
 const slackTarget = {
   ...webhook,
@@ -101,23 +106,154 @@ describe("Notifications", () => {
 
     expect(await screen.findByText("No notification targets")).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Add target" }))
-    const dialog = await screen.findByRole("dialog")
-    await userEvent.type(within(dialog).getByLabelText("Name"), "CI alerts")
-    await userEvent.type(within(dialog).getByLabelText("URL"), "https://ci.example.com/hook")
-    await userEvent.click(within(dialog).getByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("Name"), "CI alerts")
+    await userEvent.type(within(sheet).getByLabelText("URL"), "https://ci.example.com/hook")
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
 
-    expect(await within(dialog).findByLabelText("Signing secret")).toHaveValue("abc123")
+    expect(await within(sheet).findByLabelText("Signing secret")).toHaveValue("abc123")
     // The secret stays on screen once the table replaces the empty state (the
-    // modal hides the page behind it from role queries).
+    // sheet hides the page behind it from role queries).
     expect(await screen.findByRole("cell", { name: "CI alerts", hidden: true })).toBeInTheDocument()
-    expect(within(dialog).getByLabelText("Signing secret")).toHaveValue("abc123")
+    expect(within(sheet).getByLabelText("Signing secret")).toHaveValue("abc123")
     const [, init] = calls(fetchSpy, "POST", "/api/notifications")[0]!
     expect(JSON.parse(String(init?.body))).toEqual({
       kind: "webhook",
       name: "CI alerts",
       events: ["blocked", "failed"],
       url: "https://ci.example.com/hook",
+      repositoryIds: [],
+      minSeverity: null,
+      onlyVerdictChanges: false,
     })
+  })
+
+  it("adds a target limited to chosen repositories, a severity and verdict changes", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: false, settings },
+      "POST /api/notifications": () => jsonResponse(201, { target: webhook, secret: "abc123" }),
+      "GET /api/repos": { repos: repos },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("Name"), "Payments")
+    await userEvent.type(within(sheet).getByLabelText("URL"), "https://ci.example.com/hook")
+    await userEvent.click(within(sheet).getByRole("checkbox", { name: "Resolved" }))
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Repositories" }))
+    await userEvent.click(screen.getByRole("option", { name: "Only these" }))
+
+    // "Only these" with nothing ticked is not a choice.
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
+    expect(await within(sheet).findByText("Choose at least one repository")).toBeInTheDocument()
+    expect(calls(fetchSpy, "POST", "/api/notifications")).toHaveLength(0)
+
+    await userEvent.click(await within(sheet).findByRole("checkbox", { name: "acme/payments" }))
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Minimum severity" }))
+    await userEvent.click(screen.getByRole("option", { name: "Major or worse" }))
+    await userEvent.click(within(sheet).getByRole("checkbox", { name: "Only when the verdict changes" }))
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
+
+    expect(await within(sheet).findByLabelText("Signing secret")).toBeInTheDocument()
+    const [, init] = calls(fetchSpy, "POST", "/api/notifications")[0]!
+    expect(JSON.parse(String(init?.body))).toEqual({
+      kind: "webhook",
+      name: "Payments",
+      events: ["blocked", "failed", "resolved"],
+      url: "https://ci.example.com/hook",
+      repositoryIds: ["r1"],
+      minSeverity: "major",
+      onlyVerdictChanges: true,
+    })
+  })
+
+  it("shows a target's scope under its name and edits it back to everything", async () => {
+    const scoped = { ...webhook, repositoryIds: ["r1"], minSeverity: "major", onlyVerdictChanges: true }
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: [scoped], mailConfigured: false, settings },
+      "PATCH /api/notifications/n1": { target: webhook },
+      "GET /api/repos": { repos: repos },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const row = (await screen.findByText("CI alerts")).closest("tr")!
+    expect(await within(row).findByText("acme/payments · ≥ major · verdict changes")).toBeInTheDocument()
+
+    await userEvent.click(within(row).getByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }))
+    const sheet = await screen.findByRole("dialog")
+    expect(within(sheet).getByRole("checkbox", { name: "acme/payments" })).toBeChecked()
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Repositories" }))
+    await userEvent.click(screen.getByRole("option", { name: "All repositories" }))
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Minimum severity" }))
+    await userEvent.click(screen.getByRole("option", { name: "Any" }))
+    await userEvent.click(within(sheet).getByRole("checkbox", { name: "Only when the verdict changes" }))
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save" }))
+
+    await vi.waitFor(() => expect(calls(fetchSpy, "PATCH", "/api/notifications/n1")).toHaveLength(1))
+    const [, init] = calls(fetchSpy, "PATCH", "/api/notifications/n1")[0]!
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: "CI alerts",
+      events: ["failed", "blocked"],
+      repositoryIds: [],
+      minSeverity: null,
+      onlyVerdictChanges: false,
+    })
+  })
+
+  it("asks for repositories again when a target's were all removed", async () => {
+    const reason = "Paused: its repositories were removed"
+    mockApi({
+      "GET /api/notifications": {
+        targets: [{ ...webhook, active: false, pausedReason: reason, pauseCause: "scope" }],
+        mailConfigured: false,
+        settings,
+      },
+      "GET /api/repos": { repos: repos },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const row = (await screen.findByText("CI alerts")).closest("tr")!
+    await userEvent.click(within(row).getByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }))
+    const sheet = await screen.findByRole("dialog")
+    expect(within(sheet).getByText(/Choose repositories, or All, when editing it/)).toBeInTheDocument()
+    expect(within(sheet).getByText(/Saving a choice here clears this notice/)).toBeInTheDocument()
+    expect(within(sheet).getByRole("combobox", { name: "Repositories" })).toHaveTextContent("Only these")
+  })
+
+  it("does not offer Resume for a target whose repositories were all removed", async () => {
+    const reason = "Paused: its repositories were removed"
+    const scoped = { ...webhook, active: false, pausedReason: reason, pauseCause: "scope" }
+    mockApi({
+      "GET /api/notifications": { targets: [scoped], mailConfigured: false, settings },
+      "GET /api/repos": { repos: repos },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByRole("switch", { name: "Active: CI alerts" })).toBeDisabled()
+    await userEvent.click(screen.getByRole("tab", { name: /Failing targets/ }))
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    expect(await screen.findByRole("menuitem", { name: "View deliveries" })).toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: "Resume" })).not.toBeInTheDocument()
+  })
+
+  it("shows why the server refused to switch a target on", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [{ ...webhook, active: false }], mailConfigured: false, settings },
+      "PATCH /api/notifications/n1": () =>
+        jsonResponse(400, { message: "Validation failed", errors: { repositoryIds: ["Choose repositories first"] } }),
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("switch", { name: "Active: CI alerts" }))
+    expect(await screen.findByText("Choose repositories first")).toBeInTheDocument()
   })
 
   it("needs a URL and at least one event", async () => {
@@ -128,14 +264,14 @@ describe("Notifications", () => {
     renderWithProviders(<App />, { route: "/notifications" })
 
     await userEvent.click(await screen.findByRole("button", { name: "Add target" }))
-    const dialog = await screen.findByRole("dialog")
-    await userEvent.type(within(dialog).getByLabelText("Name"), "CI")
-    await userEvent.click(within(dialog).getByLabelText("Blocked"))
-    await userEvent.click(within(dialog).getByLabelText("Failed"))
-    await userEvent.click(within(dialog).getByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("Name"), "CI")
+    await userEvent.click(within(sheet).getByLabelText("Blocked"))
+    await userEvent.click(within(sheet).getByLabelText("Failed"))
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
 
-    expect(await within(dialog).findByText("Enter an http or https URL")).toBeInTheDocument()
-    expect(within(dialog).getByText("Choose at least one event")).toBeInTheDocument()
+    expect(await within(sheet).findByText("Enter an http or https URL")).toBeInTheDocument()
+    expect(within(sheet).getByText("Choose at least one event")).toBeInTheDocument()
     expect(calls(fetchSpy, "POST", "/api/notifications")).toHaveLength(0)
   })
 
@@ -415,10 +551,10 @@ describe("Notifications", () => {
 
     await userEvent.click(within(row).getByRole("button", { name: "Actions for Team channel" }))
     await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }))
-    const dialog = await screen.findByRole("dialog")
-    expect(within(dialog).getByText(reason)).toBeInTheDocument()
-    expect(within(dialog).getByText(/The Slack webhook was deleted/)).toBeInTheDocument()
-    expect(within(dialog).getByText(/Switching it back on in the list clears/)).toBeInTheDocument()
+    const sheet = await screen.findByRole("dialog")
+    expect(within(sheet).getByText(reason)).toBeInTheDocument()
+    expect(within(sheet).getByText(/The Slack webhook was deleted/)).toBeInTheDocument()
+    expect(within(sheet).getByText(/Switching it back on in the list clears/)).toBeInTheDocument()
   })
 
   it("shows a delivery waiting for its first send or a retry", async () => {

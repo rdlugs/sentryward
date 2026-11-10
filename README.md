@@ -900,11 +900,35 @@ target picks its events:
 | Event | Sent when |
 | --- | --- |
 | **Blocked** | The review found blocking issues |
+| **Resolved** | The review passed, and the previous finished review of the same pull or merge request was blocked. A partial review with no blocking findings does not count, since it may have skipped the code the blockers were in |
 | **Failed** | The review could not run or finish (no model key, the forge unreachable, the maximum run time or a worker that stopped responding) |
 | **Completed** | Any finished review, blocked or not. Skipped and cancelled reviews never notify |
 
 A target gets one delivery per review, named after the most specific event it
-listens for (failed, then blocked, then completed).
+listens for (failed, then blocked, then resolved, then completed).
+
+**Scope.** Each target can also narrow which reviews it hears about:
+
+- **Repositories:** all (the default), or only the chosen repositories of the
+  workspace.
+- **Minimum severity:** any (the default), or only reviews with at least one
+  finding at or above minor, major or critical.
+- **Only when the verdict changes:** skip a review whose verdict matches the
+  previous finished review of the same pull or merge request. The first review
+  of a change always counts as a change.
+
+The "previous review" is the newest completed or partial review of the same
+change that finished earlier, however either was started (push, rerun,
+comment or manual); failed runs are passed over, so pass, failed, pass is not
+a change. **Failed** and **Resolved** deliveries ignore the severity and
+verdict filters (a failure has neither, and a resolved review usually has
+fewer findings); the repository filter applies to every event. Deleting a
+repository, or the connection it came through, removes it from every target's
+list; a target left with none is paused ("Paused: its repositories were
+removed") rather than widened to every repository, and cannot be switched back
+on until repositories (or All) are saved when editing it. The list shows a
+target's scope under its name, for example "acme/payments · ≥ major · verdict
+changes".
 
 **Pausing.** Admins can switch a target off in the list to pause its deliveries
 while keeping its events, recipients, URL and secret. Pausing drops deliveries
@@ -925,7 +949,7 @@ longer exists, `410 Gone` from any target or `404` from Slack (a deleted
 incoming webhook answers `no_service`), pauses its target at once. The reason
 (for example "Auto-paused: HTTP 410 Gone" or "Auto-paused after 5 failed
 deliveries in a row (last: HTTP 503)") shows under the target's name and in its
-edit dialog, and when mail is configured each owner and admin of the workspace
+edit panel, and when mail is configured each owner and admin of the workspace
 is emailed once, with a link straight to that tab. The **Failing targets** tab
 (`/notifications?tab=failing`, open to members too) lists every target that
 needs a look, with a summary such as "1 paused · 1 failing · 1 retrying":
@@ -936,7 +960,8 @@ to be added again, a target that kept failing can be tested and resumed),
 through). Each row shows the last delivery's status or error and when the next
 try is, and an older delivery still being retried behind it on its own line. Admins can **Send test**
 from the row and **Resume** a paused target (a passing test offers to resume it
-too); everyone can open its delivery history. The tab's badge is red when a
+too), except one paused because its repositories were removed, which is
+switched back on by saving repositories when editing it; everyone can open its delivery history. The tab's badge is red when a
 target is paused. The list refreshes every 30 seconds while a delivery is
 pending. Resuming the target (or switching it back on or off in the Targets
 tab) clears the reason and the count. Failed test deliveries never count, so checking a broken target does not
@@ -960,9 +985,11 @@ There are three kinds:
   ```
 
   `change.title`, `change.url` and `findings` are `null` for a review that
-  failed before it ran.
+  failed before it ran. `event` (and the header) is `failed`, `blocked`,
+  `resolved`, `completed` or `test`.
 - **Slack**: an incoming-webhook URL, posted a one-line message linking to the
-  review.
+  review ("Review failed", "Review blocked", "Blocking issues resolved" or
+  "Review completed", with the repository and number).
 - **Email**: chosen members of the workspace, through the configured mail
   transport (`SMTP_URL`). Members who leave are no longer emailed.
 
@@ -1765,11 +1792,11 @@ rate limited (20 requests per 15 minutes per IP).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures` or `null`), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
+| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures`, `scope` or `null`), the scope (`repositoryIds`, empty for all; `minSeverity`, `minor`, `major`, `critical` or `null`; `onlyVerdictChanges`), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
 | GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
 | PATCH  | `/api/notifications/settings` | Workspace admins: `{ autoPauseAfter }`, 0 to 50 failed deliveries in a row before a target is paused (0 never); returns `{ settings }` |
-| POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
-| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, active? }`; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count |
+| POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity` and `onlyVerdictChanges`; events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
+| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, active? }`; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent |
 | POST   | `/api/notifications/:id/test` | Workspace admins: sends a sample delivery; returns `{ result }`, `{ ok: true }` or `{ ok: false, error }` |
 | DELETE | `/api/notifications/:id` | Workspace admins: removes a target |
 

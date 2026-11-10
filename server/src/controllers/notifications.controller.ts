@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { Prisma } from "../generated/prisma/client.ts";
 import { encrypt } from "../lib/crypto.ts";
 import { assertSafeUrl } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
@@ -18,6 +19,7 @@ import {
   newWebhookSecret,
   publicDelivery,
   publicTarget,
+  SCOPE_REASON,
   testTarget,
 } from "../services/notifications.ts";
 
@@ -36,6 +38,25 @@ async function assertMembers(workspaceId: string, userIds: string[]) {
   const count = await prisma.membership.count({ where: { workspaceId, userId: { in: userIds } } });
   if (count !== userIds.length) {
     throw new HttpError(400, "Validation failed", { recipientIds: ["Choose members of this workspace"] });
+  }
+}
+
+// Only the workspace's own repositories can be named, so a target cannot be
+// pointed at (or reveal the existence of) another workspace's. Run in the
+// transaction that saves the ids: FOR SHARE makes a repository deletion wait
+// until the save commits, so its dropRepositoriesFromTargets then sees (and
+// removes) the saved id; a deletion that committed first leaves the row
+// missing here and the save is refused.
+async function assertRepositories(tx: Prisma.TransactionClient, workspaceId: string, repositoryIds: string[]) {
+  if (!repositoryIds.length) return;
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT r.id FROM repositories r
+    JOIN forge_connections c ON c.id = r.connection_id
+    WHERE r.id = ANY(${repositoryIds}::uuid[]) AND c.workspace_id = ${workspaceId}::uuid
+    FOR SHARE OF r
+  `;
+  if (rows.length !== repositoryIds.length) {
+    throw new HttpError(400, "Validation failed", { repositoryIds: ["Choose repositories in this workspace"] });
   }
 }
 
@@ -89,14 +110,25 @@ export async function listDeliveries(req: Request, res: Response) {
 export async function createNotification(req: Request, res: Response) {
   const input = createNotificationSchema.parse(req.body);
   const workspaceId = req.workspaceId!;
-  const base = { workspaceId, kind: input.kind, name: input.name, events: input.events };
+  const base = {
+    workspaceId,
+    kind: input.kind,
+    name: input.name,
+    events: input.events,
+    repositoryIds: input.repositoryIds,
+    minSeverity: input.minSeverity,
+    onlyVerdictChanges: input.onlyVerdictChanges,
+  };
 
   if (input.kind === "email") {
     if (!mailer.configured()) {
       throw new HttpError(400, "Email notifications need mail to be configured (SMTP_URL)");
     }
     await assertMembers(workspaceId, input.recipientIds);
-    const target = await prisma.notificationTarget.create({ data: { ...base, recipientIds: input.recipientIds } });
+    const target = await prisma.$transaction(async (tx) => {
+      await assertRepositories(tx, workspaceId, input.repositoryIds);
+      return tx.notificationTarget.create({ data: { ...base, recipientIds: input.recipientIds } });
+    });
     res.status(201).json({ target: publicTarget(target) });
     return;
   }
@@ -110,8 +142,11 @@ export async function createNotification(req: Request, res: Response) {
     throw error;
   }
   const secret = input.kind === "webhook" ? newWebhookSecret() : undefined;
-  const target = await prisma.notificationTarget.create({
-    data: { ...base, encryptedUrl: encrypt(input.url), encryptedSecret: secret ? encrypt(secret) : null },
+  const target = await prisma.$transaction(async (tx) => {
+    await assertRepositories(tx, workspaceId, input.repositoryIds);
+    return tx.notificationTarget.create({
+      data: { ...base, encryptedUrl: encrypt(input.url), encryptedSecret: secret ? encrypt(secret) : null },
+    });
   });
   res.status(201).json({ target: publicTarget(target), ...(secret ? { secret } : {}) });
 }
@@ -125,10 +160,27 @@ export async function updateNotification(req: Request, res: Response) {
     }
     await assertMembers(target.workspaceId, input.recipientIds);
   }
+  // Paused because its repositories were deleted: an empty list now means
+  // every repository, so it stays off until an admin saves a choice (All
+  // included) on purpose. Saving one clears the reason; it stays paused.
+  const scopePaused = target.pausedReason === SCOPE_REASON && input.repositoryIds === undefined;
+  if (scopePaused && input.active === true) {
+    throw new HttpError(400, "Validation failed", {
+      repositoryIds: ["Its repositories were removed; choose repositories, or All, before switching it on"],
+    });
+  }
   // An admin switching a target either way takes over from auto-pause: the
-  // reason no longer applies and the failure count starts again.
-  const data = input.active === undefined ? input : { ...input, pausedReason: null, consecutiveFailures: 0 };
+  // reason no longer applies and the failure count starts again. A scope
+  // reason stays until repositories are saved, or switching it off and on
+  // again would get round the check above.
+  const clearReason = input.active !== undefined ? !scopePaused : target.pausedReason === SCOPE_REASON && !scopePaused;
+  const data = {
+    ...input,
+    ...(input.active !== undefined ? { consecutiveFailures: 0 } : {}),
+    ...(clearReason ? { pausedReason: null } : {}),
+  };
   const updated = await prisma.$transaction(async (tx) => {
+    if (input.repositoryIds) await assertRepositories(tx, target.workspaceId, input.repositoryIds);
     const row = await tx.notificationTarget.update({ where: { id: target.id }, data });
     // Paused means its queued deliveries are dropped, not held for a resume.
     if (input.active === false) await dropPendingDeliveries(tx, target.id);

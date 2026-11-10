@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 import type { LastDelivery, NotificationTarget, PendingRetry } from "./api"
-import { causeHint, deliveryDetail, failingStatus, failingTargets, pendingRetryDetail, retryNote } from "./delivery"
+import {
+  causeHint,
+  deliveryDetail,
+  failingStatus,
+  failingTargets,
+  pendingRetryDetail,
+  retryNote,
+  scopeSummary,
+} from "./delivery"
 
 const NOW = Date.parse("2026-11-10T12:00:00Z")
 const inMinutes = (minutes: number) => new Date(NOW + minutes * 60_000).toISOString()
@@ -33,6 +41,9 @@ const target = (overrides: Partial<NotificationTarget> = {}): NotificationTarget
   host: "hooks.example.com",
   undecryptable: false,
   recipientIds: [],
+  repositoryIds: [],
+  minSeverity: null,
+  onlyVerdictChanges: false,
   active: true,
   pausedReason: null,
   pauseCause: null,
@@ -135,6 +146,29 @@ describe("causeHint", () => {
     expect(causeHint(target({ kind: "slack", pauseCause: "gone" }))).toMatch(/Slack webhook was deleted/)
     expect(causeHint(target({ pauseCause: "gone" }))).toMatch(/no longer exists/)
     expect(causeHint(target({ pauseCause: "failures" }))).toBe("Check the delivery errors, send a test, then resume.")
+    expect(causeHint(target({ pauseCause: "scope" }))).toMatch(/repository it was limited to was removed/)
     expect(causeHint(target())).toBeNull()
+  })
+})
+
+describe("scopeSummary", () => {
+  const names = new Map([["r1", "acme/payments"]])
+
+  it("is null for a target that hears about everything", () => {
+    expect(scopeSummary(target(), names)).toBeNull()
+  })
+
+  it("names repositories, the severity floor and verdict changes", () => {
+    expect(scopeSummary(target({ repositoryIds: ["r1"], minSeverity: "major", onlyVerdictChanges: true }), names)).toBe(
+      "acme/payments · ≥ major · verdict changes",
+    )
+  })
+
+  it("counts repositories it cannot name", () => {
+    expect(scopeSummary(target({ repositoryIds: ["r2", "r3"] }), names)).toBe("2 repositories")
+  })
+
+  it("counts the ones it cannot name next to the ones it can", () => {
+    expect(scopeSummary(target({ repositoryIds: ["r1", "r2", "r3"] }), names)).toBe("acme/payments +2")
   })
 })

@@ -14,6 +14,7 @@ import { assertSafeUrl } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
+import { atLeast, SEVERITIES } from "../review/core/severity.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 
 export const SIGNATURE_HEADER = "X-Sentryward-Signature";
@@ -23,8 +24,12 @@ const DELIVERY_TIMEOUT_MS = 10_000;
 // Skipped, cancelled and superseded jobs never notify: nothing was reviewed.
 const NOTIFIED_STATUSES: ReviewStatus[] = ["completed", "partial", "failed"];
 // Most specific first; a job is delivered once per target, as the first of its
-// events that target listens for.
-const EVENT_ORDER: NotificationEvent[] = ["failed", "blocked", "completed"];
+// events that target listens for (and its filters let through).
+const EVENT_ORDER: NotificationEvent[] = ["failed", "blocked", "resolved", "completed"];
+// Events that are news whatever the target's filters say: a failure has no
+// findings or verdict to filter on, and a resolved review usually has fewer
+// findings, so a severity floor would hide exactly the good news.
+const UNFILTERED_EVENTS: NotificationEvent[] = ["failed", "resolved"];
 
 type JobFacts = Pick<ReviewJob, "id" | "number" | "status" | "verdict" | "error" | "summary">;
 
@@ -36,16 +41,82 @@ export interface NotificationPayload {
   findings: { total: number; bySeverity: ResultSummary["bySeverity"] } | null;
 }
 
-// Every event a finished job counts as. A blocked review is also a completed one.
-export function eventsFor(job: Pick<ReviewJob, "status" | "verdict">): NotificationEvent[] {
+type Verdict = ReviewJob["verdict"];
+
+// The previous finished review of the same change: undefined when there is
+// none, otherwise its verdict.
+export type PreviousVerdict = Verdict | undefined;
+
+// Every event a finished job counts as. A blocked review is also a completed
+// one, and so is a resolved one. Only a pass resolves: a partial review with no
+// blocking findings ("error") may have skipped the code the blockers were in.
+export function eventsFor(
+  job: Pick<ReviewJob, "status" | "verdict">,
+  previous: PreviousVerdict = undefined,
+): NotificationEvent[] {
   if (job.status === "failed") return ["failed"];
   if (job.status !== "completed" && job.status !== "partial") return [];
-  return job.verdict === "blocked" ? ["blocked", "completed"] : ["completed"];
+  if (job.verdict === "blocked") return ["blocked", "completed"];
+  return previous === "blocked" && job.verdict === "pass" ? ["resolved", "completed"] : ["completed"];
 }
 
-// The event a target hears about, or null when it listens for none of them.
-export function eventForTarget(events: NotificationEvent[], target: Pick<NotificationTarget, "events">) {
-  return EVENT_ORDER.find((event) => events.includes(event) && target.events.includes(event)) ?? null;
+// The verdict of the newest completed or partial review of the same change
+// that finished before this one, however either was triggered. Failed runs are
+// passed over: pass, failed, pass is not a change of verdict. A job without
+// finishedAt (not expected for a finished one) is bounded by its createdAt, so
+// a later review is never taken for the previous one.
+export async function previousVerdict(
+  tx: Prisma.TransactionClient,
+  job: Pick<ReviewJob, "id" | "repositoryId" | "number" | "finishedAt" | "createdAt">,
+): Promise<PreviousVerdict> {
+  const previous = await tx.reviewJob.findFirst({
+    where: {
+      repositoryId: job.repositoryId,
+      number: job.number,
+      id: { not: job.id },
+      status: { in: ["completed", "partial"] },
+      finishedAt: { lt: job.finishedAt ?? job.createdAt },
+    },
+    orderBy: [{ finishedAt: "desc" }, { createdAt: "desc" }],
+    select: { verdict: true },
+  });
+  return previous ? previous.verdict : undefined;
+}
+
+export type TargetFilters = Pick<NotificationTarget, "events" | "minSeverity" | "onlyVerdictChanges">;
+
+export interface JobFilterFacts {
+  bySeverity: ResultSummary["bySeverity"];
+  verdict: Verdict;
+  previous: PreviousVerdict;
+}
+
+function meetsSeverity(target: TargetFilters, bySeverity: ResultSummary["bySeverity"]): boolean {
+  const floor = target.minSeverity;
+  if (!floor) return true;
+  return SEVERITIES.some((severity) => (bySeverity[severity] ?? 0) > 0 && atLeast(severity, floor));
+}
+
+// The first review of a change counts as a change.
+function verdictChanged(facts: JobFilterFacts): boolean {
+  return facts.previous === undefined || facts.previous !== facts.verdict;
+}
+
+// The event a target hears about, or null when it listens for none of them or
+// its filters let none through. The repository filter is applied by the query.
+export function eventForTarget(
+  events: NotificationEvent[],
+  target: TargetFilters,
+  facts: JobFilterFacts = { bySeverity: {}, verdict: null, previous: undefined },
+) {
+  return (
+    EVENT_ORDER.find((event) => {
+      if (!events.includes(event) || !target.events.includes(event)) return false;
+      if (UNFILTERED_EVENTS.includes(event)) return true;
+      if (!meetsSeverity(target, facts.bySeverity)) return false;
+      return !target.onlyVerdictChanges || verdictChanged(facts);
+    }) ?? null
+  );
 }
 
 export function payloadFor(
@@ -72,6 +143,7 @@ export function payloadFor(
 const HEADLINES: Record<NotificationPayload["event"], string> = {
   failed: "Review failed",
   blocked: "Review blocked",
+  resolved: "Blocking issues resolved",
   completed: "Review completed",
   test: "Test notification",
 };
@@ -410,19 +482,40 @@ export async function notifyJob(jobId: string): Promise<void> {
         where: { id: jobId },
         include: { repository: { include: { connection: { select: { workspaceId: true } } } } },
       });
-      const events = eventsFor(job);
+      const baseEvents = eventsFor(job);
+      if (!baseEvents.length) return;
+      // Resolved depends on the previous review, which is only looked up when
+      // a target can use it, so any finished review may be resolved here.
+      const possibleEvents: NotificationEvent[] = job.status === "failed" ? baseEvents : [...baseEvents, "resolved"];
       // Paused targets are left out here, and pausing a target drops the rows
       // queued for it (dropPendingDeliveries), so a paused target misses this
       // job for good rather than catching up when it is resumed. A test
       // delivery still reaches it.
-      const targets = await tx.notificationTarget.findMany({
-        where: { workspaceId: job.repository.connection.workspaceId, active: true, events: { hasSome: events } },
+      const candidates = await tx.notificationTarget.findMany({
+        where: {
+          workspaceId: job.repository.connection.workspaceId,
+          active: true,
+          events: { hasSome: possibleEvents },
+          // An empty list is every repository.
+          OR: [{ repositoryIds: { isEmpty: true } }, { repositoryIds: { has: job.repositoryId } }],
+        },
+      });
+      if (!candidates.length) return;
+      const needsPrevious =
+        job.status !== "failed" &&
+        candidates.some((target) => target.onlyVerdictChanges || target.events.includes("resolved"));
+      const previous = needsPrevious ? await previousVerdict(tx, job) : undefined;
+      const events = needsPrevious ? eventsFor(job, previous) : baseEvents;
+      const summary = job.summary as ResultSummary | null;
+      const facts: JobFilterFacts = { bySeverity: summary?.bySeverity ?? {}, verdict: job.verdict, previous };
+      const targets = candidates.flatMap((target) => {
+        const event = eventForTarget(events, target, facts);
+        return event ? [{ target, event }] : [];
       });
       if (!targets.length) return;
       const now = new Date();
       await tx.notificationDelivery.createMany({
-        data: targets.map((target) => {
-          const event = eventForTarget(events, target)!;
+        data: targets.map(({ target, event }) => {
           return {
             targetId: target.id,
             jobId: job.id,
@@ -505,13 +598,40 @@ function httpLabel(httpStatus: number): string {
 // that kept failing (worth a test and a resume).
 const GONE_REASON = "Auto-paused: HTTP ";
 const FAILURES_REASON = "Auto-paused after ";
+// Written by dropRepositoriesFromTargets.
+export const SCOPE_REASON = "Paused: its repositories were removed";
 
-export type PauseCause = "gone" | "failures";
+export type PauseCause = "gone" | "failures" | "scope";
 
 export function pauseCause(reason: string | null): PauseCause | null {
   if (reason === null) return null;
+  if (reason === SCOPE_REASON) return "scope";
   // Anything else (a reason written by an older version) counts as failures.
   return reason.startsWith(GONE_REASON) ? "gone" : "failures";
+}
+
+// Takes deleted repositories out of every target's filter. A target left with
+// none would read as "all repositories", so instead it is paused (and its
+// queued deliveries dropped) with SCOPE_REASON, already paused or not, and
+// cannot be switched back on until an admin saves its repositories again (see
+// updateNotification). Call in the transaction that deletes the repositories.
+export async function dropRepositoriesFromTargets(tx: Prisma.TransactionClient, repositoryIds: string[]) {
+  if (!repositoryIds.length) return;
+  const rows = await tx.$queryRaw<{ id: string; remaining: number }[]>`
+    UPDATE notification_targets
+    SET repository_ids = ARRAY(
+      SELECT id FROM unnest(repository_ids) AS id WHERE id <> ALL(${repositoryIds}::uuid[])
+    ),
+    -- A raw UPDATE skips Prisma's @updatedAt.
+    updated_at = now()
+    WHERE repository_ids && ${repositoryIds}::uuid[]
+    RETURNING id, cardinality(repository_ids) AS remaining
+  `;
+  for (const row of rows) {
+    if (row.remaining > 0) continue;
+    await tx.notificationTarget.update({ where: { id: row.id }, data: { active: false, pausedReason: SCOPE_REASON } });
+    await dropPendingDeliveries(tx, row.id);
+  }
 }
 
 // Counts a delivery that failed for good against its target and pauses the
@@ -730,6 +850,9 @@ export function publicTarget(
     host,
     undecryptable,
     recipientIds: target.recipientIds,
+    repositoryIds: target.repositoryIds,
+    minSeverity: target.minSeverity,
+    onlyVerdictChanges: target.onlyVerdictChanges,
     active: target.active,
     pausedReason: target.pausedReason,
     pauseCause: pauseCause(target.pausedReason),

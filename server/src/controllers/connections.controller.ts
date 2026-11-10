@@ -7,6 +7,7 @@ import { encrypt } from "../lib/crypto.ts";
 import { assertSafeForgeHost } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
+import { dropRepositoriesFromTargets } from "../services/notifications.ts";
 import { ForgeError } from "../review/forge/http.ts";
 import { FORGE_PROVIDERS, forgeName } from "../review/forge/providers.ts";
 import { hostOrigin } from "../review/forge/types.ts";
@@ -415,6 +416,14 @@ export async function deleteConnection(req: Request, res: Response) {
   for (const repo of connection.repositories) {
     await removeWebhook(repo, connection).catch(() => undefined);
   }
-  await prisma.forgeConnection.delete({ where: { id: connection.id } });
+  // Its repositories go with it (cascade), so notification filters lose them
+  // in the same step.
+  await prisma.$transaction(async (tx) => {
+    await dropRepositoriesFromTargets(
+      tx,
+      connection.repositories.map((repo) => repo.id),
+    );
+    await tx.forgeConnection.delete({ where: { id: connection.id } });
+  });
   res.status(204).end();
 }

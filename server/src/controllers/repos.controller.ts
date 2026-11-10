@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { Prisma, type ReviewStatus, type ReviewVerdict } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
+import { dropRepositoriesFromTargets } from "../services/notifications.ts";
 import { loadReviewConfig, repoSettingsRuleIssues } from "../review/config/load.ts";
 import { hostOrigin } from "../review/forge/types.ts";
 import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../services/forge.ts";
@@ -228,13 +229,17 @@ export async function updateRepo(req: Request, res: Response) {
 }
 
 // Review jobs and posted findings go with it (cascade), so re-adding the
-// repository later starts without history.
+// repository later starts without history. Notification filters drop it in the
+// same step.
 export async function deleteRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
   const repo = await loadOwnedRepo(req.workspaceId!, id);
   // Take Sentryward's hook off the forge while the row still holds its id.
   await removeWebhook(repo, repo.connection).catch(() => undefined);
-  await prisma.repository.delete({ where: { id } });
+  await prisma.$transaction(async (tx) => {
+    await dropRepositoriesFromTargets(tx, [id]);
+    await tx.repository.delete({ where: { id } });
+  });
   res.status(204).end();
 }
 

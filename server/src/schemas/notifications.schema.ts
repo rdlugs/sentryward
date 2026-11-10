@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { pageSchema } from "./pagination.ts";
 
-const NOTIFICATION_EVENTS = ["blocked", "failed", "completed"] as const;
+const NOTIFICATION_EVENTS = ["blocked", "failed", "resolved", "completed"] as const;
 
 const name = z.string().trim().min(1, "Name is required").max(100);
 const events = z
@@ -14,11 +14,25 @@ const recipientIds = z
   .min(1, "Choose at least one member")
   .max(100)
   .transform((list) => [...new Set(list)]);
+// Empty is every repository in the workspace.
+const repositoryIds = z
+  .array(z.uuid())
+  .max(100)
+  .transform((list) => [...new Set(list)]);
+// Null is any severity.
+const minSeverity = z.enum(["minor", "major", "critical"]).nullable();
+const onlyVerdictChanges = z.boolean();
+
+const filters = {
+  repositoryIds: repositoryIds.default([]),
+  minSeverity: minSeverity.default(null),
+  onlyVerdictChanges: onlyVerdictChanges.default(false),
+};
 
 export const createNotificationSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("webhook"), name, events, url }),
-  z.object({ kind: z.literal("slack"), name, events, url }),
-  z.object({ kind: z.literal("email"), name, events, recipientIds }),
+  z.object({ kind: z.literal("webhook"), name, events, url, ...filters }),
+  z.object({ kind: z.literal("slack"), name, events, url, ...filters }),
+  z.object({ kind: z.literal("email"), name, events, recipientIds, ...filters }),
 ]);
 
 // The URL is not editable: replacing it is removing the target and adding it
@@ -28,6 +42,9 @@ export const updateNotificationSchema = z
     name: name.optional(),
     events: events.optional(),
     recipientIds: recipientIds.optional(),
+    repositoryIds: repositoryIds.optional(),
+    minSeverity: minSeverity.optional(),
+    onlyVerdictChanges: onlyVerdictChanges.optional(),
     active: z.boolean().optional(),
   })
   .refine((data) => Object.values(data).some((value) => value !== undefined), {

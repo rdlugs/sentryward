@@ -10,6 +10,30 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Notification targets can be limited by repository and minimum severity
+  (#251). A target hears about all repositories (the default) or only the ones
+  chosen, and about every review (the default) or only those with at least
+  one minor, major or critical finding; failed and resolved reviews ignore the
+  severity floor. Repository ids are checked against the workspace. Deleting a
+  repository, or its connection, removes it from every target, and a target
+  left with none is paused ("Paused: its repositories were removed",
+  `pauseCause: "scope"`) instead of widening to every repository; it can only
+  be switched back on after its repositories (or All) are saved, so the
+  Failing targets tab offers no Resume for it and its switch stays off. The add and
+  edit panels gain a **Scope** section, and the list shows the scope under the
+  target's name (e.g. "acme/payments · ≥ major"). `POST`/`PATCH
+  /api/notifications` accept, and `GET` returns, `repositoryIds`,
+  `minSeverity` and `onlyVerdictChanges` (migration applied on start).
+- **Only when the verdict changes** per target, and a new **Resolved** event
+  (#252). With the option on, blocked and completed deliveries are sent only
+  when the verdict differs from the previous completed or partial review of
+  the same pull or merge request (the first review always counts; failed runs
+  in between are passed over), however either review was triggered.
+  `resolved` fires when a review passes after the previous one was blocked (a
+  partial review with no blocking findings does not count); it
+  ranks after `blocked` and before `completed`, can be the webhook `event`,
+  reads "Blocking issues resolved" in Slack and email, and, like `failed`,
+  ignores the severity and verdict filters.
 - Notification deliveries are retried (#249). A finished review's deliveries
   are queued as pending rows in the same step that marks it notified, so a
   worker restart no longer loses them, and the worker sends them outside the
@@ -97,6 +121,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- Adding and editing a notification target opens a side panel instead of a
+  dialog, so the longer form scrolls with its Cancel and Save buttons in view.
 - The Failing targets tab groups each row's actions (View deliveries, Send
   test, Resume) in a "..." menu, matching the Targets tab.
 - The output defaults are now a quiet setup, which the Display tab offers as its

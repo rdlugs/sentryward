@@ -698,9 +698,20 @@ enum NotificationKind {
 enum NotificationEvent {
   blocked
   failed
+  // Not blocked, after the previous finished review of the same change was.
+  resolved
   completed
 
   @@map("notification_event")
+}
+
+// The least severe finding a review needs for a target to hear about it.
+enum NotificationMinSeverity {
+  minor
+  major
+  critical
+
+  @@map("notification_min_severity")
 }
 
 // Where the worker reports finished reviews. URLs are encrypted: a Slack
@@ -716,6 +727,16 @@ model NotificationTarget {
   encryptedUrl    String?             @map("encrypted_url")
   encryptedSecret String?             @map("encrypted_secret")
   recipientIds    String[]            @default([]) @map("recipient_ids") @db.Uuid
+  // Repositories the target hears about; empty means all of them. Deleting a
+  // repository takes it out of every list, and a target whose last repository
+  // goes is paused rather than left to hear about everything.
+  repositoryIds   String[]            @default([]) @map("repository_ids") @db.Uuid
+  // Blocked and completed deliveries need a finding at least this severe;
+  // null is any. Failed and resolved deliveries ignore it.
+  minSeverity     NotificationMinSeverity? @map("min_severity")
+  // Blocked and completed deliveries only when the verdict differs from the
+  // previous finished review of the same change (the first always counts).
+  onlyVerdictChanges Boolean          @default(false) @map("only_verdict_changes")
   // Paused targets keep their settings but get no deliveries.
   active          Boolean             @default(true)
   // Deliveries in a row that failed for good, across jobs; a success (tests

@@ -1,16 +1,53 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { api } from "@/lib/api"
+import { api, ApiError } from "@/lib/api"
 
-const NOTIFICATIONS_KEY = ["notifications"]
+// Also invalidated by removing a repository or connection, which edits targets
+// on the server (their repositories, and a pause when none are left).
+export const NOTIFICATIONS_KEY = ["notifications"]
+
+// A field error says why a save was refused (e.g. a scope-paused target cannot
+// be resumed); the top-level message is only "Validation failed".
+export function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof ApiError) {
+    const first = Object.values(error.fieldErrors ?? {}).flat()[0]
+    return first ?? error.message
+  }
+  return error instanceof Error ? error.message : fallback
+}
 
 export type NotificationKind = "webhook" | "slack" | "email"
-export type NotificationEvent = "blocked" | "failed" | "completed"
+export type NotificationEvent = "blocked" | "failed" | "resolved" | "completed"
 
 export const EVENT_OPTIONS: { value: NotificationEvent; label: string; description: string }[] = [
   { value: "blocked", label: "Blocked", description: "A review found blocking issues" },
+  {
+    value: "resolved",
+    label: "Resolved",
+    description: "A review passes after the previous review of the same pull or merge request was blocked",
+  },
   { value: "failed", label: "Failed", description: "A review could not run or finish" },
   { value: "completed", label: "Completed", description: "Any finished review, blocked or not" },
 ]
+
+// The least severe finding a review needs for a target to hear about it; null
+// is any. Failed and resolved deliveries ignore it.
+export type MinSeverity = "minor" | "major" | "critical"
+
+export const MIN_SEVERITY_LABELS: Record<MinSeverity, string> = {
+  minor: "Minor",
+  major: "Major",
+  critical: "Critical",
+}
+
+// Which reviews a target hears about, beyond its events.
+export interface TargetFilters {
+  // Empty means every repository in the workspace.
+  repositoryIds: string[]
+  minSeverity: MinSeverity | null
+  // Blocked and completed deliveries only when the verdict differs from the
+  // previous review of the same change.
+  onlyVerdictChanges: boolean
+}
 
 export const KIND_LABELS: Record<NotificationKind, string> = {
   webhook: "Webhook",
@@ -65,7 +102,7 @@ export interface NotificationDelivery extends LastDelivery {
   finishedAt: string | null
 }
 
-export interface NotificationTarget {
+export interface NotificationTarget extends TargetFilters {
   id: string
   kind: NotificationKind
   name: string
@@ -81,8 +118,9 @@ export interface NotificationTarget {
   // cleared when an admin switches the target.
   pausedReason: string | null
   // "gone" when the endpoint said it no longer exists, "failures" when the
-  // limit was reached; null when not auto-paused.
-  pauseCause: "gone" | "failures" | null
+  // limit was reached, "scope" when every repository it was limited to was
+  // removed; null when not auto-paused.
+  pauseCause: "gone" | "failures" | "scope" | null
   // Deliveries in a row that failed for good; a success resets it.
   consecutiveFailures: number
   // Null until the target gets its first delivery (tests included).
@@ -92,11 +130,13 @@ export interface NotificationTarget {
   updatedAt: string
 }
 
-export type NotificationTargetInput =
-  | { kind: "webhook" | "slack"; name: string; events: NotificationEvent[]; url: string }
-  | { kind: "email"; name: string; events: NotificationEvent[]; recipientIds: string[] }
+export type NotificationTargetInput = TargetFilters &
+  (
+    | { kind: "webhook" | "slack"; name: string; events: NotificationEvent[]; url: string }
+    | { kind: "email"; name: string; events: NotificationEvent[]; recipientIds: string[] }
+  )
 
-export interface NotificationTargetUpdate {
+export interface NotificationTargetUpdate extends Partial<TargetFilters> {
   name?: string
   events?: NotificationEvent[]
   recipientIds?: string[]
