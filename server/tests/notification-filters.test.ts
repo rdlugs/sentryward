@@ -243,10 +243,10 @@ describe("notifyJob filters", () => {
     await notifyJob(fixed.id);
     for (const id of await claimDueDeliveries(100)) await runDelivery(id);
 
-    const webhook = stub.calls.find((call) => call.url.includes("hooks.example.com"))!;
+    const webhook = stub.calls.find((call) => new URL(call.url).host === "hooks.example.com")!;
     expect(webhook.headers["x-sentryward-event"]).toBe("resolved");
     expect(JSON.parse(webhook.body!).event).toBe("resolved");
-    const slack = stub.calls.find((call) => call.url.includes("hooks.slack.com"))!;
+    const slack = stub.calls.find((call) => new URL(call.url).host === "hooks.slack.com")!;
     expect(JSON.parse(slack.body!).text).toBe("Blocking issues resolved: acme/web#7");
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ subject: 'Blocking issues resolved: acme/web#7 "Add login" - 1 finding' }),
