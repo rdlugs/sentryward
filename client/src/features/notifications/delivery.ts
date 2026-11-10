@@ -41,14 +41,30 @@ export function deliveryDetail(delivery: LastDelivery | null, now = Date.now()) 
   return detail || null
 }
 
+// A retry still queued behind a newer delivery, which the last delivery's own
+// detail says nothing about. Null when there is none, or when the last
+// delivery is itself being retried and already shows it.
+export function pendingRetryDetail(target: NotificationTarget, now = Date.now()) {
+  const retry = target.pending.retry
+  const last = target.lastDelivery
+  if (!retry || (last?.status === "pending" && last.attempts > 0)) return null
+  const parts = [
+    `Earlier delivery: attempt ${retry.attempts} of ${MAX_DELIVERY_ATTEMPTS} failed`,
+    retry.httpStatus ? `HTTP ${retry.httpStatus}` : retry.error,
+    nextTry(retry.nextAttemptAt, now),
+  ]
+  return parts.filter(Boolean).join(" · ")
+}
+
 export type FailingStatus = "paused" | "retrying" | "failing"
 
 // Why a target is on the Failing targets tab, most urgent first: the server
-// paused it, a delivery is being retried, or deliveries failed in a row.
+// paused it, a delivery is being retried, or deliveries failed in a row. Any
+// queued retry counts, not only the newest delivery: a test or a later review
+// going through leaves an older one still retrying.
 export function failingStatus(target: NotificationTarget): FailingStatus | null {
   if (target.pausedReason !== null) return "paused"
-  const last = target.lastDelivery
-  if (last?.status === "pending" && last.attempts > 0) return "retrying"
+  if (target.pending.retry) return "retrying"
   if (target.consecutiveFailures > 0) return "failing"
   return null
 }

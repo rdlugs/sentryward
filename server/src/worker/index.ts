@@ -1,6 +1,6 @@
 import { env } from "../config/env.ts";
 import { prisma } from "../lib/prisma.ts";
-import { notifyJob } from "../services/notifications.ts";
+import { notifyJob, queueMissedNotifications } from "../services/notifications.ts";
 import { execute } from "./execute.ts";
 import { claimDueDeliveries, recoverStaleDeliveries, runDelivery } from "./deliveryQueue.ts";
 import { claimNext, recoverStale, requeueInterrupted } from "./queue.ts";
@@ -37,6 +37,12 @@ async function tick(): Promise<void> {
   // notifyJob only queues, so this is quick.
   for (const id of stale.failedIds) {
     await notifyJob(id);
+  }
+  // The backstop for a worker that stopped after storing a job but before
+  // queueing its deliveries.
+  const missed = await queueMissedNotifications();
+  if (missed > 0) {
+    console.log(`[worker] queued notifications for ${missed} finished job(s) missing them`);
   }
   while (!stopping && running.size < env.WORKER_CONCURRENCY) {
     const job = await claimNext(env.WORKER_USER_CONCURRENCY);

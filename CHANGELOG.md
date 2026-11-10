@@ -13,11 +13,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Notification deliveries are retried (#249). A finished review's deliveries
   are queued as pending rows in the same step that marks it notified, so a
   worker restart no longer loses them, and the worker sends them outside the
-  review slots, so a slow endpoint no longer delays reviews. Timeouts,
+  review slots, so a slow endpoint no longer delays reviews. The worker also
+  queues them for any review finished in the last 24 hours that a stopped
+  worker never got to. Timeouts,
   connection errors, `408`, `429` (honouring `Retry-After`) and `5xx` are
   retried up to 5 tries with 1m/5m/30m/2h backoff; other failures are final.
   The delivery log shows pending deliveries ("Queued", "Retrying · 503") with
-  the next try, and deliveries gain `nextAttemptAt`.
+  the next try, and deliveries gain `nextAttemptAt`. Pausing a target, by an
+  admin or automatically, drops its queued deliveries, so resuming it never
+  sends them.
 - Notification targets pause themselves after repeated failures (#250): after
   the workspace's **Auto-pause after** limit of deliveries in a row fail for
   good (5 by default, 0 for never, set on the Notifications page's new
@@ -31,7 +35,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   are emailed once when mail is configured (linking to the tab), and resuming
   the target clears it. `GET /api/notifications` adds `pauseCause`. A successful delivery resets the count. Adds outbox and failure
   columns to `notification_deliveries`, `notification_targets` and
-  `workspaces` (migration applied on start).
+  `workspaces` (migration applied on start). `GET /api/notifications` also
+  returns each target's `pending` deliveries (`{ count, retry }`), so a target
+  stays under Retrying, and the list keeps refreshing, while an older delivery
+  is retried behind a newer one that went through.
 - A delivery log for notification targets (#248). Every delivery, tests
   included, is recorded with its outcome and the HTTP status or error (with the
   target URL cut out). The Notifications list has a **Last delivery** column,

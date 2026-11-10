@@ -21,6 +21,7 @@ const webhook = {
   pauseCause: null,
   consecutiveFailures: 0,
   lastDelivery: null,
+  pending: { count: 0, retry: null },
   createdAt: "2026-10-01T00:00:00.000Z",
   updatedAt: "2026-10-01T00:00:00.000Z",
 }
@@ -426,7 +427,11 @@ describe("Notifications", () => {
     mockApi({
       "GET /api/notifications": {
         targets: [
-          { ...webhook, lastDelivery: { ...pending, httpStatus: null, attempts: 0, nextAttemptAt: pending.createdAt } },
+          {
+            ...webhook,
+            lastDelivery: { ...pending, httpStatus: null, attempts: 0, nextAttemptAt: pending.createdAt },
+            pending: { count: 1, retry: null },
+          },
           {
             ...slackTarget,
             lastDelivery: {
@@ -434,6 +439,15 @@ describe("Notifications", () => {
               httpStatus: 503,
               attempts: 2,
               nextAttemptAt: new Date(now + 5 * 60_000).toISOString(),
+            },
+            pending: {
+              count: 1,
+              retry: {
+                attempts: 2,
+                httpStatus: 503,
+                error: null,
+                nextAttemptAt: new Date(now + 5 * 60_000).toISOString(),
+              },
             },
           },
         ],
@@ -494,6 +508,7 @@ describe("Notifications", () => {
         id: "n4",
         name: "Ops hook",
         lastDelivery: { ...failed, status: "pending", httpStatus: 502, attempts: 2, nextAttemptAt: at(25) },
+        pending: { count: 1, retry: { attempts: 2, httpStatus: 502, error: null, nextAttemptAt: at(25) } },
       },
       {
         ...emailTarget,
@@ -545,6 +560,43 @@ describe("Notifications", () => {
 
     await userEvent.click(within(paused).getByRole("button", { name: "View deliveries to Team channel" }))
     expect(await screen.findByRole("dialog", { name: "Deliveries to Team channel" })).toBeInTheDocument()
+  })
+
+  it("keeps a target retrying when a newer delivery went through", async () => {
+    const now = Date.now()
+    const at = (minutes: number) => new Date(now + minutes * 60_000).toISOString()
+    mockApi({
+      "GET /api/notifications": {
+        targets: [
+          {
+            ...webhook,
+            lastDelivery: {
+              status: "sent",
+              event: "test",
+              httpStatus: null,
+              error: null,
+              attempts: 1,
+              nextAttemptAt: null,
+              createdAt: at(-1),
+            },
+            pending: { count: 1, retry: { attempts: 1, httpStatus: 503, error: null, nextAttemptAt: at(4) } },
+          },
+        ],
+        mailConfigured: false,
+        settings,
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("tab", { name: /Failing targets/ }))
+
+    expect(await screen.findByText("1 retrying")).toBeInTheDocument()
+    const [row] = screen.getAllByRole("row").slice(1) as [HTMLElement]
+    expect(within(row).getAllByRole("cell")[1]!.textContent).toBe("Retrying")
+    expect(
+      within(row).getByText("Earlier delivery: attempt 1 of 5 failed · HTTP 503 · next try in 4 minutes"),
+    ).toBeInTheDocument()
   })
 
   it("uses a neutral count when nothing is paused", async () => {

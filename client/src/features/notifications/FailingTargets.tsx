@@ -29,7 +29,7 @@ import {
   type NotificationTarget,
 } from "./api"
 import { DeliveriesSheet, LastDeliveryCell, TargetName } from "./components"
-import { causeHint, deliveryDetail, type FailingRow, type FailingStatus } from "./delivery"
+import { causeHint, deliveryDetail, pendingRetryDetail, type FailingRow, type FailingStatus } from "./delivery"
 
 const STATUS_LABELS: Record<FailingStatus, string> = { paused: "Paused", failing: "Failing", retrying: "Retrying" }
 
@@ -174,13 +174,16 @@ function FailureCount({ row, limit }: { row: FailingRow; limit: number }) {
 }
 
 // The outcome, and under it what went wrong and when the next try is, so
-// nothing on this tab hides in a tooltip.
+// nothing on this tab hides in a tooltip. An older delivery still retrying
+// behind it gets its own line.
 function LastDeliveryDetail({ target }: { target: NotificationTarget }) {
   const detail = deliveryDetail(target.lastDelivery)
+  const retry = pendingRetryDetail(target)
   return (
     <div className="flex flex-col gap-0.5">
       <LastDeliveryCell delivery={target.lastDelivery} />
       {detail && <span className="text-xs break-words text-muted-foreground">{detail}</span>}
+      {retry && <span className="text-xs break-words text-muted-foreground">{retry}</span>}
     </div>
   )
 }

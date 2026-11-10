@@ -1,11 +1,11 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { env } from "../config/env.ts";
+import { Prisma } from "../generated/prisma/client.ts";
 import type {
   NotificationDelivery,
   NotificationEvent,
   NotificationKind,
   NotificationTarget,
-  Prisma,
   ReviewJob,
   ReviewStatus,
 } from "../generated/prisma/client.ts";
@@ -411,10 +411,10 @@ export async function notifyJob(jobId: string): Promise<void> {
         include: { repository: { include: { connection: { select: { workspaceId: true } } } } },
       });
       const events = eventsFor(job);
-      // Paused targets are left out here, and a row queued for a target paused
-      // before it is sent is dropped, so a paused target misses this job for
-      // good rather than catching up when it is resumed. A test delivery still
-      // reaches it.
+      // Paused targets are left out here, and pausing a target drops the rows
+      // queued for it (dropPendingDeliveries), so a paused target misses this
+      // job for good rather than catching up when it is resumed. A test
+      // delivery still reaches it.
       const targets = await tx.notificationTarget.findMany({
         where: { workspaceId: job.repository.connection.workspaceId, active: true, events: { hasSome: events } },
       });
@@ -441,6 +441,57 @@ export async function notifyJob(jobId: string): Promise<void> {
   } catch (err) {
     console.error(`[notify] could not queue notifications for job ${jobId}`, err);
   }
+}
+
+// How long after a job finishes the sweep below takes over from the worker
+// that finished it, which queues its deliveries right after storing the job.
+export const MISSED_NOTIFY_GRACE_MS = 60_000;
+// How far back the sweep looks. Jobs finished before notifiedAt existed have it
+// null too, and a "review finished" message a day late is not worth sending.
+export const MISSED_NOTIFY_LOOKBACK_MS = 24 * 60 * 60_000;
+const MISSED_NOTIFY_BATCH = 100;
+
+// Queues deliveries for finished jobs nothing queued them for: the worker
+// stopped between storing the job's final status and calling notifyJob, or
+// the queueing transaction failed. notifyJob only acts on a job still
+// unstamped, so racing the worker that finished the job is harmless. Returns
+// how many jobs were looked at.
+export async function queueMissedNotifications(now = new Date()): Promise<number> {
+  const jobs = await prisma.reviewJob.findMany({
+    where: {
+      status: { in: NOTIFIED_STATUSES },
+      notifiedAt: null,
+      finishedAt: {
+        gte: new Date(now.getTime() - MISSED_NOTIFY_LOOKBACK_MS),
+        lte: new Date(now.getTime() - MISSED_NOTIFY_GRACE_MS),
+      },
+    },
+    select: { id: true },
+    orderBy: { finishedAt: "asc" },
+    take: MISSED_NOTIFY_BATCH,
+  });
+  for (const { id } of jobs) await notifyJob(id);
+  return jobs.length;
+}
+
+export const PAUSED_BEFORE_SEND = "Target was paused before this could be sent";
+
+// Fails a target's queued deliveries when it is paused, so a pause drops them
+// for good rather than until a resume (see notifyJob). Rows a worker is sending
+// right now are left to it: runDelivery settles them rather than rescheduling
+// once it sees the target paused. Call in the transaction that pauses.
+export function dropPendingDeliveries(tx: Prisma.TransactionClient, targetId: string, now = new Date()) {
+  return tx.notificationDelivery.updateMany({
+    where: { targetId, status: "pending", lockedAt: null },
+    data: {
+      status: "failed",
+      error: PAUSED_BEFORE_SEND,
+      httpStatus: null,
+      nextAttemptAt: null,
+      payload: Prisma.DbNull,
+      finishedAt: now,
+    },
+  });
 }
 
 const STATUS_TEXT: Record<number, string> = { 404: "Not Found", 410: "Gone" };
@@ -488,6 +539,7 @@ export async function recordTargetFailure(
         ? `${GONE_REASON}${httpLabel(failure.httpStatus).slice("HTTP ".length)}`
         : `${FAILURES_REASON}${row.failures} failed deliveries in a row${last}`;
     await tx.notificationTarget.update({ where: { id: targetId }, data: { active: false, pausedReason: reason } });
+    await dropPendingDeliveries(tx, targetId);
     return reason;
   });
 }
@@ -583,6 +635,61 @@ export async function lastDeliveries(targetIds: string[]): Promise<Map<string, L
   );
 }
 
+// A queued row that already failed at least once and is due again.
+export type PendingRetry = Pick<NotificationDelivery, "attempts" | "httpStatus" | "error" | "nextAttemptAt">;
+
+export interface PendingDeliveries {
+  count: number;
+  // The retry due soonest, or null when every queued row is still untried.
+  retry: PendingRetry | null;
+}
+
+// What each target still has queued, apart from its newest delivery: a test
+// or a later job sent fine says nothing about an older row still retrying.
+export async function pendingDeliveries(targetIds: string[]): Promise<Map<string, PendingDeliveries>> {
+  if (!targetIds.length) return new Map();
+  const rows = await prisma.$queryRaw<
+    {
+      target_id: string;
+      count: number;
+      attempts: number;
+      http_status: number | null;
+      error: string | null;
+      next_attempt_at: Date | null;
+    }[]
+  >`
+    SELECT DISTINCT ON (target_id)
+      target_id, (count(*) OVER (PARTITION BY target_id))::int AS count,
+      attempts, http_status, error, next_attempt_at
+    FROM notification_deliveries
+    WHERE status = 'pending' AND target_id = ANY(${targetIds}::uuid[])
+    ORDER BY target_id, (attempts > 0) DESC, next_attempt_at ASC NULLS LAST, id
+  `;
+  return new Map(
+    rows.map((row) => [
+      row.target_id,
+      {
+        count: row.count,
+        retry:
+          row.attempts > 0
+            ? {
+                attempts: row.attempts,
+                httpStatus: row.http_status,
+                error: row.error,
+                nextAttemptAt: row.next_attempt_at,
+              }
+            : null,
+      },
+    ]),
+  );
+}
+
+// Both per-target delivery views the dashboard shows, for a list of targets.
+export async function deliveryStates(targetIds: string[]) {
+  const [last, pending] = await Promise.all([lastDeliveries(targetIds), pendingDeliveries(targetIds)]);
+  return { last: (id: string) => last.get(id) ?? null, pending: (id: string) => pending.get(id) ?? null };
+}
+
 export function publicDelivery(delivery: NotificationDelivery) {
   return {
     id: delivery.id,
@@ -600,7 +707,11 @@ export function publicDelivery(delivery: NotificationDelivery) {
 
 // Only the host of a URL ever leaves the server: the full Slack URL is the
 // credential, and a webhook URL may carry one in its query.
-export function publicTarget(target: NotificationTarget, lastDelivery: LastDelivery | null = null) {
+export function publicTarget(
+  target: NotificationTarget,
+  lastDelivery: LastDelivery | null = null,
+  pending: PendingDeliveries | null = null,
+) {
   let host: string | null = null;
   let undecryptable = false;
   if (target.encryptedUrl) {
@@ -631,6 +742,17 @@ export function publicTarget(target: NotificationTarget, lastDelivery: LastDeliv
       attempts: lastDelivery.attempts,
       nextAttemptAt: lastDelivery.nextAttemptAt,
       createdAt: lastDelivery.createdAt,
+    },
+    pending: {
+      count: pending?.count ?? 0,
+      retry: pending?.retry
+        ? {
+            attempts: pending.retry.attempts,
+            httpStatus: pending.retry.httpStatus,
+            error: pending.retry.error,
+            nextAttemptAt: pending.retry.nextAttemptAt,
+          }
+        : null,
     },
     createdAt: target.createdAt,
     updatedAt: target.updatedAt,

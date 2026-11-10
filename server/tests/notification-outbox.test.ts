@@ -11,10 +11,13 @@ import {
   deliver,
   DeliveryError,
   MAX_DELIVERY_ATTEMPTS,
+  MISSED_NOTIFY_GRACE_MS,
+  MISSED_NOTIFY_LOOKBACK_MS,
   notifyJob,
   parseRetryAfter,
   pauseCause,
   PermanentDeliveryError,
+  queueMissedNotifications,
   retryDelayMs,
 } from "../src/services/notifications.ts";
 import {
@@ -380,6 +383,66 @@ describe("delivery outbox", () => {
     expect((await reload(hook)).consecutiveFailures).toBe(0);
   });
 
+  it("drops queued deliveries when an admin pauses, so a resume does not send them", async () => {
+    const hook = await target();
+    await deliverJob(failWith(new DeliveryError(503)));
+    expect(await onlyDelivery()).toMatchObject({ status: "pending", attempts: 1 });
+
+    await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ active: false }).expect(200);
+    await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ active: true }).expect(200);
+    await makeDue();
+    const deps = succeed();
+    await sendDue(deps);
+
+    expect(deps.deliver).not.toHaveBeenCalled();
+    expect(await onlyDelivery()).toMatchObject({
+      status: "failed",
+      error: "Target was paused before this could be sent",
+      httpStatus: null,
+      nextAttemptAt: null,
+      payload: null,
+      finishedAt: expect.any(Date),
+    });
+  });
+
+  it("leaves queued deliveries alone when an admin edits an active target", async () => {
+    const hook = await target();
+    await notifyJob((await finishedJob()).id);
+
+    await request(app)
+      .patch(`/api/notifications/${hook.id}`)
+      .set("Cookie", cookie)
+      .send({ name: "Renamed" })
+      .expect(200);
+
+    expect(await onlyDelivery()).toMatchObject({ status: "pending" });
+  });
+
+  it("does not reschedule a retry when the target was paused while it was sending", async () => {
+    const hook = await target();
+    await notifyJob((await finishedJob()).id);
+    const deps: RunDeliveryDeps = {
+      deliver: vi.fn(async () => {
+        await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ active: false });
+        await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ active: true });
+        // Only the pause matters; the resume above shows it is not undone.
+        await prisma.notificationTarget.update({ where: { id: hook.id }, data: { active: false } });
+        throw new DeliveryError(503);
+      }),
+      now: () => new Date(),
+    };
+
+    await sendDue(deps);
+
+    expect(await onlyDelivery()).toMatchObject({
+      status: "failed",
+      httpStatus: 503,
+      nextAttemptAt: null,
+      lockedAt: null,
+    });
+    expect((await reload(hook)).consecutiveFailures).toBe(0);
+  });
+
   it("retries an email nobody received, but not one some recipients got", async () => {
     vi.spyOn(mailer, "configured").mockReturnValue(true);
     const { user: other } = await createUser("other@example.com");
@@ -437,6 +500,22 @@ describe("auto-pause", () => {
     await deliverJob(failWith(new DeliveryError(status)));
 
     expect(await reload(hook)).toMatchObject({ active: false, consecutiveFailures: 1, pausedReason: reason });
+  });
+
+  it("drops a paused target's other queued deliveries", async () => {
+    const hook = await target("slack");
+    await notifyJob((await finishedJob()).id);
+    await notifyJob((await finishedJob()).id);
+
+    const [first] = await claimDueDeliveries(1);
+    await runDelivery(first!, failWith(new DeliveryError(410)));
+    expect((await reload(hook)).active).toBe(false);
+
+    const rows = await prisma.notificationDelivery.findMany({ orderBy: { attempts: "desc" } });
+    expect(rows.map((row) => [row.status, row.attempts, row.httpStatus, row.error])).toEqual([
+      ["failed", 1, 410, null],
+      ["failed", 0, null, "Target was paused before this could be sent"],
+    ]);
   });
 
   it("counts a webhook's 404 like any refusal", async () => {
@@ -592,4 +671,78 @@ describe("/api/notifications/settings", () => {
 
     expect(res.status).toBe(403);
   });
+});
+
+describe("queueMissedNotifications", () => {
+  async function finishedAgo(ms: number, status: ReviewStatus = "failed") {
+    const job = await finishedJob(status, status === "failed" ? "error" : null);
+    return prisma.reviewJob.update({ where: { id: job.id }, data: { finishedAt: new Date(Date.now() - ms) } });
+  }
+
+  it("queues deliveries for a finished job nothing queued them for", async () => {
+    await target();
+    const job = await finishedAgo(MISSED_NOTIFY_GRACE_MS + 60_000);
+
+    expect(await queueMissedNotifications()).toBe(1);
+
+    expect(await onlyDelivery()).toMatchObject({ jobId: job.id, status: "pending" });
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).notifiedAt).not.toBeNull();
+    // Stamped, so the next sweep leaves it alone.
+    expect(await queueMissedNotifications()).toBe(0);
+  });
+
+  it("leaves jobs still in the grace period, too old, already notified or never notified", async () => {
+    await target();
+    await finishedAgo(1000);
+    await finishedAgo(MISSED_NOTIFY_LOOKBACK_MS + 60_000);
+    await finishedAgo(MISSED_NOTIFY_GRACE_MS + 60_000, "cancelled");
+    const notified = await finishedAgo(MISSED_NOTIFY_GRACE_MS + 60_000);
+    await prisma.reviewJob.update({ where: { id: notified.id }, data: { notifiedAt: new Date() } });
+
+    expect(await queueMissedNotifications()).toBe(0);
+    expect(await prisma.notificationDelivery.count()).toBe(0);
+  });
+});
+
+describe("pending deliveries on the target list", () => {
+  it("reports a retry still queued behind a newer delivery that went through", async () => {
+    const hook = await target();
+    await deliverJob(failWith(new DeliveryError(503)));
+    await prisma.notificationDelivery.create({
+      data: {
+        targetId: hook.id,
+        event: "test",
+        status: "sent",
+        attempts: 1,
+        createdAt: new Date(Date.now() + 1000),
+        finishedAt: new Date(),
+      },
+    });
+    const queued = await onlyPending();
+
+    const res = await request(app).get("/api/notifications").set("Cookie", cookie).expect(200);
+
+    expect(res.body.targets[0].lastDelivery).toMatchObject({ status: "sent", event: "test" });
+    expect(res.body.targets[0].pending).toEqual({
+      count: 1,
+      retry: { attempts: 1, httpStatus: 503, error: null, nextAttemptAt: queued.nextAttemptAt!.toISOString() },
+    });
+  });
+
+  it("counts untried rows without a retry, and is empty when nothing is queued", async () => {
+    const hook = await target();
+    const quiet = await target("slack");
+    await notifyJob((await finishedJob()).id);
+    await prisma.notificationDelivery.deleteMany({ where: { targetId: quiet.id } });
+
+    const res = await request(app).get("/api/notifications").set("Cookie", cookie).expect(200);
+    const byId = Object.fromEntries(res.body.targets.map((t: { id: string }) => [t.id, t]));
+
+    expect(byId[hook.id].pending).toEqual({ count: 1, retry: null });
+    expect(byId[quiet.id].pending).toEqual({ count: 0, retry: null });
+  });
+
+  function onlyPending() {
+    return prisma.notificationDelivery.findFirstOrThrow({ where: { status: "pending" } });
+  }
 });

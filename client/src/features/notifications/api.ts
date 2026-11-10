@@ -40,6 +40,23 @@ export interface LastDelivery {
   createdAt: string
 }
 
+// A queued delivery that already failed at least once and is due again.
+export interface PendingRetry {
+  attempts: number
+  httpStatus: number | null
+  error: string | null
+  nextAttemptAt: string | null
+}
+
+// What a target still has queued. Kept apart from lastDelivery, since a newer
+// delivery (a test, or a later review) can go through while an older one is
+// still being retried.
+export interface PendingDeliveries {
+  count: number
+  // The retry due soonest; null when every queued delivery is still untried.
+  retry: PendingRetry | null
+}
+
 export interface NotificationDelivery extends LastDelivery {
   id: string
   // Null for test deliveries, and once the review itself was pruned.
@@ -70,6 +87,7 @@ export interface NotificationTarget {
   consecutiveFailures: number
   // Null until the target gets its first delivery (tests included).
   lastDelivery: LastDelivery | null
+  pending: PendingDeliveries
   createdAt: string
   updatedAt: string
 }
@@ -102,7 +120,7 @@ export function useNotificationTargets() {
     queryFn: () =>
       api<{ targets: NotificationTarget[]; mailConfigured: boolean; settings: NotificationSettings }>("/notifications"),
     refetchInterval: (query) =>
-      query.state.data?.targets.some((target) => target.lastDelivery?.status === "pending") ? PENDING_POLL_MS : false,
+      query.state.data?.targets.some((target) => target.pending.count > 0) ? PENDING_POLL_MS : false,
   })
 }
 

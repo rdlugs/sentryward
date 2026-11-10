@@ -13,7 +13,8 @@ import {
 } from "../schemas/notifications.schema.ts";
 import {
   DELIVERY_ORDER,
-  lastDeliveries,
+  deliveryStates,
+  dropPendingDeliveries,
   newWebhookSecret,
   publicDelivery,
   publicTarget,
@@ -43,10 +44,10 @@ export async function listNotifications(req: Request, res: Response) {
     prisma.notificationTarget.findMany({ where: { workspaceId: req.workspaceId }, orderBy: { createdAt: "asc" } }),
     prisma.workspace.findUniqueOrThrow({ where: { id: req.workspaceId }, select: { notifyAutoPauseAfter: true } }),
   ]);
-  const last = await lastDeliveries(targets.map((target) => target.id));
+  const states = await deliveryStates(targets.map((target) => target.id));
   // mailConfigured lets the dashboard explain why email targets cannot be added.
   res.json({
-    targets: targets.map((target) => publicTarget(target, last.get(target.id) ?? null)),
+    targets: targets.map((target) => publicTarget(target, states.last(target.id), states.pending(target.id))),
     mailConfigured: mailer.configured(),
     settings: { autoPauseAfter: workspace.notifyAutoPauseAfter },
   });
@@ -127,9 +128,14 @@ export async function updateNotification(req: Request, res: Response) {
   // An admin switching a target either way takes over from auto-pause: the
   // reason no longer applies and the failure count starts again.
   const data = input.active === undefined ? input : { ...input, pausedReason: null, consecutiveFailures: 0 };
-  const updated = await prisma.notificationTarget.update({ where: { id: target.id }, data });
-  const last = await lastDeliveries([updated.id]);
-  res.json({ target: publicTarget(updated, last.get(updated.id) ?? null) });
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.notificationTarget.update({ where: { id: target.id }, data });
+    // Paused means its queued deliveries are dropped, not held for a resume.
+    if (input.active === false) await dropPendingDeliveries(tx, target.id);
+    return row;
+  });
+  const states = await deliveryStates([updated.id]);
+  res.json({ target: publicTarget(updated, states.last(updated.id), states.pending(updated.id)) });
 }
 
 // Sends a sample; a delivery that fails is reported as the result, not an error.

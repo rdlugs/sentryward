@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import type { LastDelivery, NotificationTarget } from "./api"
-import { causeHint, deliveryDetail, failingStatus, failingTargets, retryNote } from "./delivery"
+import type { LastDelivery, NotificationTarget, PendingRetry } from "./api"
+import { causeHint, deliveryDetail, failingStatus, failingTargets, pendingRetryDetail, retryNote } from "./delivery"
 
 const NOW = Date.parse("2026-11-10T12:00:00Z")
 const inMinutes = (minutes: number) => new Date(NOW + minutes * 60_000).toISOString()
@@ -16,6 +16,15 @@ const delivery = (overrides: Partial<LastDelivery> = {}): LastDelivery => ({
   ...overrides,
 })
 
+const retry = (overrides: Partial<PendingRetry> = {}): PendingRetry => ({
+  attempts: 1,
+  httpStatus: 503,
+  error: null,
+  nextAttemptAt: inMinutes(5),
+  ...overrides,
+})
+const retrying = { count: 1, retry: retry() }
+
 const target = (overrides: Partial<NotificationTarget> = {}): NotificationTarget => ({
   id: "t1",
   kind: "webhook",
@@ -29,6 +38,7 @@ const target = (overrides: Partial<NotificationTarget> = {}): NotificationTarget
   pauseCause: null,
   consecutiveFailures: 0,
   lastDelivery: null,
+  pending: { count: 0, retry: null },
   createdAt: inMinutes(-1000),
   updatedAt: inMinutes(-1000),
   ...overrides,
@@ -62,22 +72,50 @@ describe("retryNote", () => {
 
 describe("failingStatus", () => {
   it("puts paused before retrying before failing", () => {
-    const retrying = delivery({ status: "pending", attempts: 1 })
-    expect(failingStatus(target({ pausedReason: "Auto-paused: HTTP 410 Gone", lastDelivery: retrying }))).toBe("paused")
-    expect(failingStatus(target({ consecutiveFailures: 2, lastDelivery: retrying }))).toBe("retrying")
+    expect(failingStatus(target({ pausedReason: "Auto-paused: HTTP 410 Gone", pending: retrying }))).toBe("paused")
+    expect(failingStatus(target({ consecutiveFailures: 2, pending: retrying }))).toBe("retrying")
     expect(failingStatus(target({ consecutiveFailures: 2 }))).toBe("failing")
+  })
+
+  it("keeps a target retrying when a newer delivery went through", () => {
+    const sent = delivery({ status: "sent", event: "test" })
+    expect(failingStatus(target({ lastDelivery: sent, pending: retrying }))).toBe("retrying")
   })
 
   it("leaves out healthy and merely queued targets", () => {
     expect(failingStatus(target())).toBeNull()
-    expect(failingStatus(target({ lastDelivery: delivery({ status: "pending", attempts: 0 }) }))).toBeNull()
+    expect(
+      failingStatus(
+        target({ lastDelivery: delivery({ status: "pending", attempts: 0 }), pending: { count: 1, retry: null } }),
+      ),
+    ).toBeNull()
+  })
+})
+
+describe("pendingRetryDetail", () => {
+  it("describes a retry queued behind a newer delivery", () => {
+    const t = target({
+      lastDelivery: delivery({ status: "sent" }),
+      pending: { count: 2, retry: retry({ attempts: 2 }) },
+    })
+    expect(pendingRetryDetail(t, NOW)).toBe("Earlier delivery: attempt 2 of 5 failed · HTTP 503 · next try in 5 minutes")
+    const errored = target({
+      pending: { count: 1, retry: retry({ httpStatus: null, error: "ECONNRESET", nextAttemptAt: inMinutes(-1) }) },
+    })
+    expect(pendingRetryDetail(errored, NOW)).toBe("Earlier delivery: attempt 1 of 5 failed · ECONNRESET · retrying now")
+  })
+
+  it("stays quiet when there is no retry or the last delivery already shows it", () => {
+    expect(pendingRetryDetail(target(), NOW)).toBeNull()
+    const last = delivery({ status: "pending", attempts: 1, httpStatus: 503, nextAttemptAt: inMinutes(5) })
+    expect(pendingRetryDetail(target({ lastDelivery: last, pending: retrying }), NOW)).toBeNull()
   })
 })
 
 describe("failingTargets", () => {
   it("orders paused, failing, then retrying, most failures first", () => {
     const rows = failingTargets([
-      target({ id: "r", name: "Retrying", lastDelivery: delivery({ status: "pending", attempts: 1 }) }),
+      target({ id: "r", name: "Retrying", pending: retrying }),
       target({ id: "f1", name: "One failure", consecutiveFailures: 1 }),
       target({ id: "ok", name: "Healthy" }),
       target({ id: "p", name: "Paused", pausedReason: "x", pauseCause: "failures", consecutiveFailures: 5 }),

@@ -910,7 +910,8 @@ listens for (failed, then blocked, then completed).
 while keeping its events, recipients, URL and secret. Pausing drops deliveries
 rather than holding them: a review that finishes while a target is paused is
 never sent to it, even after it is switched back on, and a delivery still
-waiting for a retry when its target is paused is dropped too. A paused target
+waiting for a retry when its target is paused (by an admin or automatically)
+is dropped too. A paused target
 shows as switched off, can be filtered by status, and still accepts test
 deliveries, so it can be checked before it is switched back on.
 
@@ -931,8 +932,9 @@ needs a look, with a summary such as "1 paused · 1 failing · 1 retrying":
 **Paused** (auto-paused, with what to do about it: a deleted Slack webhook has
 to be added again, a target that kept failing can be tested and resumed),
 **Failing** (on, with failures in a row shown against the limit) and
-**Retrying** (a delivery waiting for its next try). Each row shows the last
-delivery's status or error and when the next try is. Admins can **Send test**
+**Retrying** (a delivery waiting for its next try, even when a newer one went
+through). Each row shows the last delivery's status or error and when the next
+try is, and an older delivery still being retried behind it on its own line. Admins can **Send test**
 from the row and **Resume** a paused target (a passing test offers to resume it
 too); everyone can open its delivery history. The tab's badge is red when a
 target is paused. The list refreshes every 30 seconds while a delivery is
@@ -968,7 +970,10 @@ There are three kinds:
 outcome; tests are sent once, at once, and never retried. A review's deliveries
 go through an outbox: when the review reaches its final status, one pending
 delivery per target is written in the same step that marks the review notified,
-so a worker restart cannot lose them, and the worker's poll loop sends them
+so a worker restart cannot lose them (and a worker that stopped between
+storing a review and queueing its deliveries is covered too: the poll loop
+queues them for any review finished more than a minute and less than 24 hours
+ago that has none), and the worker's poll loop sends them
 apart from the review slots (up to 10 at a time), so a slow or hanging endpoint
 never delays a review. A failed delivery is logged (`[notify] ...`) and never
 changes the review.
@@ -1760,11 +1765,11 @@ rate limited (20 requests per 15 minutes per IP).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures` or `null`), `consecutiveFailures`, a URL's host only, email recipients' user ids and `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`); `settings` is `{ autoPauseAfter }` |
+| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures` or `null`), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
 | GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
 | PATCH  | `/api/notifications/settings` | Workspace admins: `{ autoPauseAfter }`, 0 to 50 failed deliveries in a row before a target is paused (0 never); returns `{ settings }` |
 | POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
-| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, active? }`; `active: false` pauses deliveries, and any `active` clears `pausedReason` and the failure count |
+| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, active? }`; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count |
 | POST   | `/api/notifications/:id/test` | Workspace admins: sends a sample delivery; returns `{ result }`, `{ ok: true }` or `{ ok: false, error }` |
 | DELETE | `/api/notifications/:id` | Workspace admins: removes a target |
 

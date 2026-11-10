@@ -9,6 +9,7 @@ import {
   MAX_DELIVERY_ATTEMPTS,
   message,
   type NotificationPayload,
+  PAUSED_BEFORE_SEND,
   recordTargetFailure,
   redactError,
   retryDelayMs,
@@ -91,10 +92,12 @@ export async function runDelivery(id: string, deps: RunDeliveryDeps = defaultDep
     const claim = { id, status: "pending", lockedAt: row.lockedAt } as const;
     const { target } = row;
 
+    // Pausing drops queued rows (dropPendingDeliveries); this catches one
+    // claimed in the moment before the pause.
     if (!target.active) {
       await prisma.notificationDelivery.updateMany({
         where: claim,
-        data: { ...settled, status: "failed", error: "Target was paused before this could be sent", finishedAt: deps.now() },
+        data: { ...settled, status: "failed", error: PAUSED_BEFORE_SEND, finishedAt: deps.now() },
       });
       return;
     }
@@ -126,10 +129,30 @@ export async function runDelivery(id: string, deps: RunDeliveryDeps = defaultDep
 
     if (failure === "retryable" && row.attempts < MAX_DELIVERY_ATTEMPTS) {
       const nextAttemptAt = new Date(now.getTime() + retryDelayMs(row.attempts, err));
-      await prisma.notificationDelivery.updateMany({
-        where: claim,
-        data: { lockedAt: null, nextAttemptAt, httpStatus, error },
+      // A target paused while this was sending had its queued rows dropped, but
+      // not this locked one; rescheduling it would send after a resume. The
+      // target row lock orders this against a concurrent pause.
+      const rescheduled = await prisma.$transaction(async (tx) => {
+        const [current] = await tx.$queryRaw<{ active: boolean }[]>`
+          SELECT active FROM notification_targets WHERE id = ${target.id}::uuid FOR SHARE
+        `;
+        if (!current?.active) {
+          await tx.notificationDelivery.updateMany({
+            where: claim,
+            data: { ...settled, status: "failed", httpStatus, error, finishedAt: now },
+          });
+          return false;
+        }
+        await tx.notificationDelivery.updateMany({
+          where: claim,
+          data: { lockedAt: null, nextAttemptAt, httpStatus, error },
+        });
+        return true;
       });
+      if (!rescheduled) {
+        console.error(`[notify] target ${target.id} delivery ${id} failed (${detail}); target was paused, not retrying`);
+        return;
+      }
       console.error(
         `[notify] target ${target.id} delivery ${id} attempt ${row.attempts} failed (${detail}); retrying at ${nextAttemptAt.toISOString()}`,
       );
