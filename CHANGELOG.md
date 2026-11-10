@@ -18,7 +18,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   repository, or its connection, removes it from every target, and a target
   left with none is paused ("Paused: its repositories were removed",
   `pauseCause: "scope"`) instead of widening to every repository; it can only
-  be switched back on after its repositories (or All) are saved. The add and
+  be switched back on after its repositories (or All) are saved, so the
+  Failing targets tab offers no Resume for it and its switch stays off. The add and
   edit panels gain a **Scope** section, and the list shows the scope under the
   target's name (e.g. "acme/payments · ≥ major"). `POST`/`PATCH
   /api/notifications` accept, and `GET` returns, `repositoryIds`,
@@ -28,7 +29,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   when the verdict differs from the previous completed or partial review of
   the same pull or merge request (the first review always counts; failed runs
   in between are passed over), however either review was triggered.
-  `resolved` fires when a review is not blocked after the previous one was; it
+  `resolved` fires when a review passes after the previous one was blocked (a
+  partial review with no blocking findings does not count); it
   ranks after `blocked` and before `completed`, can be the webhook `event`,
   reads "Blocking issues resolved" in Slack and email, and, like `failed`,
   ignores the severity and verdict filters.

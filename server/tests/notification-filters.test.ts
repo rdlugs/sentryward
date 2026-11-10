@@ -11,7 +11,7 @@ import type {
 import { encrypt } from "../src/lib/crypto.ts";
 import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
-import { eventForTarget, eventsFor, notifyJob, SCOPE_REASON } from "../src/services/notifications.ts";
+import { eventForTarget, eventsFor, notifyJob, previousVerdict, SCOPE_REASON } from "../src/services/notifications.ts";
 import { claimDueDeliveries, runDelivery } from "../src/worker/deliveryQueue.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { createUser } from "./helpers/users.ts";
@@ -129,7 +129,9 @@ async function queued(targetId: string, jobId: string) {
 describe("eventsFor with the previous verdict", () => {
   it.each([
     ["pass", "blocked", ["resolved", "completed"]],
-    ["error", "blocked", ["resolved", "completed"]],
+    // A partial review with no blocking findings may have skipped the code
+    // the blockers were in, so it is not news that they are gone.
+    ["error", "blocked", ["completed"]],
     ["pass", "pass", ["completed"]],
     ["pass", undefined, ["completed"]],
     ["blocked", "blocked", ["blocked", "completed"]],
@@ -214,6 +216,32 @@ describe("notifyJob filters", () => {
     expect(await queued(hook.id, blocked.id)).toBe("blocked");
     expect(await queued(hook.id, fixed.id)).toBe("resolved");
     expect(await queued(hook.id, again.id)).toBeNull();
+  });
+
+  it("does not call a partial review without a pass resolved", async () => {
+    const hook = await target({ events: ["resolved", "completed"] });
+    await finishedJob("completed", "blocked");
+    const partial = await finishedJob("partial", "error");
+    expect(await queued(hook.id, partial.id)).toBe("completed");
+  });
+
+  it("queues nothing when no target listens, without failing", async () => {
+    await finishedJob("completed", "blocked");
+    const job = await finishedJob("completed", "pass");
+    await notifyJob(job.id);
+    expect(await prisma.notificationDelivery.count()).toBe(0);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).notifiedAt).not.toBeNull();
+  });
+
+  it("never takes a later review for the previous one", async () => {
+    const job = await finishedJob("completed", "pass");
+    // Fixtures finish on a fake clock, so created on it too.
+    const unfinished = await prisma.reviewJob.update({
+      where: { id: job.id },
+      data: { finishedAt: null, createdAt: job.finishedAt! },
+    });
+    await finishedJob("completed", "blocked");
+    expect(await previousVerdict(prisma, unfinished)).toBeUndefined();
   });
 
   it("names resolved in the webhook, Slack and email", async () => {
@@ -316,6 +344,17 @@ describe("/api/notifications filters", () => {
     const badSeverity = await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ minSeverity: "info" });
     expect(badSeverity.status).toBe(400);
   });
+
+  it("rejects a repository deleted before the save", async () => {
+    vi.stubGlobal("fetch", fetchStub([]).fetch);
+    const hook = await target();
+    expect((await request(app).delete(`/api/repos/${web}`).set("Cookie", cookie)).status).toBe(204);
+
+    const patched = await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ repositoryIds: [web] });
+    expect(patched.status).toBe(400);
+    expect(patched.body.errors.repositoryIds).toBeDefined();
+    expect((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } })).repositoryIds).toEqual([]);
+  });
 });
 
 describe("deleting repositories", () => {
@@ -332,10 +371,9 @@ describe("deleting repositories", () => {
     const res = await request(app).delete(`/api/repos/${web}`).set("Cookie", cookie);
     expect(res.status).toBe(204);
 
-    expect(await prisma.notificationTarget.findUniqueOrThrow({ where: { id: both.id } })).toMatchObject({
-      repositoryIds: [api],
-      active: true,
-    });
+    const narrowed = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: both.id } });
+    expect(narrowed).toMatchObject({ repositoryIds: [api], active: true });
+    expect(narrowed.updatedAt.getTime()).toBeGreaterThan(both.updatedAt.getTime());
     expect(await prisma.notificationTarget.findUniqueOrThrow({ where: { id: webOnly.id } })).toMatchObject({
       repositoryIds: [],
       active: false,

@@ -1,7 +1,19 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { api } from "@/lib/api"
+import { api, ApiError } from "@/lib/api"
 
-const NOTIFICATIONS_KEY = ["notifications"]
+// Also invalidated by removing a repository or connection, which edits targets
+// on the server (their repositories, and a pause when none are left).
+export const NOTIFICATIONS_KEY = ["notifications"]
+
+// A field error says why a save was refused (e.g. a scope-paused target cannot
+// be resumed); the top-level message is only "Validation failed".
+export function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof ApiError) {
+    const first = Object.values(error.fieldErrors ?? {}).flat()[0]
+    return first ?? error.message
+  }
+  return error instanceof Error ? error.message : fallback
+}
 
 export type NotificationKind = "webhook" | "slack" | "email"
 export type NotificationEvent = "blocked" | "failed" | "resolved" | "completed"
@@ -11,7 +23,7 @@ export const EVENT_OPTIONS: { value: NotificationEvent; label: string; descripti
   {
     value: "resolved",
     label: "Resolved",
-    description: "A pull or merge request is no longer blocked after its previous review was",
+    description: "A review passes after the previous review of the same pull or merge request was blocked",
   },
   { value: "failed", label: "Failed", description: "A review could not run or finish" },
   { value: "completed", label: "Completed", description: "Any finished review, blocked or not" },

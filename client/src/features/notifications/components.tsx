@@ -12,6 +12,7 @@ import { useRepos } from "@/features/forge/api"
 import { timeAgo } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import {
+  errorMessage,
   MAX_DELIVERY_ATTEMPTS,
   useNotificationDeliveries,
   useUpdateNotificationTarget,
@@ -163,7 +164,9 @@ export function DeliveriesSheet({
 }
 
 // Pausing keeps a target's settings, so it can be turned back on without
-// adding it again (and, for a webhook, getting a new secret).
+// adding it again (and, for a webhook, getting a new secret). A target paused
+// because its repositories were removed is turned on by saving repositories in
+// its edit panel, so the switch stays off (the hint under its name says so).
 export function TargetActiveSwitch({ target, canManage }: { target: NotificationTarget; canManage: boolean }) {
   const updateTarget = useUpdateNotificationTarget()
 
@@ -172,7 +175,7 @@ export function TargetActiveSwitch({ target, canManage }: { target: Notification
       await updateTarget.mutateAsync({ id: target.id, active })
       toast.success(`${active ? "Resumed" : "Paused"} ${target.name}`)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update the target")
+      toast.error(errorMessage(error, "Could not update the target"))
     }
   }
 
@@ -182,7 +185,7 @@ export function TargetActiveSwitch({ target, canManage }: { target: Notification
       // refetched; on an error it falls back to what the server has.
       checked={updateTarget.isPending ? (updateTarget.variables.active ?? target.active) : target.active}
       onCheckedChange={setActive}
-      disabled={!canManage || updateTarget.isPending}
+      disabled={!canManage || updateTarget.isPending || target.pauseCause === "scope"}
       aria-label={`Active: ${target.name}`}
     />
   )

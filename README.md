@@ -900,7 +900,7 @@ target picks its events:
 | Event | Sent when |
 | --- | --- |
 | **Blocked** | The review found blocking issues |
-| **Resolved** | The review is not blocked, and the previous finished review of the same pull or merge request was |
+| **Resolved** | The review passed, and the previous finished review of the same pull or merge request was blocked. A partial review with no blocking findings does not count, since it may have skipped the code the blockers were in |
 | **Failed** | The review could not run or finish (no model key, the forge unreachable, the maximum run time or a worker that stopped responding) |
 | **Completed** | Any finished review, blocked or not. Skipped and cancelled reviews never notify |
 
@@ -960,7 +960,8 @@ to be added again, a target that kept failing can be tested and resumed),
 through). Each row shows the last delivery's status or error and when the next
 try is, and an older delivery still being retried behind it on its own line. Admins can **Send test**
 from the row and **Resume** a paused target (a passing test offers to resume it
-too); everyone can open its delivery history. The tab's badge is red when a
+too), except one paused because its repositories were removed, which is
+switched back on by saving repositories when editing it; everyone can open its delivery history. The tab's badge is red when a
 target is paused. The list refreshes every 30 seconds while a delivery is
 pending. Resuming the target (or switching it back on or off in the Targets
 tab) clears the reason and the count. Failed test deliveries never count, so checking a broken target does not

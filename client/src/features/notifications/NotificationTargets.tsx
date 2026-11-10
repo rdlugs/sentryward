@@ -97,7 +97,8 @@ const eventsSchema = z
 // The scope as the form holds it; toFilters turns it into what the API takes.
 const scopeFields = {
   repoScope: z.enum(["all", "only"]),
-  repositoryIds: z.array(z.string()),
+  // The server's limit, checked here so the form says so before saving.
+  repositoryIds: z.array(z.string()).max(100, "Choose 100 repositories or fewer, or All"),
   minSeverity: z.enum(["any", "minor", "major", "critical"]),
   onlyVerdictChanges: z.boolean(),
 }

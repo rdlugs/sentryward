@@ -48,7 +48,8 @@ type Verdict = ReviewJob["verdict"];
 export type PreviousVerdict = Verdict | undefined;
 
 // Every event a finished job counts as. A blocked review is also a completed
-// one, and so is a resolved one.
+// one, and so is a resolved one. Only a pass resolves: a partial review with no
+// blocking findings ("error") may have skipped the code the blockers were in.
 export function eventsFor(
   job: Pick<ReviewJob, "status" | "verdict">,
   previous: PreviousVerdict = undefined,
@@ -56,15 +57,17 @@ export function eventsFor(
   if (job.status === "failed") return ["failed"];
   if (job.status !== "completed" && job.status !== "partial") return [];
   if (job.verdict === "blocked") return ["blocked", "completed"];
-  return previous === "blocked" ? ["resolved", "completed"] : ["completed"];
+  return previous === "blocked" && job.verdict === "pass" ? ["resolved", "completed"] : ["completed"];
 }
 
 // The verdict of the newest completed or partial review of the same change
 // that finished before this one, however either was triggered. Failed runs are
-// passed over: pass, failed, pass is not a change of verdict.
+// passed over: pass, failed, pass is not a change of verdict. A job without
+// finishedAt (not expected for a finished one) is bounded by its createdAt, so
+// a later review is never taken for the previous one.
 export async function previousVerdict(
   tx: Prisma.TransactionClient,
-  job: Pick<ReviewJob, "id" | "repositoryId" | "number" | "finishedAt">,
+  job: Pick<ReviewJob, "id" | "repositoryId" | "number" | "finishedAt" | "createdAt">,
 ): Promise<PreviousVerdict> {
   const previous = await tx.reviewJob.findFirst({
     where: {
@@ -72,7 +75,7 @@ export async function previousVerdict(
       number: job.number,
       id: { not: job.id },
       status: { in: ["completed", "partial"] },
-      ...(job.finishedAt ? { finishedAt: { lt: job.finishedAt } } : {}),
+      finishedAt: { lt: job.finishedAt ?? job.createdAt },
     },
     orderBy: [{ finishedAt: "desc" }, { createdAt: "desc" }],
     select: { verdict: true },
@@ -479,9 +482,11 @@ export async function notifyJob(jobId: string): Promise<void> {
         where: { id: jobId },
         include: { repository: { include: { connection: { select: { workspaceId: true } } } } },
       });
-      const previous = job.status === "failed" ? undefined : await previousVerdict(tx, job);
-      const events = eventsFor(job, previous);
-      if (!events.length) return;
+      const baseEvents = eventsFor(job);
+      if (!baseEvents.length) return;
+      // Resolved depends on the previous review, which is only looked up when
+      // a target can use it, so any finished review may be resolved here.
+      const possibleEvents: NotificationEvent[] = job.status === "failed" ? baseEvents : [...baseEvents, "resolved"];
       // Paused targets are left out here, and pausing a target drops the rows
       // queued for it (dropPendingDeliveries), so a paused target misses this
       // job for good rather than catching up when it is resumed. A test
@@ -490,11 +495,17 @@ export async function notifyJob(jobId: string): Promise<void> {
         where: {
           workspaceId: job.repository.connection.workspaceId,
           active: true,
-          events: { hasSome: events },
+          events: { hasSome: possibleEvents },
           // An empty list is every repository.
           OR: [{ repositoryIds: { isEmpty: true } }, { repositoryIds: { has: job.repositoryId } }],
         },
       });
+      if (!candidates.length) return;
+      const needsPrevious =
+        job.status !== "failed" &&
+        candidates.some((target) => target.onlyVerdictChanges || target.events.includes("resolved"));
+      const previous = needsPrevious ? await previousVerdict(tx, job) : undefined;
+      const events = needsPrevious ? eventsFor(job, previous) : baseEvents;
       const summary = job.summary as ResultSummary | null;
       const facts: JobFilterFacts = { bySeverity: summary?.bySeverity ?? {}, verdict: job.verdict, previous };
       const targets = candidates.flatMap((target) => {
@@ -610,7 +621,9 @@ export async function dropRepositoriesFromTargets(tx: Prisma.TransactionClient, 
     UPDATE notification_targets
     SET repository_ids = ARRAY(
       SELECT id FROM unnest(repository_ids) AS id WHERE id <> ALL(${repositoryIds}::uuid[])
-    )
+    ),
+    -- A raw UPDATE skips Prisma's @updatedAt.
+    updated_at = now()
     WHERE repository_ids && ${repositoryIds}::uuid[]
     RETURNING id, cardinality(repository_ids) AS remaining
   `;

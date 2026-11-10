@@ -1,6 +1,7 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "@/lib/api"
 import type { ConfigOverride } from "@/features/config/api"
+import { NOTIFICATIONS_KEY } from "@/features/notifications/api"
 import type { JobStatus, Provider, Verdict } from "@/features/reviews/types"
 
 export interface Connection {
@@ -202,7 +203,11 @@ export function useDeleteConnection() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => api<void>(`/connections/${id}`, { method: "DELETE" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] })
+      // Its repositories leave notification filters, which can pause targets.
+      queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY })
+    },
   })
 }
 
@@ -364,6 +369,8 @@ export function useRemoveRepo() {
       // The connection details sheet lists its repositories.
       queryClient.invalidateQueries({ queryKey: ["connections", repo.connectionId, "details"] })
       queryClient.invalidateQueries({ queryKey: ["connections"], exact: true })
+      // It leaves notification filters, which can pause a target.
+      queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY })
     },
   })
 }

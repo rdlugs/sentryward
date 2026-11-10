@@ -167,4 +167,8 @@ describe("scopeSummary", () => {
   it("counts repositories it cannot name", () => {
     expect(scopeSummary(target({ repositoryIds: ["r2", "r3"] }), names)).toBe("2 repositories")
   })
+
+  it("counts the ones it cannot name next to the ones it can", () => {
+    expect(scopeSummary(target({ repositoryIds: ["r1", "r2", "r3"] }), names)).toBe("acme/payments +2")
+  })
 })

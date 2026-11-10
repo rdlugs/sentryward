@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { Prisma } from "../generated/prisma/client.ts";
 import { encrypt } from "../lib/crypto.ts";
 import { assertSafeUrl } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
@@ -41,13 +42,20 @@ async function assertMembers(workspaceId: string, userIds: string[]) {
 }
 
 // Only the workspace's own repositories can be named, so a target cannot be
-// pointed at (or reveal the existence of) another workspace's.
-async function assertRepositories(workspaceId: string, repositoryIds: string[]) {
+// pointed at (or reveal the existence of) another workspace's. Run in the
+// transaction that saves the ids: FOR SHARE makes a repository deletion wait
+// until the save commits, so its dropRepositoriesFromTargets then sees (and
+// removes) the saved id; a deletion that committed first leaves the row
+// missing here and the save is refused.
+async function assertRepositories(tx: Prisma.TransactionClient, workspaceId: string, repositoryIds: string[]) {
   if (!repositoryIds.length) return;
-  const count = await prisma.repository.count({
-    where: { id: { in: repositoryIds }, connection: { workspaceId } },
-  });
-  if (count !== repositoryIds.length) {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT r.id FROM repositories r
+    JOIN forge_connections c ON c.id = r.connection_id
+    WHERE r.id = ANY(${repositoryIds}::uuid[]) AND c.workspace_id = ${workspaceId}::uuid
+    FOR SHARE OF r
+  `;
+  if (rows.length !== repositoryIds.length) {
     throw new HttpError(400, "Validation failed", { repositoryIds: ["Choose repositories in this workspace"] });
   }
 }
@@ -111,14 +119,16 @@ export async function createNotification(req: Request, res: Response) {
     minSeverity: input.minSeverity,
     onlyVerdictChanges: input.onlyVerdictChanges,
   };
-  await assertRepositories(workspaceId, input.repositoryIds);
 
   if (input.kind === "email") {
     if (!mailer.configured()) {
       throw new HttpError(400, "Email notifications need mail to be configured (SMTP_URL)");
     }
     await assertMembers(workspaceId, input.recipientIds);
-    const target = await prisma.notificationTarget.create({ data: { ...base, recipientIds: input.recipientIds } });
+    const target = await prisma.$transaction(async (tx) => {
+      await assertRepositories(tx, workspaceId, input.repositoryIds);
+      return tx.notificationTarget.create({ data: { ...base, recipientIds: input.recipientIds } });
+    });
     res.status(201).json({ target: publicTarget(target) });
     return;
   }
@@ -132,8 +142,11 @@ export async function createNotification(req: Request, res: Response) {
     throw error;
   }
   const secret = input.kind === "webhook" ? newWebhookSecret() : undefined;
-  const target = await prisma.notificationTarget.create({
-    data: { ...base, encryptedUrl: encrypt(input.url), encryptedSecret: secret ? encrypt(secret) : null },
+  const target = await prisma.$transaction(async (tx) => {
+    await assertRepositories(tx, workspaceId, input.repositoryIds);
+    return tx.notificationTarget.create({
+      data: { ...base, encryptedUrl: encrypt(input.url), encryptedSecret: secret ? encrypt(secret) : null },
+    });
   });
   res.status(201).json({ target: publicTarget(target), ...(secret ? { secret } : {}) });
 }
@@ -147,7 +160,6 @@ export async function updateNotification(req: Request, res: Response) {
     }
     await assertMembers(target.workspaceId, input.recipientIds);
   }
-  if (input.repositoryIds) await assertRepositories(target.workspaceId, input.repositoryIds);
   // Paused because its repositories were deleted: an empty list now means
   // every repository, so it stays off until an admin saves a choice (All
   // included) on purpose. Saving one clears the reason; it stays paused.
@@ -168,6 +180,7 @@ export async function updateNotification(req: Request, res: Response) {
     ...(clearReason ? { pausedReason: null } : {}),
   };
   const updated = await prisma.$transaction(async (tx) => {
+    if (input.repositoryIds) await assertRepositories(tx, target.workspaceId, input.repositoryIds);
     const row = await tx.notificationTarget.update({ where: { id: target.id }, data });
     // Paused means its queued deliveries are dropped, not held for a resume.
     if (input.active === false) await dropPendingDeliveries(tx, target.id);

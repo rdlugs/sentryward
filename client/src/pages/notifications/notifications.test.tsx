@@ -226,6 +226,36 @@ describe("Notifications", () => {
     expect(within(sheet).getByRole("combobox", { name: "Repositories" })).toHaveTextContent("Only these")
   })
 
+  it("does not offer Resume for a target whose repositories were all removed", async () => {
+    const reason = "Paused: its repositories were removed"
+    const scoped = { ...webhook, active: false, pausedReason: reason, pauseCause: "scope" }
+    mockApi({
+      "GET /api/notifications": { targets: [scoped], mailConfigured: false, settings },
+      "GET /api/repos": { repos: repos },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByRole("switch", { name: "Active: CI alerts" })).toBeDisabled()
+    await userEvent.click(screen.getByRole("tab", { name: /Failing targets/ }))
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    expect(await screen.findByRole("menuitem", { name: "View deliveries" })).toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: "Resume" })).not.toBeInTheDocument()
+  })
+
+  it("shows why the server refused to switch a target on", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [{ ...webhook, active: false }], mailConfigured: false, settings },
+      "PATCH /api/notifications/n1": () =>
+        jsonResponse(400, { message: "Validation failed", errors: { repositoryIds: ["Choose repositories first"] } }),
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("switch", { name: "Active: CI alerts" }))
+    expect(await screen.findByText("Choose repositories first")).toBeInTheDocument()
+  })
+
   it("needs a URL and at least one event", async () => {
     const fetchSpy = mockApi({
       "GET /api/notifications": { targets: [], mailConfigured: false, settings },

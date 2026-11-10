@@ -105,13 +105,16 @@ export type FailingRow = ReturnType<typeof failingTargets>[number]
 
 // "acme/payments · ≥ major · verdict changes", or null for a target that hears
 // about everything. Repositories the list does not know (still loading, or
-// not readable) are left out rather than shown as ids.
+// just removed) are counted ("acme/a +2") rather than shown as ids, so the
+// summary never reads narrower than the target is.
 export function scopeSummary(target: TargetFilters, repoNames: Map<string, string>) {
   const parts: string[] = []
   if (target.repositoryIds.length) {
     const names = target.repositoryIds.flatMap((id) => repoNames.get(id) ?? [])
     const count = target.repositoryIds.length
-    parts.push(names.length ? names.join(", ") : `${count} ${count === 1 ? "repository" : "repositories"}`)
+    const unknown = count - names.length
+    if (!names.length) parts.push(`${count} ${count === 1 ? "repository" : "repositories"}`)
+    else parts.push(unknown ? `${names.join(", ")} +${unknown}` : names.join(", "))
   }
   if (target.minSeverity) parts.push(`≥ ${target.minSeverity}`)
   if (target.onlyVerdictChanges) parts.push("verdict changes")

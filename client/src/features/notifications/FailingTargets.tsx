@@ -22,6 +22,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 import {
+  errorMessage,
   KIND_LABELS,
   useTestNotificationTarget,
   useUpdateNotificationSettings,
@@ -245,7 +246,7 @@ function useResume() {
         toast.success(`Resumed ${target.name}`)
         return true
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not resume the target")
+        toast.error(errorMessage(error, "Could not resume the target"))
         return false
       }
     },
@@ -253,7 +254,9 @@ function useResume() {
 }
 
 // Admins can test any failing target and resume a paused one; everyone can
-// open the history.
+// open the history. A target paused because its repositories were removed is
+// not offered Resume: the server refuses it until repositories are saved, and
+// the row's hint says to do that.
 function RowActions({
   row,
   canManage,
@@ -268,13 +271,14 @@ function RowActions({
   const { target, status } = row
   const testTarget = useTestNotificationTarget()
   const resume = useResume()
+  const canResume = status === "paused" && target.pauseCause !== "scope"
 
   async function sendTest() {
     try {
       const result = await testTarget.mutateAsync(target.id)
       if (!result.ok) {
         toast.error(`Test to ${target.name} failed: ${result.error}`)
-      } else if (status === "paused") {
+      } else if (canResume) {
         // The endpoint works again, so the next step is one click away.
         toast.success(`Test to ${target.name} passed`, {
           description: "It is still paused.",
@@ -307,7 +311,7 @@ function RowActions({
             Send test
           </DropdownMenuItem>
         )}
-        {canManage && status === "paused" && (
+        {canManage && canResume && (
           <DropdownMenuItem onSelect={onResume}>
             <Play />
             Resume
