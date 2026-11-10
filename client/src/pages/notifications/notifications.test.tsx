@@ -4,6 +4,9 @@ import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
 import { mockApi, personalWorkspace, testUser, testWorkspaces } from "@/test/apiRoutes"
+import { setViewportWidth } from "@/test/viewport"
+
+const settings = { autoPauseAfter: 5 }
 
 const webhook = {
   id: "n1",
@@ -14,6 +17,9 @@ const webhook = {
   undecryptable: false,
   recipientIds: [],
   active: true,
+  pausedReason: null,
+  pauseCause: null,
+  consecutiveFailures: 0,
   lastDelivery: null,
   createdAt: "2026-10-01T00:00:00.000Z",
   updatedAt: "2026-10-01T00:00:00.000Z",
@@ -64,7 +70,7 @@ function calls(fetchSpy: ReturnType<typeof mockApi>, method: string, path: strin
 describe("Notifications", () => {
   it("lists targets with their destination and events", async () => {
     mockApi({
-      "GET /api/notifications": { targets: [webhook, emailTarget], mailConfigured: true },
+      "GET /api/notifications": { targets: [webhook, emailTarget], mailConfigured: true, settings },
       [MEMBERS_ROUTE]: members,
     })
     renderWithProviders(<App />, { route: "/notifications" })
@@ -83,7 +89,7 @@ describe("Notifications", () => {
     let created = false
     const fetchSpy = mockApi({
       // The refetch after adding returns the new target, which swaps the empty state for the table.
-      "GET /api/notifications": () => jsonResponse(200, { targets: created ? [webhook] : [], mailConfigured: false }),
+      "GET /api/notifications": () => jsonResponse(200, { targets: created ? [webhook] : [], mailConfigured: false, settings }),
       "POST /api/notifications": () => {
         created = true
         return jsonResponse(201, { target: webhook, secret: "abc123" })
@@ -115,7 +121,7 @@ describe("Notifications", () => {
 
   it("needs a URL and at least one event", async () => {
     const fetchSpy = mockApi({
-      "GET /api/notifications": { targets: [], mailConfigured: false },
+      "GET /api/notifications": { targets: [], mailConfigured: false, settings },
       [MEMBERS_ROUTE]: members,
     })
     renderWithProviders(<App />, { route: "/notifications" })
@@ -134,7 +140,7 @@ describe("Notifications", () => {
 
   it("sends a test and reports a failed delivery", async () => {
     mockApi({
-      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
       "POST /api/notifications/n1/test": { result: { ok: false, error: "Responded with 404" } },
       [MEMBERS_ROUTE]: members,
     })
@@ -148,7 +154,7 @@ describe("Notifications", () => {
 
   it("searches targets by name, host and recipient", async () => {
     mockApi({
-      "GET /api/notifications": { targets: [webhook, emailTarget, slackTarget], mailConfigured: true },
+      "GET /api/notifications": { targets: [webhook, emailTarget, slackTarget], mailConfigured: true, settings },
       [MEMBERS_ROUTE]: members,
     })
     renderWithProviders(<App />, { route: "/notifications" })
@@ -168,7 +174,7 @@ describe("Notifications", () => {
 
   it("filters by type and event, with a chip to remove the filter", async () => {
     mockApi({
-      "GET /api/notifications": { targets: [webhook, emailTarget, slackTarget], mailConfigured: true },
+      "GET /api/notifications": { targets: [webhook, emailTarget, slackTarget], mailConfigured: true, settings },
       [MEMBERS_ROUTE]: members,
     })
     renderWithProviders(<App />, { route: "/notifications" })
@@ -191,7 +197,7 @@ describe("Notifications", () => {
       name: `Target ${String(i + 1).padStart(2, "0")}`,
     }))
     mockApi({
-      "GET /api/notifications": { targets, mailConfigured: false },
+      "GET /api/notifications": { targets, mailConfigured: false, settings },
       [MEMBERS_ROUTE]: members,
     })
     renderWithProviders(<App />, { route: "/notifications" })
@@ -206,7 +212,7 @@ describe("Notifications", () => {
   it("pauses a target from the list without opening the edit dialog", async () => {
     let active = true
     const fetchSpy = mockApi({
-      "GET /api/notifications": () => jsonResponse(200, { targets: [{ ...webhook, active }], mailConfigured: false }),
+      "GET /api/notifications": () => jsonResponse(200, { targets: [{ ...webhook, active }], mailConfigured: false, settings }),
       "PATCH /api/notifications/n1": (init?: RequestInit) => {
         active = JSON.parse(String(init?.body)).active
         return jsonResponse(200, { target: { ...webhook, active } })
@@ -229,7 +235,7 @@ describe("Notifications", () => {
   it("moves the switch as soon as it is clicked, and back if saving fails", async () => {
     let fail!: () => void
     mockApi({
-      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
       // Held open, so the switch is checked while the request is in flight.
       "PATCH /api/notifications/n1": (() =>
         new Promise<Response>((resolve) => {
@@ -254,6 +260,7 @@ describe("Notifications", () => {
       "GET /api/notifications": {
         targets: [webhook, { ...emailTarget, active: false }, slackTarget],
         mailConfigured: true,
+        settings,
       },
       [MEMBERS_ROUTE]: members,
     })
@@ -277,7 +284,7 @@ describe("Notifications", () => {
     mockApi({
       "GET /api/auth/me": { user: testUser, workspaces: asMember },
       "GET /api/workspaces": { workspaces: asMember },
-      "GET /api/notifications": { targets: [{ ...webhook, active: false }], mailConfigured: false },
+      "GET /api/notifications": { targets: [{ ...webhook, active: false }], mailConfigured: false, settings },
       [MEMBERS_ROUTE]: members,
     })
     renderWithProviders(<App />, { route: "/notifications" })
@@ -312,6 +319,7 @@ describe("Notifications", () => {
           { ...emailTarget, lastDelivery: null },
         ],
         mailConfigured: true,
+        settings,
       },
       [MEMBERS_ROUTE]: members,
     })
@@ -340,7 +348,7 @@ describe("Notifications", () => {
       finishedAt: "2026-11-01T10:00:01.000Z",
     }
     const fetchSpy = mockApi({
-      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
       "GET /api/notifications/n1/deliveries?page=1&limit=20": {
         deliveries: [
           delivery,
@@ -375,7 +383,7 @@ describe("Notifications", () => {
 
   it("refreshes the last delivery after a test", async () => {
     const fetchSpy = mockApi({
-      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
       "POST /api/notifications/n1/test": { result: { ok: true } },
       [MEMBERS_ROUTE]: members,
     })
@@ -388,9 +396,290 @@ describe("Notifications", () => {
     await vi.waitFor(() => expect(calls(fetchSpy, "GET", "/api/notifications")).toHaveLength(2))
   })
 
+  it("shows why a target was auto-paused, in the list and when editing it", async () => {
+    const reason = "Auto-paused: HTTP 410 Gone"
+    mockApi({
+      "GET /api/notifications": {
+        targets: [{ ...slackTarget, active: false, pausedReason: reason, pauseCause: "gone" }],
+        mailConfigured: false,
+        settings,
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const row = (await screen.findByText("Team channel")).closest("tr")!
+    expect(within(row).getByText(reason)).toBeInTheDocument()
+    expect(within(row).getByRole("switch", { name: "Active: Team channel" })).not.toBeChecked()
+
+    await userEvent.click(within(row).getByRole("button", { name: "Actions for Team channel" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }))
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByText(reason)).toBeInTheDocument()
+    expect(within(dialog).getByText(/The Slack webhook was deleted/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/Switching it back on in the list clears/)).toBeInTheDocument()
+  })
+
+  it("shows a delivery waiting for its first send or a retry", async () => {
+    const now = Date.now()
+    const pending = { status: "pending", event: "failed", error: null, createdAt: new Date(now - 4 * 60_000).toISOString() }
+    mockApi({
+      "GET /api/notifications": {
+        targets: [
+          { ...webhook, lastDelivery: { ...pending, httpStatus: null, attempts: 0, nextAttemptAt: pending.createdAt } },
+          {
+            ...slackTarget,
+            lastDelivery: {
+              ...pending,
+              httpStatus: 503,
+              attempts: 2,
+              nextAttemptAt: new Date(now + 5 * 60_000).toISOString(),
+            },
+          },
+        ],
+        mailConfigured: false,
+        settings,
+      },
+      "GET /api/notifications/n3/deliveries?page=1&limit=20": {
+        deliveries: [
+          {
+            ...pending,
+            id: "d1",
+            httpStatus: 503,
+            attempts: 2,
+            nextAttemptAt: new Date(now + 5 * 60_000).toISOString(),
+            jobId: "job-1",
+            finishedAt: null,
+          },
+        ],
+        total: 1,
+        page: 1,
+        limit: 20,
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const lastDelivery = async (name: string) =>
+      within((await screen.findByText(name)).closest("tr")!).getAllByRole("cell")[4]!
+    expect((await lastDelivery("CI alerts")).textContent).toBe("Queued · 4 minutes ago")
+    const retrying = await lastDelivery("Team channel")
+    expect(retrying.textContent).toBe("Retrying · 503 · 4 minutes ago")
+    expect(retrying.firstElementChild).toHaveAttribute("title", "Attempt 2 of 5 failed; next try in 5 minutes")
+
+    await userEvent.click(screen.getByRole("button", { name: "Actions for Team channel" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "View deliveries" }))
+    const sheet = await screen.findByRole("dialog", { name: "Deliveries to Team channel" })
+    expect(await within(sheet).findByText("Retrying · 503")).toBeInTheDocument()
+    expect(within(sheet).getByText("Attempt 2 of 5 failed; next try in 5 minutes")).toBeInTheDocument()
+  })
+
+  // One target of each kind of trouble, plus a healthy one that stays off the tab.
+  function failingFixture() {
+    const now = Date.now()
+    const at = (minutes: number) => new Date(now + minutes * 60_000).toISOString()
+    const failed = { status: "failed", event: "failed", error: null, attempts: 5, nextAttemptAt: null, createdAt: at(-60) }
+    return [
+      { ...webhook, consecutiveFailures: 2, lastDelivery: { ...failed, httpStatus: 500 } },
+      {
+        ...slackTarget,
+        active: false,
+        pausedReason: "Auto-paused: HTTP 410 Gone",
+        pauseCause: "gone",
+        consecutiveFailures: 1,
+        lastDelivery: { ...failed, httpStatus: 410, attempts: 1 },
+      },
+      {
+        ...webhook,
+        id: "n4",
+        name: "Ops hook",
+        lastDelivery: { ...failed, status: "pending", httpStatus: 502, attempts: 2, nextAttemptAt: at(25) },
+      },
+      {
+        ...emailTarget,
+        lastDelivery: { ...failed, status: "sent", event: "completed", httpStatus: null, attempts: 1 },
+      },
+    ]
+  }
+
+  it("lists failing targets in their own tab with their status, count and what went wrong", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: failingFixture(), mailConfigured: true, settings },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const tab = await screen.findByRole("tab", { name: /Failing targets/ })
+    // Something is paused, so the count is in the urgent colour.
+    expect(within(tab).getByText("3")).toHaveAttribute("data-urgent", "true")
+    expect(screen.queryByLabelText("Auto-pause after")).not.toBeInTheDocument()
+    await userEvent.click(tab)
+
+    expect(await screen.findByText("1 paused · 1 failing · 1 retrying")).toBeInTheDocument()
+    const rows = screen.getAllByRole("row").slice(1)
+    const cells = (row: HTMLElement) => within(row).getAllByRole("cell").map((cell) => cell.textContent)
+    // Paused first, then failing, then retrying; the healthy target is left out.
+    expect(rows.map((row) => within(row).getAllByRole("cell")[0]!.querySelector(".font-medium")!.textContent)).toEqual([
+      "Team channel",
+      "CI alerts",
+      "Ops hook",
+    ])
+    const [paused, failing, retrying] = rows as [HTMLElement, HTMLElement, HTMLElement]
+    expect(cells(paused)[0]).toContain("The Slack webhook was deleted. Remove this target and add a new webhook URL.")
+    expect(cells(paused)[1]).toBe("Paused")
+    expect(cells(paused)[3]).toBe("Endpoint gone")
+    expect(cells(failing)[1]).toBe("Failing")
+    expect(within(failing).getByRole("meter", { name: "Failures in a row for CI alerts" })).toHaveAttribute(
+      "aria-valuenow",
+      "2",
+    )
+    expect(cells(failing)[3]).toBe("2 of 5")
+    expect(within(failing).getByText("HTTP 500")).toBeInTheDocument()
+    expect(cells(retrying)[1]).toBe("Retrying")
+    expect(within(retrying).getByText("HTTP 502 · next try in 25 minutes")).toBeInTheDocument()
+
+    // Only the paused one offers Resume; the switch stays on the Targets tab.
+    expect(within(paused).getByRole("button", { name: "Resume Team channel" })).toBeInTheDocument()
+    expect(within(failing).queryByRole("button", { name: /^Resume/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument()
+
+    await userEvent.click(within(paused).getByRole("button", { name: "View deliveries to Team channel" }))
+    expect(await screen.findByRole("dialog", { name: "Deliveries to Team channel" })).toBeInTheDocument()
+  })
+
+  it("uses a neutral count when nothing is paused", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [{ ...webhook, consecutiveFailures: 1 }], mailConfigured: false, settings },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const tab = await screen.findByRole("tab", { name: /Failing targets/ })
+    expect(within(tab).getByText("1")).toHaveAttribute("data-urgent", "false")
+  })
+
+  it("asks before resuming a paused target", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: failingFixture(), mailConfigured: false, settings },
+      "PATCH /api/notifications/n3": { target: { ...slackTarget, active: true } },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Resume Team channel" }))
+    const dialog = await screen.findByRole("dialog", { name: "Resume Team channel?" })
+    expect(within(dialog).getByText(/the failure count resets/)).toBeInTheDocument()
+    expect(calls(fetchSpy, "PATCH", "/api/notifications/n3")).toHaveLength(0)
+    await userEvent.click(within(dialog).getByRole("button", { name: "Resume" }))
+
+    expect(await screen.findByText("Resumed Team channel")).toBeInTheDocument()
+    const [, init] = calls(fetchSpy, "PATCH", "/api/notifications/n3")[0]!
+    expect(JSON.parse(String(init?.body))).toEqual({ active: true })
+  })
+
+  it("offers to resume a paused target once its test passes", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: failingFixture(), mailConfigured: false, settings },
+      "POST /api/notifications/n3/test": { result: { ok: true } },
+      "PATCH /api/notifications/n3": { target: { ...slackTarget, active: true } },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Send test to Team channel" }))
+    expect(await screen.findByText("Test to Team channel passed")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }))
+
+    await vi.waitFor(() => expect(calls(fetchSpy, "PATCH", "/api/notifications/n3")).toHaveLength(1))
+    // Sonner can briefly render a toast twice while the previous one animates out.
+    expect((await screen.findAllByText("Resumed Team channel")).length).toBeGreaterThan(0)
+  })
+
+  it("saves the auto-pause limit as soon as an admin picks one", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: failingFixture(), mailConfigured: false, settings },
+      "PATCH /api/notifications/settings": { settings: { autoPauseAfter: 0 } },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    const select = await screen.findByRole("combobox", { name: "Auto-pause after" })
+    expect(select).toHaveTextContent("5 failures")
+    await userEvent.click(select)
+    await userEvent.click(screen.getByRole("option", { name: "Never" }))
+
+    expect(await screen.findByText("Targets will never be paused")).toBeInTheDocument()
+    const [, init] = calls(fetchSpy, "PATCH", "/api/notifications/settings")[0]!
+    expect(JSON.parse(String(init?.body))).toEqual({ autoPauseAfter: 0 })
+  })
+
+  it("explains auto-pause on request", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: failingFixture(), mailConfigured: false, settings },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "How auto-pause works" }))
+    expect(await screen.findByText(/Each delivery is tried up to 5 times/)).toBeInTheDocument()
+  })
+
+  it("shows members the limit in a line and leaves them only the history", async () => {
+    const asMember = testWorkspaces.map((workspace) => ({ ...workspace, role: "member" }))
+    mockApi({
+      "GET /api/auth/me": { user: testUser, workspaces: asMember },
+      "GET /api/workspaces": { workspaces: asMember },
+      "GET /api/notifications": {
+        targets: [{ ...webhook, consecutiveFailures: 3 }, ...failingFixture().slice(1, 2)],
+        mailConfigured: false,
+        settings: { autoPauseAfter: 0 },
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    expect(await screen.findByText("Never pauses (set by admins)")).toBeInTheDocument()
+    expect(screen.queryByRole("combobox", { name: "Auto-pause after" })).not.toBeInTheDocument()
+    // With no limit the count stands alone.
+    expect(screen.getByText("(no limit)")).toBeInTheDocument()
+    // Row buttons name their target ("Resume Team channel"); a bare "Resume" is a toast's.
+    expect(screen.queryByRole("button", { name: /^(Resume |Send test)/ })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "View deliveries to CI alerts" })).toBeInTheDocument()
+  })
+
+  it("celebrates when no target is failing", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    expect(await screen.findByText("All targets are delivering")).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "Failing targets" })).toHaveAttribute("aria-selected", "true")
+    // The limit is there even with nothing failing.
+    expect(screen.getByRole("combobox", { name: "Auto-pause after" })).toBeInTheDocument()
+  })
+
+  it("stacks failing targets as cards on a phone", async () => {
+    setViewportWidth(390)
+    mockApi({
+      "GET /api/notifications": { targets: failingFixture(), mailConfigured: false, settings },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=failing" })
+
+    const list = await screen.findByRole("list", { name: "Failing targets" })
+    const cards = within(list).getAllByRole("listitem")
+    expect(cards).toHaveLength(3)
+    expect(within(cards[0]!).getByText("Team channel")).toBeInTheDocument()
+    expect(within(cards[0]!).getByText("Endpoint gone")).toBeInTheDocument()
+    expect(within(cards[0]!).getByRole("button", { name: "Resume Team channel" })).toBeInTheDocument()
+    expect(screen.queryByRole("table")).not.toBeInTheDocument()
+  })
+
   it("asks before removing a target", async () => {
     const fetchSpy = mockApi({
-      "GET /api/notifications": { targets: [webhook], mailConfigured: false },
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
       "DELETE /api/notifications/n1": () => new Response(null, { status: 204 }),
       [MEMBERS_ROUTE]: members,
     })

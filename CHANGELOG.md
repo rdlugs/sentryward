@@ -10,6 +10,28 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Notification deliveries are retried (#249). A finished review's deliveries
+  are queued as pending rows in the same step that marks it notified, so a
+  worker restart no longer loses them, and the worker sends them outside the
+  review slots, so a slow endpoint no longer delays reviews. Timeouts,
+  connection errors, `408`, `429` (honouring `Retry-After`) and `5xx` are
+  retried up to 5 tries with 1m/5m/30m/2h backoff; other failures are final.
+  The delivery log shows pending deliveries ("Queued", "Retrying · 503") with
+  the next try, and deliveries gain `nextAttemptAt`.
+- Notification targets pause themselves after repeated failures (#250): after
+  the workspace's **Auto-pause after** limit of deliveries in a row fail for
+  good (5 by default, 0 for never, set on the Notifications page's new
+  **Failing targets** tab and `PATCH /api/notifications/settings`), or at once
+  on `410 Gone` or Slack's `404`. That tab lists the targets that are paused,
+  failing or retrying with a status, their failures in a row against the
+  limit, the last error and next try, a hint on how to fix them, and **Send
+  test** and **Resume** buttons (a passing test offers to resume); it stacks as
+  cards on a phone. The reason shows on the row and in the edit dialog, owners
+  and admins
+  are emailed once when mail is configured (linking to the tab), and resuming
+  the target clears it. `GET /api/notifications` adds `pauseCause`. A successful delivery resets the count. Adds outbox and failure
+  columns to `notification_deliveries`, `notification_targets` and
+  `workspaces` (migration applied on start).
 - A delivery log for notification targets (#248). Every delivery, tests
   included, is recorded with its outcome and the HTTP status or error (with the
   target URL cut out). The Notifications list has a **Last delivery** column,

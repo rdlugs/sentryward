@@ -382,6 +382,24 @@ describe("runRetention", () => {
     expect(await prisma.notificationDelivery.count({ where: { targetId: theirs.id } })).toBe(0);
   });
 
+  it("never prunes a delivery still waiting to be sent", async () => {
+    const target = await prisma.notificationTarget.create({ data: { workspaceId, kind: "slack", name: "t", events: ["failed"] } });
+    const sent = (createdAt: Date) => ({ targetId: target.id, event: "failed", status: "sent" as const, createdAt, finishedAt: createdAt });
+    // The oldest row of all, behind a full log of newer ones.
+    await prisma.notificationDelivery.create({
+      data: { targetId: target.id, event: "failed", status: "pending", createdAt: OLD, nextAttemptAt: OLD },
+    });
+    await prisma.notificationDelivery.createMany({
+      data: Array.from({ length: DELIVERIES_PER_TARGET + 2 }, (_, i) => sent(new Date(RECENT.getTime() + i * 1000))),
+    });
+
+    const deleted = await pruneDeliveries(30, { now: NOW });
+
+    expect(deleted).toBe(2);
+    expect(await prisma.notificationDelivery.count({ where: { status: "pending" } })).toBe(1);
+    expect(await prisma.notificationDelivery.count({ where: { status: "sent" } })).toBe(DELIVERIES_PER_TARGET);
+  });
+
   it("prunes deliveries in batches", async () => {
     const target = await prisma.notificationTarget.create({ data: { workspaceId, kind: "slack", name: "t", events: ["failed"] } });
     const row = (createdAt: Date) => ({ targetId: target.id, event: "failed", status: "sent" as const, createdAt, finishedAt: createdAt });
