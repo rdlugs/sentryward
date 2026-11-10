@@ -554,11 +554,15 @@ describe("Notifications", () => {
     expect(within(retrying).getByText("HTTP 502 · next try in 25 minutes")).toBeInTheDocument()
 
     // Only the paused one offers Resume; the switch stays on the Targets tab.
-    expect(within(paused).getByRole("button", { name: "Resume Team channel" })).toBeInTheDocument()
-    expect(within(failing).queryByRole("button", { name: /^Resume/ })).not.toBeInTheDocument()
+    await userEvent.click(within(failing).getByRole("button", { name: "Actions for CI alerts" }))
+    expect(await screen.findByRole("menuitem", { name: "Send test" })).toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: "Resume" })).not.toBeInTheDocument()
+    await userEvent.keyboard("{Escape}")
     expect(screen.queryByRole("switch")).not.toBeInTheDocument()
 
-    await userEvent.click(within(paused).getByRole("button", { name: "View deliveries to Team channel" }))
+    await userEvent.click(within(paused).getByRole("button", { name: "Actions for Team channel" }))
+    expect(await screen.findByRole("menuitem", { name: "Resume" })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("menuitem", { name: "View deliveries" }))
     expect(await screen.findByRole("dialog", { name: "Deliveries to Team channel" })).toBeInTheDocument()
   })
 
@@ -618,7 +622,8 @@ describe("Notifications", () => {
     })
     renderWithProviders(<App />, { route: "/notifications?tab=failing" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Resume Team channel" }))
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for Team channel" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Resume" }))
     const dialog = await screen.findByRole("dialog", { name: "Resume Team channel?" })
     expect(within(dialog).getByText(/the failure count resets/)).toBeInTheDocument()
     expect(calls(fetchSpy, "PATCH", "/api/notifications/n3")).toHaveLength(0)
@@ -638,7 +643,8 @@ describe("Notifications", () => {
     })
     renderWithProviders(<App />, { route: "/notifications?tab=failing" })
 
-    await userEvent.click(await screen.findByRole("button", { name: "Send test to Team channel" }))
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for Team channel" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Send test" }))
     expect(await screen.findByText("Test to Team channel passed")).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Resume" }))
 
@@ -694,9 +700,10 @@ describe("Notifications", () => {
     expect(screen.queryByRole("combobox", { name: "Auto-pause after" })).not.toBeInTheDocument()
     // With no limit the count stands alone.
     expect(screen.getByText("(no limit)")).toBeInTheDocument()
-    // Row buttons name their target ("Resume Team channel"); a bare "Resume" is a toast's.
-    expect(screen.queryByRole("button", { name: /^(Resume |Send test)/ })).not.toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "View deliveries to CI alerts" })).toBeInTheDocument()
+    // Members can only open the history.
+    await userEvent.click(screen.getByRole("button", { name: "Actions for CI alerts" }))
+    expect(await screen.findByRole("menuitem", { name: "View deliveries" })).toBeInTheDocument()
+    expect(screen.getAllByRole("menuitem")).toHaveLength(1)
   })
 
   it("celebrates when no target is failing", async () => {
@@ -725,7 +732,8 @@ describe("Notifications", () => {
     expect(cards).toHaveLength(3)
     expect(within(cards[0]!).getByText("Team channel")).toBeInTheDocument()
     expect(within(cards[0]!).getByText("Endpoint gone")).toBeInTheDocument()
-    expect(within(cards[0]!).getByRole("button", { name: "Resume Team channel" })).toBeInTheDocument()
+    await userEvent.click(within(cards[0]!).getByRole("button", { name: "Actions for Team channel" }))
+    expect(await screen.findByRole("menuitem", { name: "Resume" })).toBeInTheDocument()
     expect(screen.queryByRole("table")).not.toBeInTheDocument()
   })
 

@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { CheckCircle2, CircleHelp, History, Loader2, Play, Send } from "lucide-react"
+import { CheckCircle2, CircleHelp, History, Loader2, MoreHorizontal, Play, Send } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -288,24 +289,32 @@ function RowActions({
   }
 
   return (
-    <div className="flex flex-wrap items-center justify-end gap-1">
-      {canManage && (
-        <Button variant="outline" size="sm" onClick={sendTest} disabled={testTarget.isPending} aria-label={`Send test to ${target.name}`}>
-          {testTarget.isPending ? <Loader2 className="animate-spin" /> : <Send />}
-          Send test
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" className="size-8" aria-label={`Actions for ${target.name}`}>
+          {testTarget.isPending ? <Loader2 className="animate-spin" /> : <MoreHorizontal />}
         </Button>
-      )}
-      {canManage && status === "paused" && (
-        <Button size="sm" onClick={onResume} aria-label={`Resume ${target.name}`}>
-          <Play />
-          Resume
-        </Button>
-      )}
-      <Button variant="ghost" size="sm" onClick={onViewDeliveries} aria-label={`View deliveries to ${target.name}`}>
-        <History />
-        View deliveries
-      </Button>
-    </div>
+      </DropdownMenuTrigger>
+      {/* The shared menu matches its trigger's width, which is far too narrow for an icon button. */}
+      <DropdownMenuContent align="end" className="w-max whitespace-nowrap">
+        <DropdownMenuItem onSelect={onViewDeliveries}>
+          <History />
+          View deliveries
+        </DropdownMenuItem>
+        {canManage && (
+          <DropdownMenuItem onSelect={sendTest} disabled={testTarget.isPending}>
+            <Send />
+            Send test
+          </DropdownMenuItem>
+        )}
+        {canManage && status === "paused" && (
+          <DropdownMenuItem onSelect={onResume}>
+            <Play />
+            Resume
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -365,7 +374,7 @@ export function FailingTargets({
               </div>
               <LastDeliveryDetail target={row.target} />
             </div>
-            {actions(row)}
+            <div className="flex justify-end">{actions(row)}</div>
           </li>
         ))}
       </ul>
