@@ -1,9 +1,6 @@
 import type { ReviewResult } from "../core/models.ts";
 import type { CommitStatus } from "../forge/types.ts";
-
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
-}
+import { plural } from "../core/plural.ts";
 
 // The commit status states the verdict, decided once in core/verdict.ts.
 export function commitStatus(result: ReviewResult, targetUrl?: string): CommitStatus {

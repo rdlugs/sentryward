@@ -16,13 +16,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   that pass its events and scope as `held` outbox rows, and the worker rolls
   them into one `digest` delivery when due: counts by verdict, failed and
   resolved reviews, the five most-blocked repositories, the still-blocked
-  changes with links, and the failed reviews (lists capped at 200, counts
-  cover all). Empty periods send nothing; each digest is queued once under a
-  row lock, and a worker that was down catches up on its next poll. Webhooks
+  changes with links (a change whose newer review passed is left out, even
+  if the target did not hold that review), and the failed reviews (reviews
+  capped at 200 and blocked changes at 50, with `truncated` and
+  `blockedTruncated` counting the rest; counts cover all). Empty periods send nothing; each digest is queued once under a
+  row lock, and a worker that was down catches up on its next poll. A
+  digest that fails to build is retried an hour later without stalling other
+  targets, held rows are read in pages, and an unknown stored timezone falls
+  back to UTC. Webhooks
   get `event: "digest"` with the list, Slack one summary message, email a
   plain-text summary. Pausing drops held reviews; switching back to each
   review sends them as a final digest. Held reviews stay out of the delivery
-  log and retention. The add and edit panels gain a **Delivery** section, and
+  log and the fixed delivery retention, but a workspace's shorter privacy
+  retention deletes them. The add and edit panels gain a **Delivery** section, and
   the list shows the schedule under the target's name. `POST`/`PATCH
   /api/notifications` accept, and `GET` returns, `delivery` (migration
   applied on start).

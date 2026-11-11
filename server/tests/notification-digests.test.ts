@@ -8,6 +8,7 @@ import { prisma } from "../src/lib/prisma.ts";
 import { isValidTimeZone, nextDigestAt } from "../src/services/digestSchedule.ts";
 import {
   deliver,
+  DIGEST_BLOCKED_LIMIT,
   type DigestPayload,
   digestPayloadFor,
   DIGEST_REVIEW_LIMIT,
@@ -16,7 +17,7 @@ import {
   payloadFor,
 } from "../src/services/notifications.ts";
 import { claimDueDeliveries, runDelivery } from "../src/worker/deliveryQueue.ts";
-import { runDueDigests } from "../src/worker/digests.ts";
+import { DIGEST_RETRY_MS, runDueDigests } from "../src/worker/digests.ts";
 import { pruneDeliveries } from "../src/worker/retention.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { createUser, inWorkspace } from "./helpers/users.ts";
@@ -97,6 +98,8 @@ async function finish(status: ReviewStatus, verdict: ReviewVerdict | null, optio
 }
 
 const PAST = new Date(Date.now() - 60_000);
+// Scheduled but not due yet, so held reviews stay held.
+const FUTURE = new Date(Date.now() + 60 * 60_000);
 
 function digestTarget({
   kind = "webhook" as "webhook" | "slack",
@@ -163,18 +166,31 @@ describe("digest schedule", () => {
     expect(isValidTimeZone("UTC")).toBe(true);
     expect(isValidTimeZone("Mars/Olympus")).toBe(false);
   });
+
+  it("falls back to UTC for a stored zone this runtime does not know", () => {
+    const schedule = { deliveryMode: "daily", digestHour: 9, digestWeekday: null, digestTimeZone: "Mars/Olympus" } as const;
+    expect(nextDigestAt(schedule, new Date("2026-11-10T07:30:00Z"))).toEqual(new Date("2026-11-10T09:00:00Z"));
+  });
 });
 
 describe("holding reviews", () => {
   it("holds a digest target's deliveries instead of queueing them", async () => {
-    await digestTarget({ dueAt: null });
+    await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     expect(await rows()).toMatchObject([{ status: "held", event: "blocked", nextAttemptAt: null }]);
     expect(await claimDueDeliveries(10)).toEqual([]);
   });
 
+  it("sends each review on its own when a digest target has no due time", async () => {
+    // A schedule left incomplete outside the API: nothing would ever build
+    // its digest, so holding would pile up rows nothing sends.
+    await digestTarget({ dueAt: null });
+    await finish("completed", "blocked");
+    expect(await rows()).toMatchObject([{ status: "pending", event: "blocked" }]);
+  });
+
   it("applies the target's events and filters before holding", async () => {
-    const target = await digestTarget({ events: ["blocked"], dueAt: null });
+    const target = await digestTarget({ events: ["blocked"], dueAt: FUTURE });
     await prisma.notificationTarget.update({
       where: { id: target.id },
       data: { repositoryIds: [repositoryId], minSeverity: "critical" },
@@ -188,7 +204,7 @@ describe("holding reviews", () => {
 
 describe("building digests", () => {
   it("rolls held reviews into one pending digest and deletes them", async () => {
-    const target = await digestTarget({ dueAt: null });
+    const target = await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked", { number: 1 });
     await finish("completed", "blocked", { number: 2, repo: otherRepositoryId });
     await finish("completed", "pass", { number: 1 });
@@ -233,7 +249,7 @@ describe("building digests", () => {
   });
 
   it("never builds the same digest twice", async () => {
-    await digestTarget({ dueAt: null });
+    await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     await prisma.notificationTarget.updateMany({ data: { digestDueAt: PAST } });
 
@@ -244,7 +260,7 @@ describe("building digests", () => {
   });
 
   it("catches up after the worker was down at the due time", async () => {
-    await digestTarget({ dueAt: null });
+    await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     await prisma.notificationTarget.updateMany({ data: { digestDueAt: new Date(Date.now() - 3 * 24 * 60 * 60_000) } });
     expect(await runDueDigests()).toBe(1);
@@ -263,8 +279,91 @@ describe("building digests", () => {
     expect(payload.truncated).toBe(5);
   });
 
+  it("caps the blocked list on its own and counts what it leaves out", () => {
+    const held = Array.from({ length: DIGEST_BLOCKED_LIMIT + 3 }, (_, index) =>
+      payloadFor(
+        { id: `j${index}`, number: index + 1, status: "completed", verdict: "blocked", error: null, summary: null },
+        { provider: "github", fullPath: "acme/web" },
+        "blocked",
+      ),
+    );
+    const payload = digestPayloadFor(held, { from: new Date(), to: new Date(), timeZone: "UTC", schedule: "daily" });
+    expect(payload.blocked).toHaveLength(DIGEST_BLOCKED_LIMIT);
+    expect(payload.blockedTruncated).toBe(3);
+  });
+
+  it("leaves failed runs out of the most-blocked list, like the headline", () => {
+    const failed = payloadFor(
+      { id: "j", number: 1, status: "failed", verdict: "blocked", error: "boom", summary: null },
+      { provider: "github", fullPath: "acme/web" },
+      "failed",
+    );
+    const payload = digestPayloadFor([failed], { from: new Date(), to: new Date(), timeZone: "UTC", schedule: "daily" });
+    expect(payload.counts.byVerdict.blocked).toBe(0);
+    expect(payload.topBlockedRepositories).toEqual([]);
+  });
+
+  it("does not list a change as still blocked once a review it did not hold passed", async () => {
+    // Only blocked reviews are held, so the pass afterwards never is.
+    await digestTarget({ events: ["blocked"], dueAt: FUTURE });
+    await finish("completed", "blocked", { number: 7, finishedAt: new Date(Date.now() - 2_000) });
+    await finish("completed", "pass", { number: 7, finishedAt: new Date(Date.now() - 1_000) });
+    await prisma.notificationTarget.updateMany({ data: { digestDueAt: PAST } });
+    expect(await runDueDigests()).toBe(1);
+
+    const payload = (await rows())[0]!.payload as unknown as DigestPayload;
+    expect(payload.counts.byVerdict.blocked).toBe(1);
+    expect(payload.blocked).toEqual([]);
+  });
+
+  it("builds one digest from a backlog larger than a page", async () => {
+    const target = await digestTarget({ dueAt: PAST });
+    const sample = payloadFor(
+      { id: "j", number: 1, status: "completed", verdict: "pass", error: null, summary: null },
+      { provider: "github", fullPath: "acme/web" },
+      "completed",
+    );
+    const createdAt = new Date(Date.now() - 60_000);
+    await prisma.notificationDelivery.createMany({
+      data: Array.from({ length: 1_200 }, () => ({
+        targetId: target.id,
+        event: "completed" as const,
+        status: "held" as const,
+        attempts: 0,
+        payload: sample as unknown as object,
+        createdAt,
+      })),
+    });
+    expect(await runDueDigests()).toBe(1);
+    expect(await rows("held")).toEqual([]);
+    const payload = (await rows())[0]!.payload as unknown as DigestPayload;
+    expect(payload.counts.reviews).toBe(1_200);
+    expect(payload.truncated).toBe(1_200 - DIGEST_REVIEW_LIMIT);
+  });
+
+  it("moves a failing target aside so the others still get their digest", async () => {
+    const broken = await digestTarget({ dueAt: FUTURE });
+    const healthy = await digestTarget({ dueAt: FUTURE });
+    await finish("completed", "blocked");
+    // A held row the builder cannot read, on the target picked first.
+    await prisma.notificationDelivery.create({
+      data: { targetId: broken.id, event: "blocked", status: "held", attempts: 0, payload: { event: "blocked" } },
+    });
+    await prisma.notificationTarget.update({ where: { id: broken.id }, data: { digestDueAt: new Date(PAST.getTime() - 1_000) } });
+    await prisma.notificationTarget.update({ where: { id: healthy.id }, data: { digestDueAt: PAST } });
+
+    const now = new Date();
+    expect(await runDueDigests(now)).toBe(1);
+    const moved = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: broken.id } });
+    expect(moved.digestDueAt).toEqual(new Date(now.getTime() + DIGEST_RETRY_MS));
+    expect(await prisma.notificationDelivery.count({ where: { targetId: broken.id, status: "held" } })).toBe(2);
+    expect(await prisma.notificationDelivery.findMany({ where: { targetId: healthy.id } })).toMatchObject([
+      { event: "digest", status: "pending" },
+    ]);
+  });
+
   it("sends the digest through the outbox to a webhook", async () => {
-    await digestTarget({ dueAt: null });
+    await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     await prisma.notificationTarget.updateMany({ data: { digestDueAt: PAST } });
     await runDueDigests();
@@ -282,7 +381,7 @@ describe("building digests", () => {
 
 describe("rendering digests", () => {
   async function builtDigest() {
-    await digestTarget({ dueAt: null });
+    await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     await finish("failed", null);
     await prisma.notificationTarget.updateMany({ data: { digestDueAt: PAST } });
@@ -329,7 +428,7 @@ describe("rendering digests", () => {
 
 describe("pausing, switching and retention", () => {
   it("drops held reviews when a target is paused", async () => {
-    const target = await digestTarget({ dueAt: null });
+    const target = await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     await request(app).patch(`/api/notifications/${target.id}`).set("Cookie", cookie).set(...inWorkspace(workspaceId))
       .send({ active: false })
@@ -356,8 +455,24 @@ describe("pausing, switching and retention", () => {
     expect(await rows("pending")).toHaveLength(2);
   });
 
+  it("keeps the owed final digest's period when switching back to digests before it is built", async () => {
+    const target = await digestTarget({ dueAt: FUTURE });
+    await finish("completed", "blocked");
+    const patch = (delivery: object) =>
+      request(app).patch(`/api/notifications/${target.id}`).set("Cookie", cookie).set(...inWorkspace(workspaceId))
+        .send({ delivery })
+        .expect(200);
+    await patch({ mode: "each" });
+    await patch({ mode: "daily", hour: 9, timeZone: "Europe/Berlin" });
+
+    const updated = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: target.id } });
+    expect(updated.digestSince).toEqual(target.digestSince);
+    expect(updated.digestDueAt!.getTime()).toBeGreaterThan(Date.now());
+    expect(await rows("held")).toHaveLength(1);
+  });
+
   it("keeps held reviews out of retention and the delivery history", async () => {
-    const target = await digestTarget({ dueAt: null });
+    const target = await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
     await prisma.notificationDelivery.updateMany({ data: { createdAt: new Date("2020-01-01T00:00:00Z") } });
     expect(await pruneDeliveries(30)).toBe(0);
@@ -365,6 +480,14 @@ describe("pausing, switching and retention", () => {
     const res = await request(app).get(`/api/notifications/${target.id}/deliveries`).set("Cookie", cookie).set(...inWorkspace(workspaceId))
       .expect(200);
     expect(res.body).toMatchObject({ deliveries: [], total: 0 });
+  });
+
+  it("deletes old held reviews under a workspace's shorter privacy retention", async () => {
+    await digestTarget({ dueAt: FUTURE });
+    await finish("completed", "blocked");
+    await prisma.notificationDelivery.updateMany({ data: { createdAt: new Date(Date.now() - 2 * 24 * 60 * 60_000) } });
+    expect(await pruneDeliveries(1, { workspaceIds: [workspaceId] })).toBe(1);
+    expect(await rows()).toEqual([]);
   });
 });
 

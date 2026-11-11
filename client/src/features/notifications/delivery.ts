@@ -1,3 +1,4 @@
+import { plural } from "@/lib/plural"
 import { timeAgo } from "@/lib/time"
 import {
   MAX_DELIVERY_ATTEMPTS,
@@ -140,6 +141,6 @@ export function deliverySummary(target: { delivery: TargetDelivery }) {
   if (mode === "each" || hour === null) return null
   const day = mode === "weekly" && weekday !== null ? `${WEEKDAYS[weekday]!.slice(0, 3)} ` : ""
   const parts = [`${mode === "daily" ? "Daily" : "Weekly"} digest`, `${day}${hourLabel(hour)} ${timeZone ?? "UTC"}`]
-  if (held > 0) parts.push(`${held} ${held === 1 ? "review" : "reviews"} held`)
+  if (held > 0) parts.push(`${plural(held, "review")} held`)
   return parts.join(" · ")
 }

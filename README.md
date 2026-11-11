@@ -937,17 +937,24 @@ browser's. A digest target still applies its events and scope to every review,
 but instead of sending each match it holds it in the outbox until the digest is
 due, then sends one message summing up the period: how many reviews, by verdict,
 how many failed and how many were resolved, the five repositories with the most
-blocked reviews, the changes whose newest review in the period was blocked (with
-links to the change and the review), and the failed reviews with their errors.
-The lists stop at 200 reviews (`truncated` counts the rest); the counts cover
-every one. A period with no matching reviews sends nothing. Because held reviews
+blocked reviews (failed runs not counted), the changes still blocked (a held
+blocked review whose change has no newer finished review that passed, held or
+not, with links to the change and the review), and the failed reviews with
+their errors. The review list stops at 200 (`truncated` counts the rest) and
+the blocked list at 50 (`blockedTruncated`); the counts cover every one. A
+period with no matching reviews sends nothing. Because held reviews
 are rows in the outbox, a worker that was down at the due time builds the digest
 on its next poll, and each digest is queued exactly once (then sent and retried
 like any other delivery). Times follow daylight saving: an hour skipped by a
-spring-forward change goes out at the first valid time after it. Pausing a
+spring-forward change goes out at the first valid time after it. A stored
+timezone the runtime no longer knows is scheduled in UTC, and a digest that
+fails to build is retried an hour later without holding up other targets'.
+A workspace's privacy retention also deletes held reviews older than its
+period, so they never outlive the reviews they describe. Pausing a
 digest target drops what it held, like any queued delivery. Switching a target
 back to **Each review** sends whatever it held as a final digest on the worker's
-next poll; changing a digest's schedule keeps what is held for the next one. The
+next poll (switching to a digest again before then folds it into the next
+one); changing a digest's schedule keeps what is held for the next one. The
 list shows the schedule under the target's name, for example "Weekly digest ·
 Mon 09:00 Europe/Berlin · 3 reviews held".
 
@@ -1018,6 +1025,7 @@ There are three kinds:
     "counts": { "reviews": 12, "failed": 1, "resolved": 2, "byVerdict": { "pass": 8, "blocked": 3, "error": 0 } },
     "topBlockedRepositories": [{ "provider": "github", "fullPath": "acme/api", "blocked": 2 }],
     "blocked": [{ "event": "blocked", "review": { "...": "..." }, "repository": { "...": "..." }, "change": { "...": "..." }, "findings": { "...": "..." } }],
+    "blockedTruncated": 0,
     "reviews": ["... every review, blocked and failed first ..."],
     "truncated": 0
   }

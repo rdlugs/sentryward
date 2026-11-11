@@ -94,8 +94,11 @@ export interface DigestSchedule {
 // When the next digest is due, strictly after `after`; null for a target that
 // sends each review on its own.
 export function nextDigestAt(schedule: DigestSchedule, after: Date): Date | null {
-  const { deliveryMode, digestHour: hour, digestWeekday: weekday, digestTimeZone: timeZone } = schedule;
-  if (deliveryMode === "each" || hour === null || !timeZone) return null;
+  const { deliveryMode, digestHour: hour, digestWeekday: weekday, digestTimeZone: stored } = schedule;
+  if (deliveryMode === "each" || hour === null || !stored) return null;
+  // A zone this runtime no longer knows (after an ICU update) would make
+  // Intl throw and stall the target; UTC keeps its digests coming.
+  const timeZone = isValidTimeZone(stored) ? stored : "UTC";
   if (deliveryMode === "weekly" && weekday === null) return null;
   const today = wallClock(after, timeZone);
   // Walk local calendar days from today; a week and a day always reaches the

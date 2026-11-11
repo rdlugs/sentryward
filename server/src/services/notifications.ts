@@ -14,6 +14,7 @@ import { assertSafeUrl } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
+import { plural } from "../review/core/plural.ts";
 import { atLeast, SEVERITIES } from "../review/core/severity.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { formatDigestTime } from "./digestSchedule.ts";
@@ -58,8 +59,10 @@ export interface DigestPayload {
   };
   // Repositories by blocked reviews in the period, most first.
   topBlockedRepositories: { provider: string; fullPath: string; blocked: number }[];
-  // Changes whose newest review in the period was blocked.
+  // Changes whose newest review was blocked, at most DIGEST_BLOCKED_LIMIT, with
+  // `blockedTruncated` counting those left out.
   blocked: NotificationPayload[];
+  blockedTruncated: number;
   // Every review, blocked and failed first, then the rest, each oldest first;
   // at most DIGEST_REVIEW_LIMIT, with `truncated` counting those left out.
   reviews: NotificationPayload[];
@@ -70,18 +73,27 @@ export interface DigestPayload {
 export type DeliveryPayload = NotificationPayload | DigestPayload;
 
 export const DIGEST_REVIEW_LIMIT = 200;
+// Blocked entries repeat payloads already in `reviews`, so they get a smaller
+// cap of their own to keep a webhook body well short of doubling.
+export const DIGEST_BLOCKED_LIMIT = 50;
 const TOP_BLOCKED_REPOSITORIES = 5;
 
 const DIGEST_PRIORITY: Record<string, number> = { blocked: 0, failed: 1, resolved: 2, completed: 3 };
 
-// Rolls held reviews (oldest first) into one digest. Counts cover every one of
-// them; only the lists are capped, so a busy week stays a sane size.
-export function digestPayloadFor(
-  held: NotificationPayload[],
-  period: { from: Date; to: Date; timeZone: string; schedule: DigestPayload["schedule"] },
-): DigestPayload {
+export type DigestPeriod = { from: Date; to: Date; timeZone: string; schedule: DigestPayload["schedule"] };
+
+// "github:acme/api#42": a change, across the reviews a digest holds.
+export function changeKey(review: Pick<NotificationPayload, "repository" | "change">): string {
+  return `${review.repository.provider}:${review.repository.fullPath}#${review.change.number}`;
+}
+
+// Rolls held reviews into one digest a page at a time (oldest first), so a
+// busy week never has to sit in memory at once. Counts cover every review;
+// only the lists are capped, and only the first DIGEST_REVIEW_LIMIT of each
+// priority are kept as they arrive.
+export function createDigestBuilder(period: DigestPeriod) {
   const counts: DigestPayload["counts"] = {
-    reviews: held.length,
+    reviews: 0,
     failed: 0,
     resolved: 0,
     byVerdict: { pass: 0, blocked: 0, error: 0 },
@@ -89,39 +101,95 @@ export function digestPayloadFor(
   const repos = new Map<string, DigestPayload["topBlockedRepositories"][number]>();
   // Keyed by change, so the newest review of each wins.
   const latest = new Map<string, NotificationPayload>();
-  for (const review of held) {
-    if (review.review.status === "failed") counts.failed++;
-    if (review.event === "resolved") counts.resolved++;
-    const verdict = review.review.verdict;
-    if (review.review.status !== "failed" && verdict) counts.byVerdict[verdict]++;
-    const repoKey = `${review.repository.provider}:${review.repository.fullPath}`;
-    if (verdict === "blocked") {
-      const repo = repos.get(repoKey) ?? { ...review.repository, blocked: 0 };
-      repo.blocked++;
-      repos.set(repoKey, repo);
-    }
-    // Failed runs say nothing about whether the change is still blocked.
-    if (review.review.status !== "failed") latest.set(`${repoKey}#${review.change.number}`, review);
-  }
-  const ordered = held
-    .map((review, index) => ({ review, index }))
-    .sort(
-      (a, b) =>
-        (DIGEST_PRIORITY[a.review.event] ?? 4) - (DIGEST_PRIORITY[b.review.event] ?? 4) || a.index - b.index,
-    )
-    .map(({ review }) => review);
+  const byPriority = new Map<number, NotificationPayload[]>();
   return {
-    event: "digest",
-    schedule: period.schedule,
-    period: { from: period.from.toISOString(), to: period.to.toISOString(), timeZone: period.timeZone },
-    counts,
-    topBlockedRepositories: [...repos.values()]
-      .sort((a, b) => b.blocked - a.blocked || a.fullPath.localeCompare(b.fullPath))
-      .slice(0, TOP_BLOCKED_REPOSITORIES),
-    blocked: [...latest.values()].filter((review) => review.review.verdict === "blocked").slice(0, DIGEST_REVIEW_LIMIT),
-    reviews: ordered.slice(0, DIGEST_REVIEW_LIMIT),
-    truncated: Math.max(0, held.length - DIGEST_REVIEW_LIMIT),
+    add(held: NotificationPayload[]) {
+      for (const review of held) {
+        counts.reviews++;
+        const failed = review.review.status === "failed";
+        if (failed) counts.failed++;
+        if (review.event === "resolved") counts.resolved++;
+        // Failed runs are left out of every verdict figure, so the headline
+        // and the most-blocked list agree, and say nothing about whether the
+        // change is still blocked.
+        const verdict = failed ? null : review.review.verdict;
+        if (verdict) counts.byVerdict[verdict]++;
+        if (verdict === "blocked") {
+          const repoKey = `${review.repository.provider}:${review.repository.fullPath}`;
+          const repo = repos.get(repoKey) ?? { ...review.repository, blocked: 0 };
+          repo.blocked++;
+          repos.set(repoKey, repo);
+        }
+        if (!failed) latest.set(changeKey(review), review);
+        const priority = DIGEST_PRIORITY[review.event] ?? 4;
+        const list = byPriority.get(priority) ?? [];
+        if (list.length < DIGEST_REVIEW_LIMIT) list.push(review);
+        byPriority.set(priority, list);
+      }
+    },
+    // The changes the held reviews show as blocked, for the caller to check
+    // against newer reviews the target did not hold (unblockedChanges).
+    blockedChanges(): NotificationPayload[] {
+      return [...latest.values()].filter((review) => review.review.verdict === "blocked");
+    },
+    // `unblocked`: changes whose newest review, held or not, is no longer
+    // blocked, so they are not listed as still blocked. `from` overrides the
+    // period's start once the caller knows the oldest review.
+    build({ unblocked = new Set<string>(), from = period.from }: { unblocked?: ReadonlySet<string>; from?: Date } = {}): DigestPayload {
+      const blocked = [...latest.values()].filter(
+        (review) => review.review.verdict === "blocked" && !unblocked.has(changeKey(review)),
+      );
+      const reviews = [...byPriority.entries()]
+        .sort(([a], [b]) => a - b)
+        .flatMap(([, list]) => list)
+        .slice(0, DIGEST_REVIEW_LIMIT);
+      return {
+        event: "digest",
+        schedule: period.schedule,
+        period: { from: from.toISOString(), to: period.to.toISOString(), timeZone: period.timeZone },
+        counts,
+        topBlockedRepositories: [...repos.values()]
+          .sort((a, b) => b.blocked - a.blocked || a.fullPath.localeCompare(b.fullPath))
+          .slice(0, TOP_BLOCKED_REPOSITORIES),
+        blocked: blocked.slice(0, DIGEST_BLOCKED_LIMIT),
+        blockedTruncated: Math.max(0, blocked.length - DIGEST_BLOCKED_LIMIT),
+        reviews,
+        truncated: Math.max(0, counts.reviews - DIGEST_REVIEW_LIMIT),
+      };
+    },
   };
+}
+
+// One call for a list already in memory (tests, small digests).
+export function digestPayloadFor(held: NotificationPayload[], period: DigestPeriod): DigestPayload {
+  const builder = createDigestBuilder(period);
+  builder.add(held);
+  return builder.build();
+}
+
+// Of the blocked changes given, the keys of those whose newest finished review
+// up to `until` is not blocked. A target only holds the reviews its events let
+// through, so a pass after a block may never have been held; this looks at
+// every review of the change instead. A change whose jobs retention already
+// deleted is left as the held review says.
+export async function unblockedChanges(
+  tx: Prisma.TransactionClient,
+  blocked: NotificationPayload[],
+  until: Date,
+): Promise<Set<string>> {
+  if (!blocked.length) return new Set();
+  const keyByJob = new Map(blocked.map((review) => [review.review.id, changeKey(review)]));
+  // Newest finished review of each change, joined from the held review's job.
+  const rows = await tx.$queryRaw<{ job_id: string; verdict: string | null }[]>`
+    SELECT DISTINCT ON (r.repository_id, r.number) b.id AS job_id, r.verdict::text AS verdict
+    FROM review_jobs b
+    JOIN review_jobs r ON r.repository_id = b.repository_id AND r.number = b.number
+    WHERE b.id = ANY(${[...keyByJob.keys()]}::uuid[])
+      AND r.status IN ('completed', 'partial')
+      AND r.finished_at <= ${until}
+    ORDER BY r.repository_id, r.number, r.finished_at DESC, r.created_at DESC
+  `;
+  return new Set(rows.filter((row) => row.verdict !== "blocked").map((row) => keyByJob.get(row.job_id)!));
 }
 
 type Verdict = ReviewJob["verdict"];
@@ -291,10 +359,6 @@ export function escapeSlack(value: string): string {
   return value.replace(/[&<>]/g, (c) => SLACK_ENTITIES[c]!);
 }
 
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
-}
-
 // Our own words and numbers only, so it is safe as a subject and as mrkdwn.
 function digestHeadline(payload: DigestPayload): string {
   const name = payload.schedule === "daily" ? "Daily digest" : payload.schedule === "weekly" ? "Weekly digest" : "Digest";
@@ -349,7 +413,8 @@ function slackDigest(payload: DigestPayload) {
   if (payload.blocked.length) {
     blocks.push({ type: "section", text: plainText("Still blocked") });
     for (const review of payload.blocked.slice(0, SLACK_DIGEST_BLOCKED)) blocks.push(item(review, changeLabel(review)));
-    const more = payload.blocked.length - SLACK_DIGEST_BLOCKED;
+    const shown = Math.min(payload.blocked.length, SLACK_DIGEST_BLOCKED);
+    const more = payload.blocked.length + payload.blockedTruncated - shown;
     if (more > 0) blocks.push({ type: "context", elements: [plainText(`and ${more} more`)] });
   }
   const failed = failedReviews(payload);
@@ -377,6 +442,7 @@ function digestEmail(payload: DigestPayload): { subject: string; text: string } 
     for (const review of payload.blocked) {
       lines.push(`- ${changeLabel(review)}`, `  ${review.change.url ?? review.review.url}`, `  Review: ${review.review.url}`);
     }
+    if (payload.blockedTruncated) lines.push(`${plural(payload.blockedTruncated, "more blocked change")} not listed.`);
     lines.push("");
   }
   const failed = failedReviews(payload);
@@ -704,8 +770,11 @@ export async function notifyJob(jobId: string): Promise<void> {
       await tx.notificationDelivery.createMany({
         data: targets.map(({ target, event }) => {
           // A digest target holds the row until its digest is built
-          // (worker/digests.ts); the filters above already chose it.
-          const digest = target.deliveryMode !== "each";
+          // (worker/digests.ts); the filters above already chose it. One
+          // with no due time (a schedule left incomplete outside the API)
+          // would never be picked up, so it gets each review instead of
+          // holding rows nothing sends.
+          const digest = target.deliveryMode !== "each" && target.digestDueAt !== null;
           return {
             targetId: target.id,
             jobId: job.id,

@@ -80,7 +80,11 @@ function deliveryData(input: DeliveryInput, current: NotificationTarget | null, 
     digestWeekday: input.mode === "weekly" ? input.weekday : null,
     digestTimeZone: input.timeZone,
   };
-  const startsPeriod = current === null || current.deliveryMode === "each";
+  // A target switched back to each review still owes a final digest until the
+  // worker builds it (digestDueAt set); coming back to digests before then
+  // keeps that period, so its held reviews go out in the next digest under
+  // the right "from".
+  const startsPeriod = current === null || (current.deliveryMode === "each" && current.digestDueAt === null);
   return {
     ...schedule,
     digestDueAt: nextDigestAt(schedule, now),
