@@ -186,7 +186,9 @@ describe("retry policy", () => {
 describe("delivery outbox", () => {
   it("schedules a retry after a transient failure, keeping why", async () => {
     await target();
-    const now = new Date("2026-11-10T12:00:00Z");
+    // Real clock, not a pinned date: claimDueDeliveries compares against the
+    // database's now(), so a fixed date turns the retry due once it passes.
+    const now = new Date();
     const job = await finishedJob();
     await notifyJob(job.id);
 
