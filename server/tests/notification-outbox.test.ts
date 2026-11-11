@@ -270,12 +270,31 @@ describe("delivery outbox", () => {
 
     await sendDue(deps);
 
+    const row = await onlyDelivery();
     expect(deps.deliver).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "webhook" }),
       workspaceId,
       expect.objectContaining({ event: "failed", review: expect.objectContaining({ id: job.id }) }),
+      { deliveryId: row.id },
     );
-    expect(await onlyDelivery()).toMatchObject({ status: "sent", payload: null, finishedAt: expect.any(Date) });
+    expect(row).toMatchObject({ status: "sent", payload: null, finishedAt: expect.any(Date) });
+  });
+
+  it("sends every retry of a row under the same delivery id", async () => {
+    await target();
+    const job = await finishedJob();
+    await notifyJob(job.id);
+    const deliver = vi.fn().mockRejectedValueOnce(new DeliveryError(502)).mockResolvedValueOnce(undefined);
+    const deps: RunDeliveryDeps = { deliver, now: () => new Date() };
+
+    await sendDue(deps);
+    await makeDue();
+    await sendDue(deps);
+
+    const row = await onlyDelivery();
+    expect(row.status).toBe("sent");
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls.map((call) => call[3])).toEqual([{ deliveryId: row.id }, { deliveryId: row.id }]);
   });
 
   it("never claims one row twice when workers poll at once", async () => {

@@ -268,7 +268,7 @@ describe("building digests", () => {
 
   it("caps the lists but counts every review", () => {
     const sample = payloadFor(
-      { id: "j", number: 1, status: "completed", verdict: "pass", error: null, summary: null },
+      { id: "j", number: 1, status: "completed", verdict: "pass", error: null, summary: null, headSha: "abc", trigger: "manual" },
       { provider: "github", fullPath: "acme/web" },
       "completed",
     );
@@ -290,7 +290,7 @@ describe("building digests", () => {
         status: "held" as const,
         attempts: 0,
         payload: payloadFor(
-          { id: `j${index}`, number: index + 1, status: "completed", verdict: "blocked", error: null, summary: null },
+          { id: `j${index}`, number: index + 1, status: "completed", verdict: "blocked", error: null, summary: null, headSha: "abc", trigger: "manual" },
           { provider: "github", fullPath: "acme/web" },
           "blocked",
         ) as unknown as object,
@@ -305,12 +305,12 @@ describe("building digests", () => {
 
   it("keeps room for failed reviews however many were blocked", () => {
     const blocked = payloadFor(
-      { id: "b", number: 1, status: "completed", verdict: "blocked", error: null, summary: null },
+      { id: "b", number: 1, status: "completed", verdict: "blocked", error: null, summary: null, headSha: "abc", trigger: "manual" },
       { provider: "github", fullPath: "acme/web" },
       "blocked",
     );
     const failed = payloadFor(
-      { id: "f", number: 2, status: "failed", verdict: null, error: "boom", summary: null },
+      { id: "f", number: 2, status: "failed", verdict: null, error: "boom", summary: null, headSha: "abc", trigger: "manual" },
       { provider: "github", fullPath: "acme/web" },
       "failed",
     );
@@ -324,7 +324,7 @@ describe("building digests", () => {
 
   it("leaves failed runs out of the most-blocked list, like the headline", () => {
     const failed = payloadFor(
-      { id: "j", number: 1, status: "failed", verdict: "blocked", error: "boom", summary: null },
+      { id: "j", number: 1, status: "failed", verdict: "blocked", error: "boom", summary: null, headSha: "abc", trigger: "manual" },
       { provider: "github", fullPath: "acme/web" },
       "failed",
     );
@@ -349,7 +349,7 @@ describe("building digests", () => {
   it("builds one digest from a backlog larger than a page", async () => {
     const target = await digestTarget({ dueAt: PAST });
     const sample = payloadFor(
-      { id: "j", number: 1, status: "completed", verdict: "pass", error: null, summary: null },
+      { id: "j", number: 1, status: "completed", verdict: "pass", error: null, summary: null, headSha: "abc", trigger: "manual" },
       { provider: "github", fullPath: "acme/web" },
       "completed",
     );

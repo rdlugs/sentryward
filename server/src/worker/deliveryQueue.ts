@@ -71,7 +71,12 @@ export async function recoverStaleDeliveries(lockTimeoutMs = DELIVERY_LOCK_TIMEO
 }
 
 export interface RunDeliveryDeps {
-  deliver: (target: NotificationTarget, workspaceId: string, payload: DeliveryPayload) => Promise<void>;
+  deliver: (
+    target: NotificationTarget,
+    workspaceId: string,
+    payload: DeliveryPayload,
+    options: { deliveryId: string },
+  ) => Promise<void>;
   now: () => Date;
 }
 
@@ -104,7 +109,8 @@ export async function runDelivery(id: string, deps: RunDeliveryDeps = defaultDep
 
     let err: unknown = null;
     try {
-      await deps.deliver(target, target.workspaceId, row.payload as unknown as DeliveryPayload);
+      // The row id is the delivery id, so every retry of a row carries the same one.
+      await deps.deliver(target, target.workspaceId, row.payload as unknown as DeliveryPayload, { deliveryId: row.id });
     } catch (caught) {
       err = caught ?? new Error("Unknown error");
     }

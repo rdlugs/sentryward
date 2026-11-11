@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { env } from "../config/env.ts";
 import { Prisma } from "../generated/prisma/client.ts";
 import type {
@@ -19,7 +19,13 @@ import { atLeast, SEVERITIES } from "../review/core/severity.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { formatDigestTime } from "./digestSchedule.ts";
 
+// Body-only signature, kept for receivers written before SIGNATURE_V2_HEADER.
+// Deprecated: it can be replayed indefinitely; removed in the next minor release.
 export const SIGNATURE_HEADER = "X-Sentryward-Signature";
+// Covers "<timestamp>.<body>", so a receiver can reject an old delivery.
+export const SIGNATURE_V2_HEADER = "X-Sentryward-Signature-V2";
+export const TIMESTAMP_HEADER = "X-Sentryward-Timestamp";
+export const DELIVERY_HEADER = "X-Sentryward-Delivery";
 export const EVENT_HEADER = "X-Sentryward-Event";
 const DELIVERY_TIMEOUT_MS = 10_000;
 
@@ -33,13 +39,21 @@ const EVENT_ORDER: NotificationEvent[] = ["failed", "blocked", "resolved", "comp
 // findings, so a severity floor would hide exactly the good news.
 const UNFILTERED_EVENTS: NotificationEvent[] = ["failed", "resolved"];
 
-type JobFacts = Pick<ReviewJob, "id" | "number" | "status" | "verdict" | "error" | "summary">;
+type JobFacts = Pick<ReviewJob, "id" | "number" | "status" | "verdict" | "error" | "summary" | "headSha" | "trigger">;
 
 export interface NotificationPayload {
   event: NotificationEvent | "test";
-  review: { id: string; url: string; status: ReviewStatus; verdict: ReviewJob["verdict"]; error: string | null };
+  // trigger and headSha are missing from rows queued before they were added.
+  review: {
+    id: string;
+    url: string;
+    status: ReviewStatus;
+    verdict: ReviewJob["verdict"];
+    error: string | null;
+    trigger?: ReviewJob["trigger"];
+  };
   repository: { provider: string; fullPath: string };
-  change: { number: number; title: string | null; url: string | null };
+  change: { number: number; title: string | null; url: string | null; headSha?: string };
   findings: { total: number; bySeverity: ResultSummary["bySeverity"] } | null;
 }
 
@@ -325,9 +339,10 @@ export function payloadFor(
       status: job.status,
       verdict: job.verdict,
       error: job.error,
+      trigger: job.trigger,
     },
     repository: { provider: repository.provider, fullPath: repository.fullPath },
-    change: { number: job.number, title: summary?.title ?? null, url: summary?.webUrl ?? null },
+    change: { number: job.number, title: summary?.title ?? null, url: summary?.webUrl ?? null, headSha: job.headSha },
     findings: summary ? { total: summary.total, bySeverity: summary.bySeverity } : null,
   };
 }
@@ -377,20 +392,114 @@ function plainText(text: string) {
   return { type: "plain_text", text: clip(text), emoji: false };
 }
 
+const EMOJI: Record<NotificationPayload["event"], string> = {
+  failed: "\u26A0\uFE0F",
+  blocked: "\u{1F534}",
+  resolved: "\u2705",
+  completed: "\u{1F7E2}",
+  test: "\u{1F514}",
+};
+
+// "1 major · 2 minor", in SEVERITIES order, from our own numbers only.
+function severityBreakdown(bySeverity: ResultSummary["bySeverity"] | undefined): string | null {
+  const parts = SEVERITIES.flatMap((severity) => {
+    const count = bySeverity?.[severity] ?? 0;
+    return count > 0 ? [`${count} ${severity}`] : [];
+  });
+  return parts.length ? parts.join(" · ") : null;
+}
+
+// change.url comes from the forge's API; it is only ever used as a link when
+// it is plainly http(s), so a stored javascript: or data: URL never becomes one.
+function safeLinkUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+const CHANGE_NOUNS: Record<string, string> = { github: "pull request", gitlab: "merge request" };
+function changeNoun(provider: string): string {
+  return CHANGE_NOUNS[provider] ?? "change";
+}
+
+const SLACK_BUTTON_NOUNS: Record<string, string> = { github: "PR", gitlab: "MR" };
+
 // mrkdwn cannot be escaped completely: there is no escape for `*`, `_`, `~` or
 // backticks, and bare URLs are always linked. So forge text only ever goes into
-// plain_text objects, and mrkdwn carries nothing but our own link. The title
-// gets its own block so it cannot pass for the findings count beside it. The
+// plain_text objects, and links are url buttons, which need no mrkdwn at all.
+// The title gets its own block so it cannot pass for a line of ours. The
 // fallback `text` (shown in notifications) carries no title or error at all.
 function slackMessage(payload: NotificationPayload) {
   const { headline, title, error, findings } = messageParts(payload);
-  const blocks: object[] = [
-    { type: "section", text: plainText(findings && !error ? `${headline} - ${findings}` : headline) },
-  ];
+  const header = `${EMOJI[payload.event]} ${HEADLINES[payload.event]} · ${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
+  const blocks: object[] = [{ type: "section", text: plainText(header) }];
   if (title) blocks.push({ type: "context", elements: [plainText(title)] });
-  if (error) blocks.push({ type: "section", text: plainText(error) });
-  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `<${payload.review.url}|View review>` }] });
+  if (error) {
+    blocks.push({ type: "context", elements: [plainText(error)] });
+  } else if (findings) {
+    const breakdown = severityBreakdown(payload.findings?.bySeverity);
+    blocks.push({ type: "section", text: plainText(breakdown ? `${findings}   ${breakdown}` : findings) });
+  }
+  const buttons: object[] = [{ type: "button", text: plainText("View review"), url: payload.review.url }];
+  const changeUrl = safeLinkUrl(payload.change.url);
+  if (changeUrl) {
+    const noun = SLACK_BUTTON_NOUNS[payload.repository.provider] ?? "change";
+    buttons.push({ type: "button", text: plainText(`Open ${noun}`), url: changeUrl });
+  }
+  blocks.push({ type: "actions", elements: buttons });
   return { text: escapeSlack(headline), blocks };
+}
+
+const HTML_ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => HTML_ENTITIES[c]!);
+}
+
+function emailButton(href: string, label: string): string {
+  return (
+    `<a href="${escapeHtml(href)}" style="display:inline-block;padding:8px 14px;margin:0 8px 8px 0;` +
+    `border-radius:6px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">${escapeHtml(label)}</a>`
+  );
+}
+
+// One review's email: a text part and an HTML part with the same content.
+// Forge text (title, repository, error) is escaped everywhere it lands in the
+// HTML, and hrefs are only our review URL and a checked change URL.
+function reviewEmail(payload: NotificationPayload, targetName: string): { subject: string; text: string; html: string } {
+  const { title, error, findings } = messageParts(payload);
+  const repository = `${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
+  const breakdown = error ? null : severityBreakdown(payload.findings?.bySeverity);
+  const detail = error ?? (findings ? `${findings}${breakdown ? ` (${breakdown})` : ""}` : null);
+  const changeUrl = safeLinkUrl(payload.change.url);
+  const noun = changeNoun(payload.repository.provider);
+  const footer = `You get this as a recipient of "${oneLine(targetName)}".`;
+
+  const lines = [HEADLINES[payload.event], repository];
+  if (title) lines.push(title);
+  if (detail) lines.push(detail);
+  lines.push("", `Review: ${payload.review.url}`);
+  if (changeUrl) lines.push(`${noun[0]!.toUpperCase()}${noun.slice(1)}: ${changeUrl}`);
+  lines.push("", footer, "");
+
+  const muted = "color:#6b7280;font-size:13px";
+  const html = [
+    `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:560px">`,
+    `<h2 style="font-size:18px;margin:0 0 4px">${escapeHtml(`${EMOJI[payload.event]} ${HEADLINES[payload.event]}`)}</h2>`,
+    `<p style="margin:0 0 4px;${muted}">${escapeHtml(repository)}</p>`,
+    title ? `<p style="margin:0 0 12px;font-size:15px;font-weight:600">${escapeHtml(title)}</p>` : "",
+    detail ? `<p style="margin:0 0 16px">${escapeHtml(detail)}</p>` : "",
+    `<p style="margin:0 0 16px">`,
+    emailButton(payload.review.url, "View review"),
+    changeUrl ? emailButton(changeUrl, `Open ${noun}`) : "",
+    `</p>`,
+    `<p style="margin:16px 0 0;${muted}">${escapeHtml(footer)}</p>`,
+    `</div>`,
+  ].join("");
+  return { subject: describe(payload), text: lines.join("\n"), html };
 }
 
 // Slack reads `<...>` in text as a link, a mention or a command such as
@@ -504,6 +613,12 @@ export function signature(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
+// The same, over "<timestamp>.<body>": a receiver that checks the timestamp is
+// recent cannot be fed a captured delivery again later.
+export function timestampedSignature(secret: string, timestamp: string, body: string): string {
+  return signature(secret, `${timestamp}.${body}`);
+}
+
 export function newWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
@@ -592,15 +707,36 @@ function targetUrl(target: NotificationTarget): string {
   return decrypt(target.encryptedUrl);
 }
 
+export interface DeliverOptions {
+  // The delivery row's id, the same on every retry so a receiver can tell a
+  // retry from a new delivery. A fresh one when there is no row.
+  deliveryId?: string;
+  now?: Date;
+}
+
 // Throws on failure; callers decide whether that is logged or reported.
-export async function deliver(target: NotificationTarget, workspaceId: string, payload: DeliveryPayload) {
+export async function deliver(
+  target: NotificationTarget,
+  workspaceId: string,
+  payload: DeliveryPayload,
+  options: DeliverOptions = {},
+) {
   switch (target.kind) {
     case "webhook": {
       if (!target.encryptedSecret) throw new PermanentDeliveryError("No signing secret stored");
-      const body = JSON.stringify(payload);
+      // Added at send time, not stored: each try gets its own timestamp, so a
+      // retry hours later is not rejected as old.
+      const now = options.now ?? new Date();
+      const deliveryId = options.deliveryId ?? randomUUID();
+      const timestamp = String(Math.floor(now.getTime() / 1000));
+      const body = JSON.stringify({ deliveryId, timestamp: now.toISOString(), ...payload });
+      const secret = decrypt(target.encryptedSecret);
       await post(targetUrl(target), body, {
         [EVENT_HEADER]: payload.event,
-        [SIGNATURE_HEADER]: signature(decrypt(target.encryptedSecret), body),
+        [DELIVERY_HEADER]: deliveryId,
+        [TIMESTAMP_HEADER]: timestamp,
+        [SIGNATURE_V2_HEADER]: timestampedSignature(secret, timestamp, body),
+        [SIGNATURE_HEADER]: signature(secret, body),
       });
       return;
     }
@@ -621,12 +757,10 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
       if (!members.length) {
         throw new PermanentDeliveryError("None of this target's recipients are members of the workspace any more");
       }
-      const { subject, text } =
-        payload.event === "digest"
-          ? digestEmail(payload)
-          : { subject: describe(payload), text: `${describe(payload)}\n\n${payload.review.url}\n` };
+      const mail: { subject: string; text: string; html?: string } =
+        payload.event === "digest" ? digestEmail(payload) : reviewEmail(payload, target.name);
       // One message each, so recipients do not see each other's addresses.
-      const results = await Promise.allSettled(members.map(({ user }) => mailer.send({ to: user.email, subject, text })));
+      const results = await Promise.allSettled(members.map(({ user }) => mailer.send({ to: user.email, ...mail })));
       const failed = results.filter((result) => result.status === "rejected").length;
       if (failed) {
         const text = `${failed} of ${members.length} emails could not be sent`;
@@ -725,10 +859,12 @@ export type DeliveryOutcome = { ok: true } | { ok: false; error: string };
 // since an admin probing a target should not pause it.
 async function attempt(target: NotificationTarget, payload: NotificationPayload): Promise<DeliveryOutcome> {
   const createdAt = new Date();
+  // The row is written after sending, under the id the receiver was given.
+  const id = randomUUID();
   let outcome: DeliveryOutcome;
   let httpStatus: number | null = null;
   try {
-    await deliver(target, target.workspaceId, payload);
+    await deliver(target, target.workspaceId, payload, { deliveryId: id });
     outcome = { ok: true };
   } catch (err) {
     if (err instanceof DeliveryError) httpStatus = err.httpStatus;
@@ -737,6 +873,7 @@ async function attempt(target: NotificationTarget, payload: NotificationPayload)
   try {
     await prisma.notificationDelivery.create({
       data: {
+        id,
         targetId: target.id,
         event: payload.event,
         status: outcome.ok ? "sent" : "failed",
@@ -1003,9 +1140,15 @@ export async function testTarget(target: NotificationTarget): Promise<DeliveryOu
       status: "completed",
       verdict: "pass",
       error: null,
+      trigger: "manual",
     },
     repository: { provider: "github", fullPath: "example/repository" },
-    change: { number: 1, title: "Test notification from Sentryward", url: null },
+    change: {
+      number: 1,
+      title: "Test notification from Sentryward",
+      url: null,
+      headSha: "0000000000000000000000000000000000000000",
+    },
     findings: { total: 0, bySeverity: {} },
   };
   return attempt(target, sample);

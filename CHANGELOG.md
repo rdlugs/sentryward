@@ -10,6 +10,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Webhook deliveries carry a delivery id, a signed timestamp, the head commit
+  and the trigger (#256). The body gains `deliveryId` (the same on every retry
+  of a delivery, so a receiver can tell a retry from a new one) and
+  `timestamp` (ISO 8601, set at each send), and each review gains
+  `change.headSha` and `review.trigger` (rows queued before the upgrade lack
+  them). New headers: `X-Sentryward-Delivery`, `X-Sentryward-Timestamp` (unix
+  seconds) and `X-Sentryward-Signature-V2: sha256=<hex>`, the HMAC-SHA256 of
+  `<timestamp>.<body>`, so a receiver can reject a delivery older than a few
+  minutes instead of accepting a captured one forever. A test delivery's
+  `deliveryId` is the id of its row in the delivery log.
 - Daily and weekly notification digests (#253). Each target chooses **Each
   review** (the default) or a daily or weekly digest at an hour (and weekday)
   in its own IANA timezone, DST included. A digest target holds the reviews
@@ -148,6 +158,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- Slack notifications for a review are richer (#254): an emoji per event in
+  the headline ("🔴 Review blocked · acme/api #42"), the findings broken down
+  by severity in `critical`/`major`/`minor`/`info` order, a failed review's
+  error in a context block, and **View review** and **Open PR** (or **Open
+  MR**) buttons, the latter only when the change URL is http(s). The fallback
+  `text` is unchanged, and forge text still only goes into plain-text
+  objects; the message no longer uses mrkdwn at all.
+- Email notifications for a review are sent as text and HTML (#255): the
+  headline, repository and number, title, the findings by severity or the
+  error, **View review** and **Open pull request** links, and a footer naming
+  the target. Every forge value is HTML-escaped and only an http(s) change URL
+  is linked. `Mail` (`lib/mailer.ts`) gains an optional `html`. Digest emails
+  stay plain text.
 - The comment posted while a review runs is now a status card: a thin
   animated progress bar (`client/public/sentryward-progress.svg`, which follows
   light/dark mode and stops moving under reduced motion), "Review in progress"
@@ -176,6 +199,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Pushing a release tag now publishes the GitHub release automatically from
   the tag's changelog section, after the multi-arch image is pushed to GHCR.
   Stable tags are marked Latest; pre-release tags are marked as pre-releases.
+
+### Deprecated
+
+- The body-only `X-Sentryward-Signature` webhook header (#256). It is still
+  sent alongside `X-Sentryward-Signature-V2` for this release and will be
+  removed in the next minor release; switch receivers to the timestamped
+  signature.
 
 ### Fixed
 

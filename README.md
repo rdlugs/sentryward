@@ -997,23 +997,56 @@ pause it.
 
 There are three kinds:
 
-- **Webhook**: a `POST` with a JSON body, an `X-Sentryward-Event` header and an
-  `X-Sentryward-Signature: sha256=<hex>` header, the HMAC-SHA256 of the raw body
-  keyed with the signing secret shown once when the target is added. Remove the
-  target and add it again to change the URL or rotate the secret.
+- **Webhook**: a `POST` with a JSON body and these headers:
+
+  | Header | Value |
+  | ------ | ----- |
+  | `X-Sentryward-Event` | The `event` of the body |
+  | `X-Sentryward-Delivery` | The `deliveryId` of the body, the same on every retry of a delivery |
+  | `X-Sentryward-Timestamp` | When this attempt was sent, in unix seconds |
+  | `X-Sentryward-Signature-V2` | `sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<raw body>` keyed with the signing secret |
+  | `X-Sentryward-Signature` | Deprecated: `sha256=<hex>` of the raw body alone, removed in the next minor release |
+
+  The signing secret is shown once when the target is added. Remove the target
+  and add it again to change the URL or rotate the secret.
 
   ```json
   {
+    "deliveryId": "6f1c2a4e-...",
+    "timestamp": "2026-11-11T09:30:00.000Z",
     "event": "blocked",
-    "review": { "id": "...", "url": "https://sentryward.example.com/reviews/...", "status": "completed", "verdict": "blocked", "error": null },
+    "review": { "id": "...", "url": "https://sentryward.example.com/reviews/...", "status": "completed", "verdict": "blocked", "error": null, "trigger": "webhook" },
     "repository": { "provider": "github", "fullPath": "acme/api" },
-    "change": { "number": 42, "title": "Add login", "url": "https://github.com/acme/api/pull/42" },
+    "change": { "number": 42, "title": "Add login", "url": "https://github.com/acme/api/pull/42", "headSha": "9fceb02..." },
     "findings": { "total": 3, "bySeverity": { "major": 1, "minor": 2 } }
   }
   ```
 
   `change.title`, `change.url` and `findings` are `null` for a review that
-  failed before it ran. `event` (and the header) is `failed`, `blocked`,
+  failed before it ran. `review.trigger` is `manual`, `webhook` or `comment`.
+  `review.trigger` and `change.headSha` are missing from deliveries queued (or
+  held for a digest) before they were added.
+
+  To verify a delivery, recompute the signature over the timestamp header, a
+  dot and the raw body exactly as received, compare in constant time, and
+  reject timestamps more than about 5 minutes from your clock, so a captured
+  delivery cannot be replayed later:
+
+  ```js
+  import { createHmac, timingSafeEqual } from "node:crypto";
+
+  function verify(secret, headers, rawBody, toleranceSeconds = 300) {
+    const timestamp = headers["x-sentryward-timestamp"];
+    const received = headers["x-sentryward-signature-v2"] ?? "";
+    if (!/^\d+$/.test(timestamp ?? "")) return false;
+    if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false;
+    const expected = `sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`;
+    return received.length === expected.length && timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+  }
+  ```
+
+  Receivers that check `X-Sentryward-Signature` (body only) keep working for
+  this release; move them to `X-Sentryward-Signature-V2` before it is removed. `event` (and the header) is `failed`, `blocked`,
   `resolved`, `completed`, `test` or `digest`. A digest carries the period's
   reviews, each in the shape above:
 
@@ -1033,13 +1066,22 @@ There are three kinds:
 
   `schedule` is `daily`, `weekly`, or `null` for the final digest sent after a
   target switches back to each review.
-- **Slack**: an incoming-webhook URL, posted a one-line message linking to the
-  review ("Review failed", "Review blocked", "Blocking issues resolved" or
-  "Review completed", with the repository and number). A digest is one message
+- **Slack**: an incoming-webhook URL, posted a Block Kit message: a headline
+  with an emoji per event ("🔴 Review blocked · acme/api #42"; also "⚠️ Review
+  failed", "✅ Blocking issues resolved", "🟢 Review completed" and "🔔 Test
+  notification"), the title, the findings by severity ("3 findings   1 major ·
+  2 minor") or a failed review's error, and **View review** and **Open PR**
+  (**Open MR** on GitLab) buttons, the second only when the change has a URL. A
+  plain `text` fallback (the headline without the title) is what
+  notifications and screen readers show. A digest is one message
   with the counts, the most blocked repositories, up to 20 still-blocked
   changes and 5 failed reviews, each linking to its review.
 - **Email**: chosen members of the workspace, through the configured mail
-  transport (`SMTP_URL`). Members who leave are no longer emailed. A digest is
+  transport (`SMTP_URL`). Members who leave are no longer emailed. A review's
+  email has a text and an HTML part with the same content: the headline,
+  repository and number, title, the findings by severity or the error, **View
+  review** and **Open pull request** links, and a footer naming the target
+  ("You get this as a recipient of "Leads alerts""). A digest is
   a plain-text email whose subject sums up the counts (for example "Weekly
   digest: 12 reviews, 3 blocked, 1 failed, 2 resolved, 8 passed").
 
@@ -1064,7 +1106,7 @@ that reached some of its recipients is not retried, so nobody gets it twice. A
 delivery the endpoint accepted is never sent again, with one exception: a worker
 that dies after sending but before recording it sends it again once its claim
 goes stale (5 minutes), so a receiver that must not act twice should dedupe on
-`review.id` and `event` (for a digest, on `period.from` and `period.to`). URLs are stored encrypted, and only their
+`deliveryId` (the same on every retry of a delivery). URLs are stored encrypted, and only their
 host is ever shown again. In production a URL must be https and resolve only to
 public addresses, the same rule as self-hosted forge hosts, checked when the
 target is saved and again before each delivery; redirects are not followed.
