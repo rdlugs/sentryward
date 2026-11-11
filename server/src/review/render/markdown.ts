@@ -20,8 +20,12 @@ import { RISK_KIND_TEXT } from "../context/risk.ts";
 
 export { SUMMARY_MARKER };
 
-// Forges fetch the image themselves, so it must be a public absolute URL.
-const LOGO_URL = "https://raw.githubusercontent.com/rdlugs/sentryward/main/client/public/sentryward-32.png";
+// Forges fetch images themselves, so they must be public absolute URLs. They
+// are served from main, so a new asset only shows once it is merged there.
+const ASSET_BASE = "https://raw.githubusercontent.com/rdlugs/sentryward/main/client/public";
+const LOGO_URL = `${ASSET_BASE}/sentryward-32.png`;
+// Comments take no CSS, so the progress note's animation lives in the image.
+export const PROGRESS_BAR_URL = `${ASSET_BASE}/sentryward-progress.svg`;
 
 // The only place Sentryward names itself in what it posts: a small credit at the
 // bottom of every comment, so the content reads as the review, not the tool.

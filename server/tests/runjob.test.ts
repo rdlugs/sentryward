@@ -182,7 +182,7 @@ function deps(
     upsertSummaryComment: async (_ref: unknown, body: string, upsert?: { create?: boolean }) => {
       // Like the adapters: create: false only edits a summary already there.
       if (upsert?.create === false && !summaryOnForge) return null;
-      if (options.failSummary && !body.includes("Reviewing")) throw new Error("403 Forbidden");
+      if (options.failSummary && !body.includes("Review in progress")) throw new Error("403 Forbidden");
       published.summaries.push(body);
       summaryOnForge = true;
       return "note-1";
@@ -558,7 +558,9 @@ describe("runJob", () => {
     await runJob(job, runDeps);
 
     expect(published.summaries).toHaveLength(2);
-    expect(published.summaries[0]).toMatch(/^⏳ \*\*Reviewing \[?`newhead`/);
+    expect(published.summaries[0]).toMatch(/^⏳ \*\*Review in progress\*\* · \[?`newhead`/m);
+    expect(published.summaries[0]).toContain(`[View live progress ↗](`);
+    expect(published.summaries[0]).toContain(`/reviews/${job.id})`);
     expect(published.summaries[0]).not.toContain("## Summary");
     expect(published.summaries[1]).toMatch(/^## Summary\n/);
     expect(published.statuses).toEqual(["pending", "failure"]);
@@ -612,7 +614,7 @@ describe("runJob", () => {
     it("updates a summary an earlier run left, progress note first", async () => {
       const { published } = await run([], true);
       expect(published.summaries).toHaveLength(2);
-      expect(published.summaries[0]).toMatch(/^⏳ \*\*Reviewing/);
+      expect(published.summaries[0]).toMatch(/^⏳ \*\*Review in progress\*\*/m);
     });
 
     it("posts the summary of a review with findings, without starting a progress note", async () => {
