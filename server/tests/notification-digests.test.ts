@@ -479,6 +479,30 @@ describe("rendering digests", () => {
     expect(mail.text).toContain("Most blocked: acme/web (1)");
     expect(mail.text).toContain("Failed:");
   });
+
+  it("links the review instead of a change URL that is not http(s), as rows queued before the check carry", async () => {
+    vi.spyOn(mailer, "configured").mockReturnValue(true);
+    const send = vi.spyOn(mailer, "send").mockResolvedValue();
+    const owner = await prisma.membership.findFirstOrThrow({ where: { workspaceId, role: "owner" } });
+    const target = await prisma.notificationTarget.create({
+      data: { workspaceId, kind: "email", name: "Leads", events: ["blocked"], recipientIds: [owner.userId] },
+    });
+    const review = payloadFor(
+      { id: "j", number: 1, status: "completed", verdict: "blocked", error: null, summary: null, headSha: "abc", trigger: "manual" },
+      { provider: "github", fullPath: "acme/web" },
+      "blocked",
+    );
+    const stored = { ...review, change: { ...review.change, url: "javascript:alert(1)" } };
+    const built = digestPayloadFor([stored], { from: new Date(), to: new Date(), timeZone: "UTC", schedule: "daily" });
+    // The still-blocked list is filled from the database when a digest is built.
+    const payload: DigestPayload = { ...built, blocked: [stored] };
+
+    await deliver(target, workspaceId, payload);
+
+    const { text } = send.mock.calls[0]![0];
+    expect(text).not.toContain("javascript:");
+    expect(text).toContain(`  ${review.review.url}\n  Review: ${review.review.url}`);
+  });
 });
 
 describe("pausing, switching and retention", () => {

@@ -16,6 +16,7 @@ import { mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
 import { plural } from "../review/core/plural.ts";
 import { atLeast, SEVERITIES } from "../review/core/severity.ts";
+import { FORGE_INFO } from "../review/forge/providers.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { formatDigestTime } from "./digestSchedule.ts";
 
@@ -325,6 +326,20 @@ export function eventForTarget(
   );
 }
 
+// change.url comes from the forge's API; it is only ever kept when it is
+// plainly http(s), so a stored javascript: or data: URL never becomes a link.
+// payloadFor applies it once for every target; renderers apply it again
+// because rows queued before that carry the URL unchecked.
+function safeLinkUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export function payloadFor(
   job: JobFacts,
   repository: { provider: string; fullPath: string },
@@ -342,7 +357,7 @@ export function payloadFor(
       trigger: job.trigger,
     },
     repository: { provider: repository.provider, fullPath: repository.fullPath },
-    change: { number: job.number, title: summary?.title ?? null, url: summary?.webUrl ?? null, headSha: job.headSha },
+    change: { number: job.number, title: summary?.title ?? null, url: safeLinkUrl(summary?.webUrl), headSha: job.headSha },
     findings: summary ? { total: summary.total, bySeverity: summary.bySeverity } : null,
   };
 }
@@ -375,17 +390,27 @@ function messageParts(payload: NotificationPayload) {
   return { headline, title, error, findings };
 }
 
+function clipText(value: string, limit: number): string {
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+// A forge title or a provider's error can run to kilobytes; some mail relays
+// truncate or refuse a message with a subject or body that size.
+const EMAIL_SUBJECT_LIMIT = 200;
+const EMAIL_TITLE_LIMIT = 300;
+const EMAIL_ERROR_LIMIT = 2000;
+
 // Plain text, for an email subject.
 function describe(payload: NotificationPayload): string {
   const { headline, title, error, findings } = messageParts(payload);
   const detail = error ?? findings;
-  return `${headline}${title ? ` "${title}"` : ""}${detail ? ` - ${detail}` : ""}`;
+  return clipText(`${headline}${title ? ` "${title}"` : ""}${detail ? ` - ${detail}` : ""}`, EMAIL_SUBJECT_LIMIT);
 }
 
 // Slack rejects a plain_text object over 3000 characters.
 const SLACK_TEXT_LIMIT = 2000;
 function clip(value: string): string {
-  return value.length > SLACK_TEXT_LIMIT ? `${value.slice(0, SLACK_TEXT_LIMIT - 1)}…` : value;
+  return clipText(value, SLACK_TEXT_LIMIT);
 }
 
 function plainText(text: string) {
@@ -409,30 +434,40 @@ function severityBreakdown(bySeverity: ResultSummary["bySeverity"] | undefined):
   return parts.length ? parts.join(" · ") : null;
 }
 
-// change.url comes from the forge's API; it is only ever used as a link when
-// it is plainly http(s), so a stored javascript: or data: URL never becomes one.
-function safeLinkUrl(url: string | null | undefined): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
-  } catch {
-    return null;
-  }
+// Stored payloads type provider as a string, so one we no longer know (or a
+// row from before a forge was added) falls back to the generic word.
+function changeNouns(provider: string): { noun: string; abbrev: string } {
+  if (!Object.hasOwn(FORGE_INFO, provider)) return { noun: "change", abbrev: "change" };
+  const info = FORGE_INFO[provider as keyof typeof FORGE_INFO];
+  return { noun: info.changeNoun, abbrev: info.changeAbbrev };
 }
 
-const CHANGE_NOUNS: Record<string, string> = { github: "pull request", gitlab: "merge request" };
-function changeNoun(provider: string): string {
-  return CHANGE_NOUNS[provider] ?? "change";
+// Slack rejects a message whose link is too long, which would lose the whole
+// notification; past this the link is left out instead.
+const SLACK_URL_LIMIT = 2000;
+
+// A URL as the target of a mrkdwn link `<url|label>`. URL parsing already
+// encodes spaces and angle brackets, but not `|`, which would end the URL early
+// and let the rest pass for the label; all three are encoded to be sure.
+function slackLinkUrl(url: string | null | undefined): string | null {
+  const safe = safeLinkUrl(url);
+  if (!safe) return null;
+  const encoded = safe.replace(/[|<>]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return encoded.length > SLACK_URL_LIMIT ? null : encoded;
 }
 
-const SLACK_BUTTON_NOUNS: Record<string, string> = { github: "PR", gitlab: "MR" };
+function slackLink(url: string, label: string): string {
+  return `<${url}|${label}>`;
+}
 
-// mrkdwn cannot be escaped completely: there is no escape for `*`, `_`, `~` or
-// backticks, and bare URLs are always linked. So forge text only ever goes into
-// plain_text objects, and links are url buttons, which need no mrkdwn at all.
-// The title gets its own block so it cannot pass for a line of ours. The
-// fallback `text` (shown in notifications) carries no title or error at all.
+// The rule for every Slack message: mrkdwn cannot be escaped completely (there
+// is no escape for `*`, `_`, `~` or backticks, and bare URLs are always
+// linked), so forge text only ever goes into plain_text objects, and mrkdwn
+// only carries links with our own labels to our review URL or a checked,
+// encoded change URL. Links rather than url buttons: an incoming webhook has no
+// interactivity endpoint to answer a button click. The title gets its own
+// block so it cannot pass for a line of ours. The fallback `text` (shown in
+// notifications) carries no title or error at all.
 function slackMessage(payload: NotificationPayload) {
   const { headline, title, error, findings } = messageParts(payload);
   const header = `${EMOJI[payload.event]} ${HEADLINES[payload.event]} · ${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
@@ -444,13 +479,10 @@ function slackMessage(payload: NotificationPayload) {
     const breakdown = severityBreakdown(payload.findings?.bySeverity);
     blocks.push({ type: "section", text: plainText(breakdown ? `${findings}   ${breakdown}` : findings) });
   }
-  const buttons: object[] = [{ type: "button", text: plainText("View review"), url: payload.review.url }];
-  const changeUrl = safeLinkUrl(payload.change.url);
-  if (changeUrl) {
-    const noun = SLACK_BUTTON_NOUNS[payload.repository.provider] ?? "change";
-    buttons.push({ type: "button", text: plainText(`Open ${noun}`), url: changeUrl });
-  }
-  blocks.push({ type: "actions", elements: buttons });
+  const links = [slackLink(payload.review.url, "View review")];
+  const changeUrl = slackLinkUrl(payload.change.url);
+  if (changeUrl) links.push(slackLink(changeUrl, `Open ${changeNouns(payload.repository.provider).abbrev}`));
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: links.join(" · ") }] });
   return { text: escapeSlack(headline), blocks };
 }
 
@@ -470,12 +502,15 @@ function emailButton(href: string, label: string): string {
 // Forge text (title, repository, error) is escaped everywhere it lands in the
 // HTML, and hrefs are only our review URL and a checked change URL.
 function reviewEmail(payload: NotificationPayload, targetName: string): { subject: string; text: string; html: string } {
-  const { title, error, findings } = messageParts(payload);
+  const parts = messageParts(payload);
+  const title = parts.title && clipText(parts.title, EMAIL_TITLE_LIMIT);
+  const error = parts.error && clipText(parts.error, EMAIL_ERROR_LIMIT);
+  const { findings } = parts;
   const repository = `${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
   const breakdown = error ? null : severityBreakdown(payload.findings?.bySeverity);
   const detail = error ?? (findings ? `${findings}${breakdown ? ` (${breakdown})` : ""}` : null);
   const changeUrl = safeLinkUrl(payload.change.url);
-  const noun = changeNoun(payload.repository.provider);
+  const { noun } = changeNouns(payload.repository.provider);
   const footer = `You get this as a recipient of "${oneLine(targetName)}".`;
 
   const lines = [HEADLINES[payload.event], repository];
@@ -547,7 +582,7 @@ const SLACK_DIGEST_BLOCKED = 20;
 const SLACK_DIGEST_FAILED = 5;
 
 // Same rule as slackMessage: forge text only in plain_text, mrkdwn only for
-// our own links.
+// links to our own pages.
 function slackDigest(payload: DigestPayload) {
   const headline = digestHeadline(payload);
   const blocks: object[] = [
@@ -558,7 +593,7 @@ function slackDigest(payload: DigestPayload) {
   if (top) blocks.push({ type: "section", text: plainText(top) });
   const item = (review: NotificationPayload, label: string) => ({
     type: "context",
-    elements: [plainText(label), { type: "mrkdwn", text: `<${review.review.url}|View review>` }],
+    elements: [plainText(label), { type: "mrkdwn", text: slackLink(review.review.url, "View review") }],
   });
   if (payload.blocked.length) {
     blocks.push({ type: "section", text: plainText("Still blocked") });
@@ -590,7 +625,11 @@ function digestEmail(payload: DigestPayload): { subject: string; text: string } 
   if (payload.blocked.length) {
     lines.push("Still blocked:");
     for (const review of payload.blocked) {
-      lines.push(`- ${changeLabel(review)}`, `  ${review.change.url ?? review.review.url}`, `  Review: ${review.review.url}`);
+      lines.push(
+        `- ${changeLabel(review)}`,
+        `  ${safeLinkUrl(review.change.url) ?? review.review.url}`,
+        `  Review: ${review.review.url}`,
+      );
     }
     if (payload.blockedTruncated) lines.push(`${plural(payload.blockedTruncated, "more blocked change")} not listed.`);
     lines.push("");
@@ -728,8 +767,11 @@ export async function deliver(
       // retry hours later is not rejected as old.
       const now = options.now ?? new Date();
       const deliveryId = options.deliveryId ?? randomUUID();
-      const timestamp = String(Math.floor(now.getTime() / 1000));
-      const body = JSON.stringify({ deliveryId, timestamp: now.toISOString(), ...payload });
+      const seconds = Math.floor(now.getTime() / 1000);
+      const timestamp = String(seconds);
+      // The body's timestamp is the header's second, so the two never disagree,
+      // and both are set after the payload so a stored key cannot replace them.
+      const body = JSON.stringify({ ...payload, deliveryId, timestamp: new Date(seconds * 1000).toISOString() });
       const secret = decrypt(target.encryptedSecret);
       await post(targetUrl(target), body, {
         [EVENT_HEADER]: payload.event,

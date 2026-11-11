@@ -12,6 +12,9 @@ import { MAX_CHANGE_NUMBER, type ForgeProvider } from "../core/models.ts";
 //   4. Add the client entry in client/src/features/forge/providers.tsx.
 export interface ForgeInfo {
   name: string;
+  // What the forge calls a change, in full and short ("Open PR").
+  changeNoun: string;
+  changeAbbrev: string;
   // Recognises a change URL's path by its shape rather than its domain, so
   // self-hosted instances work without configuration.
   parseChangePath(path: string): { project: string; number: number } | null;
@@ -37,6 +40,8 @@ function pathMatcher(pattern: RegExp) {
 export const FORGE_INFO: Record<ForgeProvider, ForgeInfo> = {
   gitlab: {
     name: "GitLab",
+    changeNoun: "merge request",
+    changeAbbrev: "MR",
     parseChangePath: pathMatcher(/^\/(.+?)\/-\/merge_requests\/(\d+)(?:\/.*)?$/),
     // GitLab anchors on the first line, so the block says how many lines below
     // it to replace.
@@ -45,6 +50,8 @@ export const FORGE_INFO: Record<ForgeProvider, ForgeInfo> = {
   },
   github: {
     name: "GitHub",
+    changeNoun: "pull request",
+    changeAbbrev: "PR",
     parseChangePath: pathMatcher(/^\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/),
     // GitHub's suggestion replaces exactly the commented range.
     suggestionInfo: () => "suggestion",

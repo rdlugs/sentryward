@@ -275,7 +275,7 @@ describe("delivery outbox", () => {
       expect.objectContaining({ kind: "webhook" }),
       workspaceId,
       expect.objectContaining({ event: "failed", review: expect.objectContaining({ id: job.id }) }),
-      { deliveryId: row.id },
+      { deliveryId: row.id, now: expect.any(Date) },
     );
     expect(row).toMatchObject({ status: "sent", payload: null, finishedAt: expect.any(Date) });
   });
@@ -294,7 +294,24 @@ describe("delivery outbox", () => {
     const row = await onlyDelivery();
     expect(row.status).toBe("sent");
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(deliver.mock.calls.map((call) => call[3])).toEqual([{ deliveryId: row.id }, { deliveryId: row.id }]);
+    expect(deliver.mock.calls.map((call) => call[3].deliveryId)).toEqual([row.id, row.id]);
+  });
+
+  it("sends under the same clock it records the outcome with", async () => {
+    await target();
+    const job = await finishedJob();
+    await notifyJob(job.id);
+    const clock = new Date("2026-11-11T09:30:00.000Z");
+    const deps: RunDeliveryDeps = { deliver: vi.fn(async () => {}), now: () => clock };
+
+    await sendDue(deps);
+
+    const row = await onlyDelivery();
+    expect(deps.deliver).toHaveBeenCalledWith(expect.anything(), workspaceId, expect.anything(), {
+      deliveryId: row.id,
+      now: clock,
+    });
+    expect(row.finishedAt).toEqual(clock);
   });
 
   it("never claims one row twice when workers poll at once", async () => {

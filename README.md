@@ -1025,7 +1025,10 @@ There are three kinds:
   `change.title`, `change.url` and `findings` are `null` for a review that
   failed before it ran. `review.trigger` is `manual`, `webhook` or `comment`.
   `review.trigger` and `change.headSha` are missing from deliveries queued (or
-  held for a digest) before they were added.
+  held for a digest) before they were added. `change.url` is `null` when the
+  forge's URL is not http(s). The body's `timestamp` is the same second as the
+  `X-Sentryward-Timestamp` header, in ISO 8601. New keys may be added to the
+  body, so receivers should ignore keys they do not know.
 
   To verify a delivery, recompute the signature over the timestamp header, a
   dot and the raw body exactly as received, compare in constant time, and
@@ -1071,7 +1074,8 @@ There are three kinds:
   failed", "✅ Blocking issues resolved", "🟢 Review completed" and "🔔 Test
   notification"), the title, the findings by severity ("3 findings   1 major ·
   2 minor") or a failed review's error, and **View review** and **Open PR**
-  (**Open MR** on GitLab) buttons, the second only when the change has a URL. A
+  (**Open MR** on GitLab) links, the second only when the change has an
+  http(s) URL. A
   plain `text` fallback (the headline without the title) is what
   notifications and screen readers show. A digest is one message
   with the counts, the most blocked repositories, up to 20 still-blocked

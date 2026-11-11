@@ -13,7 +13,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Webhook deliveries carry a delivery id, a signed timestamp, the head commit
   and the trigger (#256). The body gains `deliveryId` (the same on every retry
   of a delivery, so a receiver can tell a retry from a new one) and
-  `timestamp` (ISO 8601, set at each send), and each review gains
+  `timestamp` (ISO 8601, set at each send to the same second as the
+  timestamp header; neither key can be replaced by the payload), and each
+  review gains
   `change.headSha` and `review.trigger` (rows queued before the upgrade lack
   them). New headers: `X-Sentryward-Delivery`, `X-Sentryward-Timestamp` (unix
   seconds) and `X-Sentryward-Signature-V2: sha256=<hex>`, the HMAC-SHA256 of
@@ -162,15 +164,20 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   the headline ("🔴 Review blocked · acme/api #42"), the findings broken down
   by severity in `critical`/`major`/`minor`/`info` order, a failed review's
   error in a context block, and **View review** and **Open PR** (or **Open
-  MR**) buttons, the latter only when the change URL is http(s). The fallback
-  `text` is unchanged, and forge text still only goes into plain-text
-  objects; the message no longer uses mrkdwn at all.
+  MR**) links, the latter only when the change URL is http(s) and short
+  enough for Slack (characters that would end a mrkdwn link are encoded). The
+  fallback `text` is unchanged, and forge text still only goes into
+  plain-text objects; mrkdwn carries only these links.
 - Email notifications for a review are sent as text and HTML (#255): the
   headline, repository and number, title, the findings by severity or the
   error, **View review** and **Open pull request** links, and a footer naming
-  the target. Every forge value is HTML-escaped and only an http(s) change URL
-  is linked. `Mail` (`lib/mailer.ts`) gains an optional `html`. Digest emails
-  stay plain text.
+  the target. Every forge value is HTML-escaped, a very long title or error
+  is clipped (and the subject kept to 200 characters), and only an http(s)
+  change URL is linked. `Mail` (`lib/mailer.ts`) gains an optional `html`.
+  Digest emails stay plain text.
+- A change URL that is not http(s) is now `null` in every notification
+  payload, webhook bodies included, and digest emails link the review instead
+  of such a URL (#254, #255).
 - The comment posted while a review runs is now a status card: a thin
   animated progress bar (`client/public/sentryward-progress.svg`, which follows
   light/dark mode and stops moving under reduced motion), "Review in progress"
