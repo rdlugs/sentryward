@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="4" viewBox="0 0 320 4">
+  <style>
+    .track { fill: #e5e5e5; }
+    .glow { stop-color: #3b82f6; }
+    .bar { animation: slide 1.6s ease-in-out infinite; }
+    @keyframes slide { from { transform: translateX(-120px); } to { transform: translateX(320px); } }
+    @media (prefers-color-scheme: dark) {
+      .track { fill: #404040; }
+      .glow { stop-color: #60a5fa; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .bar { animation: none; transform: translateX(100px); }
+    }
+  </style>
+  <defs>
+    <linearGradient id="g">
+      <stop offset="0" class="glow" stop-opacity="0"/>
+      <stop offset="0.5" class="glow"/>
+      <stop offset="1" class="glow" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="c"><rect width="320" height="4" rx="2"/></clipPath>
+  </defs>
+  <g clip-path="url(#c)">
+    <rect class="track" width="320" height="4"/>
+    <rect class="bar" width="120" height="4" fill="url(#g)"/>
+  </g>
+</svg>

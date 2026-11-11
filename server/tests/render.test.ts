@@ -3,9 +3,9 @@ import type { ReviewResult } from "../src/review/core/models.ts";
 import { summarize, toJson } from "../src/review/render/json.ts";
 import { inlineBody } from "../src/review/publish/inline.ts";
 import { allFindingsPrompt, findingPrompt } from "../src/review/render/agentPrompt.ts";
-import { BRAND_FOOTER, SUMMARY_MARKER, sanitize, toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
-import { progressMarkdown } from "../src/review/render/progress.ts";
-import { makeChangeSet } from "./helpers/changeSet.ts";
+import { BRAND_FOOTER, PROGRESS_BAR_URL, SUMMARY_MARKER, sanitize, toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
+import { cancelledMarkdown, progressMarkdown } from "../src/review/render/progress.ts";
+import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { sampleResult } from "./helpers/result.ts";
 
 describe("summarize and toJson", () => {
@@ -415,12 +415,18 @@ describe("structured evidence", () => {
 });
 
 describe("progressMarkdown", () => {
-  it("is a status line with no heading, linking the short SHA to the commit", () => {
+  it("is a status card with no heading, linking the short SHA to the commit", () => {
     const body = progressMarkdown({ ...makeChangeSet(), forgeRef: { ...makeChangeSet().forgeRef, headSha: "abcdef1234567" } }, ALL_OUTPUTS);
     expect(body).not.toMatch(/^#/m);
-    expect(body.startsWith("⏳ **Reviewing [`abcdef1`](https://github.com/acme/web/pull/42/commits/abcdef1234567)**\n")).toBe(true);
+    expect(body).not.toContain("<div");
+    expect(
+      body.startsWith(
+        `<img src="${PROGRESS_BAR_URL}" alt="Review in progress" width="320" height="4">\n\n` +
+          "⏳ **Review in progress** · [`abcdef1`](https://github.com/acme/web/pull/42/commits/abcdef1234567)\n\n",
+      ),
+    ).toBe(true);
     expect(body).toContain(
-      "a walkthrough and summary here, findings as inline comments on the diff and the `sentryward/review` commit status.",
+      "📝 Walkthrough and summary appear here · 💬 Findings land inline on the diff · ✔️ `sentryward/review` status\n",
     );
   });
 
@@ -436,13 +442,39 @@ describe("progressMarkdown", () => {
     const changeSet = makeChangeSet();
     changeSet.forgeRef = { ...changeSet.forgeRef, webUrl: undefined };
     const body = progressMarkdown(changeSet, { walkthrough: false, inline: false, status: false });
-    expect(body).toContain("⏳ **Reviewing `head`**");
-    expect(body).toContain("when it finishes: a summary here.</sub>");
-    expect(body).not.toMatch(/walkthrough|inline|commit status/);
+    expect(body).toContain("⏳ **Review in progress** · `head`\n");
+    expect(body).toContain("\n📝 Summary appears here\n");
+    expect(body).not.toMatch(/walkthrough|inline|status/i);
+  });
+
+  it("shows the change's scope from its hunks", () => {
+    expect(progressMarkdown(makeChangeSet(), ALL_OUTPUTS)).toContain("\n📂 1 file · `+2` `-0`\n");
+    const changeSet = makeChangeSet([
+      { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
+      { path: "src/old.ts", changeType: "modified", patch: "@@ -1,3 +1,2 @@\n a\n-b\n--- c\n+d" },
+    ]);
+    expect(progressMarkdown(changeSet, ALL_OUTPUTS)).toContain("\n📂 2 files · `+3` `-2`\n");
+  });
+
+  it("links the dashboard's live progress only when given a target", () => {
+    expect(progressMarkdown(makeChangeSet(), ALL_OUTPUTS)).not.toContain("View live progress");
+    const body = progressMarkdown(makeChangeSet(), { ...ALL_OUTPUTS, targetUrl: "https://app.example/reviews/j1" });
+    expect(body).toContain(`\n[View live progress ↗](https://app.example/reviews/j1)\n\n${BRAND_FOOTER}\n`);
   });
 
   it("keeps the footer and then the summary marker so the review replaces it", () => {
     const body = progressMarkdown(makeChangeSet(), ALL_OUTPUTS);
+    expect(body.indexOf(BRAND_FOOTER)).toBeLessThan(body.indexOf(SUMMARY_MARKER));
+    expect(body.trimEnd().endsWith(SUMMARY_MARKER)).toBe(true);
+  });
+});
+
+describe("cancelledMarkdown", () => {
+  it("is the same card shape with the reason as plain text, marker last", () => {
+    const body = cancelledMarkdown("The change was closed");
+    expect(body.startsWith(`🚫 **Review cancelled**\n\nThe change was closed.\n\n${BRAND_FOOTER}\n`)).toBe(true);
+    expect(body).not.toContain("<div");
+    expect(body).not.toContain("<sub>The change");
     expect(body.indexOf(BRAND_FOOTER)).toBeLessThan(body.indexOf(SUMMARY_MARKER));
     expect(body.trimEnd().endsWith(SUMMARY_MARKER)).toBe(true);
   });

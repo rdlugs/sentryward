@@ -148,6 +148,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- The comment posted while a review runs is now a status card: a thin
+  animated progress bar (`client/public/sentryward-progress.svg`, which follows
+  light/dark mode and stops moving under reduced motion), "Review in progress"
+  with the commit, the change's scope (files, lines added and removed), what the
+  review will publish, and a "View live progress" link to the dashboard. The
+  bar is served from `main`, so it shows once this is merged there. A cancelled
+  review's note uses the same card.
 - Adding and editing a notification target opens a side panel instead of a
   dialog, so the longer form scrolls with its Cancel and Save buttons in view.
 - The Failing targets tab groups each row's actions (View deliveries, Send
