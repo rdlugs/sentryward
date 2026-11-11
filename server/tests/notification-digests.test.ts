@@ -279,17 +279,47 @@ describe("building digests", () => {
     expect(payload.truncated).toBe(5);
   });
 
-  it("caps the blocked list on its own and counts what it leaves out", () => {
-    const held = Array.from({ length: DIGEST_BLOCKED_LIMIT + 3 }, (_, index) =>
-      payloadFor(
-        { id: `j${index}`, number: index + 1, status: "completed", verdict: "blocked", error: null, summary: null },
-        { provider: "github", fullPath: "acme/web" },
-        "blocked",
-      ),
-    );
-    const payload = digestPayloadFor(held, { from: new Date(), to: new Date(), timeZone: "UTC", schedule: "daily" });
+  it("caps the blocked list on its own and counts what it leaves out", async () => {
+    const target = await digestTarget({ dueAt: PAST });
+    const createdAt = new Date(Date.now() - 60_000);
+    // No job behind them (as after retention), so each stays as held.
+    await prisma.notificationDelivery.createMany({
+      data: Array.from({ length: DIGEST_BLOCKED_LIMIT + 3 }, (_, index) => ({
+        targetId: target.id,
+        event: "blocked" as const,
+        status: "held" as const,
+        attempts: 0,
+        payload: payloadFor(
+          { id: `j${index}`, number: index + 1, status: "completed", verdict: "blocked", error: null, summary: null },
+          { provider: "github", fullPath: "acme/web" },
+          "blocked",
+        ) as unknown as object,
+        createdAt,
+      })),
+    });
+    expect(await runDueDigests()).toBe(1);
+    const payload = (await rows())[0]!.payload as unknown as DigestPayload;
     expect(payload.blocked).toHaveLength(DIGEST_BLOCKED_LIMIT);
     expect(payload.blockedTruncated).toBe(3);
+  });
+
+  it("keeps room for failed reviews however many were blocked", () => {
+    const blocked = payloadFor(
+      { id: "b", number: 1, status: "completed", verdict: "blocked", error: null, summary: null },
+      { provider: "github", fullPath: "acme/web" },
+      "blocked",
+    );
+    const failed = payloadFor(
+      { id: "f", number: 2, status: "failed", verdict: null, error: "boom", summary: null },
+      { provider: "github", fullPath: "acme/web" },
+      "failed",
+    );
+    const held = [...Array.from({ length: DIGEST_REVIEW_LIMIT }, () => blocked), failed, failed, failed];
+    const payload = digestPayloadFor(held, { from: new Date(), to: new Date(), timeZone: "UTC", schedule: "daily" });
+    expect(payload.reviews).toHaveLength(DIGEST_REVIEW_LIMIT);
+    expect(payload.reviews.filter((review) => review.review.status === "failed")).toHaveLength(3);
+    expect(payload.reviews.at(-1)!.event).toBe("failed");
+    expect(payload.truncated).toBe(3);
   });
 
   it("leaves failed runs out of the most-blocked list, like the headline", () => {
@@ -360,6 +390,31 @@ describe("building digests", () => {
     expect(await prisma.notificationDelivery.findMany({ where: { targetId: healthy.id } })).toMatchObject([
       { event: "digest", status: "pending" },
     ]);
+  });
+
+  it("does not move a failed target's schedule changed after the rollback", async () => {
+    const broken = await digestTarget({ dueAt: PAST });
+    await prisma.notificationDelivery.create({
+      data: { targetId: broken.id, event: "blocked", status: "held", attempts: 0, payload: { event: "blocked" } },
+    });
+    // An admin reschedules between the rollback and the backoff.
+    const rescheduled = new Date(Date.now() + 5 * 60_000);
+    const original = prisma.$transaction.bind(prisma);
+    const spy = vi.spyOn(prisma, "$transaction").mockImplementation((async (...args: unknown[]) => {
+      try {
+        return await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      } catch (err) {
+        await prisma.notificationTarget.update({ where: { id: broken.id }, data: { digestDueAt: rescheduled } });
+        throw err;
+      }
+    }) as typeof prisma.$transaction);
+    try {
+      expect(await runDueDigests()).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    const target = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: broken.id } });
+    expect(target.digestDueAt).toEqual(rescheduled);
   });
 
   it("sends the digest through the outbox to a webhook", async () => {

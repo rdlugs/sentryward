@@ -65,6 +65,8 @@ export interface DigestPayload {
   blockedTruncated: number;
   // Every review, blocked and failed first, then the rest, each oldest first;
   // at most DIGEST_REVIEW_LIMIT, with `truncated` counting those left out.
+  // Up to DIGEST_FAILED_RESERVE of those places are kept for failed reviews,
+  // so a busy period of blocked ones cannot leave the failures out.
   reviews: NotificationPayload[];
   truncated: number;
 }
@@ -76,9 +78,13 @@ export const DIGEST_REVIEW_LIMIT = 200;
 // Blocked entries repeat payloads already in `reviews`, so they get a smaller
 // cap of their own to keep a webhook body well short of doubling.
 export const DIGEST_BLOCKED_LIMIT = 50;
+// Places in `reviews` kept for failed reviews: they come after blocked ones,
+// and the failure details the email and Slack digests show are read from it.
+export const DIGEST_FAILED_RESERVE = 50;
 const TOP_BLOCKED_REPOSITORIES = 5;
 
 const DIGEST_PRIORITY: Record<string, number> = { blocked: 0, failed: 1, resolved: 2, completed: 3 };
+const FAILED_PRIORITY = DIGEST_PRIORITY.failed!;
 
 export type DigestPeriod = { from: Date; to: Date; timeZone: string; schedule: DigestPayload["schedule"] };
 
@@ -90,7 +96,10 @@ export function changeKey(review: Pick<NotificationPayload, "repository" | "chan
 // Rolls held reviews into one digest a page at a time (oldest first), so a
 // busy week never has to sit in memory at once. Counts cover every review;
 // only the lists are capped, and only the first DIGEST_REVIEW_LIMIT of each
-// priority are kept as they arrive.
+// priority are kept as they arrive. Which changes are still blocked needs the
+// newest review of every change, so the caller works that out in the database
+// (stillBlockedChanges) and hands build() the capped list: what this keeps is
+// bounded by the caps and the number of repositories, not by the period.
 export function createDigestBuilder(period: DigestPeriod) {
   const counts: DigestPayload["counts"] = {
     reviews: 0,
@@ -99,8 +108,6 @@ export function createDigestBuilder(period: DigestPeriod) {
     byVerdict: { pass: 0, blocked: 0, error: 0 },
   };
   const repos = new Map<string, DigestPayload["topBlockedRepositories"][number]>();
-  // Keyed by change, so the newest review of each wins.
-  const latest = new Map<string, NotificationPayload>();
   const byPriority = new Map<number, NotificationPayload[]>();
   return {
     add(held: NotificationPayload[]) {
@@ -120,29 +127,32 @@ export function createDigestBuilder(period: DigestPeriod) {
           repo.blocked++;
           repos.set(repoKey, repo);
         }
-        if (!failed) latest.set(changeKey(review), review);
         const priority = DIGEST_PRIORITY[review.event] ?? 4;
         const list = byPriority.get(priority) ?? [];
         if (list.length < DIGEST_REVIEW_LIMIT) list.push(review);
         byPriority.set(priority, list);
       }
     },
-    // The changes the held reviews show as blocked, for the caller to check
-    // against newer reviews the target did not hold (unblockedChanges).
-    blockedChanges(): NotificationPayload[] {
-      return [...latest.values()].filter((review) => review.review.verdict === "blocked");
-    },
-    // `unblocked`: changes whose newest review, held or not, is no longer
-    // blocked, so they are not listed as still blocked. `from` overrides the
+    // `blocked`: the still-blocked changes (stillBlockedChanges), already
+    // capped, with `blockedTruncated` counting the rest. `from` overrides the
     // period's start once the caller knows the oldest review.
-    build({ unblocked = new Set<string>(), from = period.from }: { unblocked?: ReadonlySet<string>; from?: Date } = {}): DigestPayload {
-      const blocked = [...latest.values()].filter(
-        (review) => review.review.verdict === "blocked" && !unblocked.has(changeKey(review)),
-      );
+    build({
+      blocked = [],
+      blockedTruncated = 0,
+      from = period.from,
+    }: { blocked?: NotificationPayload[]; blockedTruncated?: number; from?: Date } = {}): DigestPayload {
+      // Failed reviews get their reserved places first; the rest are filled
+      // in priority order, and the list keeps that order.
+      const reserved = Math.min(byPriority.get(FAILED_PRIORITY)?.length ?? 0, DIGEST_FAILED_RESERVE);
+      let room = DIGEST_REVIEW_LIMIT - reserved;
       const reviews = [...byPriority.entries()]
         .sort(([a], [b]) => a - b)
-        .flatMap(([, list]) => list)
-        .slice(0, DIGEST_REVIEW_LIMIT);
+        .flatMap(([priority, list]) => {
+          const base = priority === FAILED_PRIORITY ? reserved : 0;
+          const extra = Math.min(list.length - base, room);
+          room -= extra;
+          return list.slice(0, base + extra);
+        });
       return {
         event: "digest",
         schedule: period.schedule,
@@ -151,8 +161,8 @@ export function createDigestBuilder(period: DigestPeriod) {
         topBlockedRepositories: [...repos.values()]
           .sort((a, b) => b.blocked - a.blocked || a.fullPath.localeCompare(b.fullPath))
           .slice(0, TOP_BLOCKED_REPOSITORIES),
-        blocked: blocked.slice(0, DIGEST_BLOCKED_LIMIT),
-        blockedTruncated: Math.max(0, blocked.length - DIGEST_BLOCKED_LIMIT),
+        blocked,
+        blockedTruncated,
         reviews,
         truncated: Math.max(0, counts.reviews - DIGEST_REVIEW_LIMIT),
       };
@@ -167,29 +177,60 @@ export function digestPayloadFor(held: NotificationPayload[], period: DigestPeri
   return builder.build();
 }
 
-// Of the blocked changes given, the keys of those whose newest finished review
-// up to `until` is not blocked. A target only holds the reviews its events let
-// through, so a pass after a block may never have been held; this looks at
-// every review of the change instead. A change whose jobs retention already
-// deleted is left as the held review says.
-export async function unblockedChanges(
+// The changes a target's held reviews (up to `until`) still show as blocked,
+// oldest first, at most `limit` with `truncated` counting the rest. A change
+// counts when its newest held review that did not fail was blocked and no
+// newer finished review of it, held or not, says otherwise: a target only
+// holds the reviews its events let through, so a pass after a block may never
+// have been held. A change whose jobs retention already deleted is left as the
+// held review says. Worked out in the database, so a period with many changes
+// never has them all in memory; call it before the held rows are deleted.
+export async function stillBlockedChanges(
   tx: Prisma.TransactionClient,
-  blocked: NotificationPayload[],
+  targetId: string,
   until: Date,
-): Promise<Set<string>> {
-  if (!blocked.length) return new Set();
-  const keyByJob = new Map(blocked.map((review) => [review.review.id, changeKey(review)]));
-  // Newest finished review of each change, joined from the held review's job.
-  const rows = await tx.$queryRaw<{ job_id: string; verdict: string | null }[]>`
-    SELECT DISTINCT ON (r.repository_id, r.number) b.id AS job_id, r.verdict::text AS verdict
-    FROM review_jobs b
-    JOIN review_jobs r ON r.repository_id = b.repository_id AND r.number = b.number
-    WHERE b.id = ANY(${[...keyByJob.keys()]}::uuid[])
-      AND r.status IN ('completed', 'partial')
-      AND r.finished_at <= ${until}
-    ORDER BY r.repository_id, r.number, r.finished_at DESC, r.created_at DESC
+  limit: number,
+): Promise<{ blocked: NotificationPayload[]; truncated: number }> {
+  // Ordered like the builder reads held rows (created_at, id), newest last,
+  // so the same review is taken as the change's latest.
+  const rows = await tx.$queryRaw<{ payload: NotificationPayload; total: number }[]>`
+    WITH latest AS (
+      SELECT DISTINCT ON (
+        d.payload->'repository'->>'provider',
+        d.payload->'repository'->>'fullPath',
+        d.payload->'change'->>'number'
+      ) d.id, d.job_id, d.payload, d.created_at
+      FROM notification_deliveries d
+      WHERE d.target_id = ${targetId}::uuid
+        AND d.status = 'held'
+        AND d.created_at <= ${until}
+        AND d.payload->'review'->>'status' IS DISTINCT FROM 'failed'
+      ORDER BY
+        d.payload->'repository'->>'provider',
+        d.payload->'repository'->>'fullPath',
+        d.payload->'change'->>'number',
+        d.created_at DESC,
+        d.id DESC
+    )
+    SELECT l.payload, (count(*) OVER ())::int AS total
+    FROM latest l
+    LEFT JOIN review_jobs b ON b.id = l.job_id
+    LEFT JOIN LATERAL (
+      SELECT true AS found, r.verdict::text AS verdict
+      FROM review_jobs r
+      WHERE r.repository_id = b.repository_id
+        AND r.number = b.number
+        AND r.status IN ('completed', 'partial')
+        AND r.finished_at <= ${until}
+      ORDER BY r.finished_at DESC, r.created_at DESC
+      LIMIT 1
+    ) newest ON true
+    WHERE l.payload->'review'->>'verdict' = 'blocked'
+      AND (newest.found IS NULL OR newest.verdict = 'blocked')
+    ORDER BY l.created_at, l.id
+    LIMIT ${limit}
   `;
-  return new Set(rows.filter((row) => row.verdict !== "blocked").map((row) => keyByJob.get(row.job_id)!));
+  return { blocked: rows.map((row) => row.payload), truncated: Math.max(0, (rows[0]?.total ?? 0) - rows.length) };
 }
 
 type Verdict = ReviewJob["verdict"];

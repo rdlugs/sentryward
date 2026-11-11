@@ -1,7 +1,12 @@
 import type { Prisma } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
 import { nextDigestAt } from "../services/digestSchedule.ts";
-import { createDigestBuilder, type NotificationPayload, unblockedChanges } from "../services/notifications.ts";
+import {
+  createDigestBuilder,
+  DIGEST_BLOCKED_LIMIT,
+  type NotificationPayload,
+  stillBlockedChanges,
+} from "../services/notifications.ts";
 
 // Targets handled per pass; the rest wait for the next poll.
 const DIGEST_BATCH = 50;
@@ -24,13 +29,14 @@ export const DIGEST_RETRY_MS = 60 * 60 * 1000;
 export async function runDueDigests(now = new Date()): Promise<number> {
   let queued = 0;
   for (let handled = 0; handled < DIGEST_BATCH; handled++) {
-    // Set once the target is locked, so a failure can be pinned on it.
-    let targetId: string | null = null;
+    // Set once the target is locked, so a failure can be pinned on it, with
+    // the due time it was claimed at.
+    let claimed: { id: string; dueAt: Date } | null = null;
     try {
       const result = await prisma.$transaction(
         (tx) =>
-          buildNextDigest(tx, now, (id) => {
-            targetId = id;
+          buildNextDigest(tx, now, (id, dueAt) => {
+            claimed = { id, dueAt };
           }),
         { timeout: DIGEST_TRANSACTION_TIMEOUT_MS },
       );
@@ -39,13 +45,18 @@ export async function runDueDigests(now = new Date()): Promise<number> {
     } catch (err) {
       // Not knowing which target failed means nothing can be moved aside, so
       // the next poll would just fail the same way; let the caller log it.
-      if (targetId === null) throw err;
+      const target = claimed as { id: string; dueAt: Date } | null;
+      if (target === null) throw err;
       // The query below orders by digest_due_at, so a target left due would
       // be picked first again and stall every other target's digest. Moving
       // it later lets the rest go out; its held rows wait for the retry.
-      console.error(`[worker] notification digest for target ${targetId} failed, retrying later`, err);
-      await prisma.notificationTarget.update({
-        where: { id: targetId },
+      console.error(`[worker] notification digest for target ${target.id} failed, retrying later`, err);
+      // The rollback released the row lock, so another worker may have built
+      // this digest since, an admin may have changed the schedule, or the
+      // target may be gone: only a due time still at the one claimed is moved
+      // (every write of it comes from a JS Date, so equality holds).
+      await prisma.notificationTarget.updateMany({
+        where: { id: target.id, digestDueAt: target.dueAt },
         data: { digestDueAt: new Date(now.getTime() + DIGEST_RETRY_MS) },
       });
     }
@@ -56,17 +67,17 @@ export async function runDueDigests(now = new Date()): Promise<number> {
 async function buildNextDigest(
   tx: Prisma.TransactionClient,
   now: Date,
-  locked: (id: string) => void,
+  locked: (id: string, dueAt: Date) => void,
 ): Promise<"none" | "empty" | "queued"> {
-  const [due] = await tx.$queryRaw<{ id: string }[]>`
-    SELECT id FROM notification_targets
+  const [due] = await tx.$queryRaw<{ id: string; digest_due_at: Date }[]>`
+    SELECT id, digest_due_at FROM notification_targets
     WHERE digest_due_at <= ${now}
     ORDER BY digest_due_at
     FOR UPDATE SKIP LOCKED
     LIMIT 1
   `;
   if (!due) return "none";
-  locked(due.id);
+  locked(due.id, due.digest_due_at);
   const target = await tx.notificationTarget.findUniqueOrThrow({ where: { id: due.id } });
   const builder = createDigestBuilder({
     from: target.digestSince ?? now,
@@ -74,6 +85,8 @@ async function buildNextDigest(
     timeZone: target.digestTimeZone ?? "UTC",
     schedule: target.deliveryMode === "each" ? null : target.deliveryMode,
   });
+  // Read before the loop below deletes the held rows it looks at.
+  const stillBlocked = await stillBlockedChanges(tx, target.id, now, DIGEST_BLOCKED_LIMIT);
   let held = 0;
   let oldest: Date | null = null;
   // Each page is deleted once read (the transaction undoes it all on
@@ -102,11 +115,10 @@ async function buildNextDigest(
   });
   if (!held) return "empty";
 
-  const unblocked = await unblockedChanges(tx, builder.blockedChanges(), now);
   // The period starts at the earlier of digestSince and the oldest held
   // review, so it always covers every review it lists.
   const from = target.digestSince && target.digestSince < oldest! ? target.digestSince : oldest!;
-  const payload = builder.build({ unblocked, from });
+  const payload = builder.build({ blocked: stillBlocked.blocked, blockedTruncated: stillBlocked.truncated, from });
   await tx.notificationDelivery.create({
     data: {
       targetId: target.id,

@@ -19,10 +19,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   changes with links (a change whose newer review passed is left out, even
   if the target did not hold that review), and the failed reviews (reviews
   capped at 200 and blocked changes at 50, with `truncated` and
-  `blockedTruncated` counting the rest; counts cover all). Empty periods send nothing; each digest is queued once under a
+  `blockedTruncated` counting the rest; counts cover all; up to 50 of the
+  review places are kept for failed reviews so blocked ones cannot crowd them
+  out). Empty periods send nothing; each digest is queued once under a
   row lock, and a worker that was down catches up on its next poll. A
   digest that fails to build is retried an hour later without stalling other
-  targets, held rows are read in pages, and an unknown stored timezone falls
+  targets (the retry only moves a schedule nobody changed in the meantime),
+  held rows are read in pages and the still-blocked changes are worked out in
+  the database, so a busy period's digest stays bounded in memory, and an
+  unknown stored timezone falls
   back to UTC. Webhooks
   get `event: "digest"` with the list, Slack one summary message, email a
   plain-text summary. Pausing drops held reviews; switching back to each
