@@ -5,6 +5,8 @@ export interface Mail {
   to: string;
   subject: string;
   text: string;
+  // Sent with `text` as multipart/alternative; clients without HTML show the text.
+  html?: string;
 }
 
 let transport: Transporter | undefined;

@@ -509,8 +509,10 @@ function CreatedSecretView({ secret }: { secret: string }) {
       <SheetHeader>
         <SheetTitle>Webhook added</SheetTitle>
         <SheetDescription>
-          Each delivery carries an <code className="font-mono text-xs">X-Sentryward-Signature</code> header: the
-          HMAC-SHA256 of the body with this secret. Copy it now; it's shown only once.
+          Each delivery carries an <code className="font-mono text-xs">X-Sentryward-Signature-V2</code> header: the
+          HMAC-SHA256 of <code className="font-mono text-xs">{"<timestamp>.<body>"}</code> with this secret, where the
+          timestamp is the <code className="font-mono text-xs">X-Sentryward-Timestamp</code> header. Copy it now; it's
+          shown only once.
         </SheetDescription>
       </SheetHeader>
       <div className="flex gap-2 px-4">
