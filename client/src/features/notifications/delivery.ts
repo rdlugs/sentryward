@@ -1,5 +1,12 @@
+import { plural } from "@/lib/plural"
 import { timeAgo } from "@/lib/time"
-import { MAX_DELIVERY_ATTEMPTS, type LastDelivery, type NotificationTarget, type TargetFilters } from "./api"
+import {
+  MAX_DELIVERY_ATTEMPTS,
+  type LastDelivery,
+  type NotificationTarget,
+  type TargetDelivery,
+  type TargetFilters,
+} from "./api"
 
 // "Sent", "Failed · 503", "Queued" or "Retrying · 503"; the error text is
 // shown separately, since it can be long.
@@ -119,4 +126,21 @@ export function scopeSummary(target: TargetFilters, repoNames: Map<string, strin
   if (target.minSeverity) parts.push(`≥ ${target.minSeverity}`)
   if (target.onlyVerdictChanges) parts.push("verdict changes")
   return parts.length ? parts.join(" · ") : null
+}
+
+export const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+export function hourLabel(hour: number) {
+  return `${String(hour).padStart(2, "0")}:00`
+}
+
+// "Weekly digest · Mon 09:00 Europe/Berlin · 3 reviews held", or null for a
+// target that sends each review on its own.
+export function deliverySummary(target: { delivery: TargetDelivery }) {
+  const { mode, hour, weekday, timeZone, held } = target.delivery
+  if (mode === "each" || hour === null) return null
+  const day = mode === "weekly" && weekday !== null ? `${WEEKDAYS[weekday]!.slice(0, 3)} ` : ""
+  const parts = [`${mode === "daily" ? "Daily" : "Weekly"} digest`, `${day}${hourLabel(hour)} ${timeZone ?? "UTC"}`]
+  if (held > 0) parts.push(`${plural(held, "review")} held`)
+  return parts.join(" · ")
 }

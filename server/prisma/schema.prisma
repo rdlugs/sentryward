@@ -705,6 +705,16 @@ enum NotificationEvent {
   @@map("notification_event")
 }
 
+// How a target receives reviews: one message each, or a digest of the
+// period's reviews at a chosen hour in the target's own timezone.
+enum NotificationDeliveryMode {
+  each
+  daily
+  weekly
+
+  @@map("notification_delivery_mode")
+}
+
 // The least severe finding a review needs for a target to hear about it.
 enum NotificationMinSeverity {
   minor
@@ -737,6 +747,20 @@ model NotificationTarget {
   // Blocked and completed deliveries only when the verdict differs from the
   // previous finished review of the same change (the first always counts).
   onlyVerdictChanges Boolean          @default(false) @map("only_verdict_changes")
+  // Digest targets hold each review's delivery (status held) until
+  // digestDueAt, when the worker rolls them into one digest delivery
+  // (worker/digests.ts). digestHour is 0-23 and digestWeekday 0-6 (Sunday
+  // first, weekly only), both in digestTimeZone (an IANA name).
+  deliveryMode    NotificationDeliveryMode @default(each) @map("delivery_mode")
+  digestHour      Int?                @map("digest_hour")
+  digestWeekday   Int?                @map("digest_weekday")
+  digestTimeZone  String?             @map("digest_time_zone")
+  // When the period the next digest covers began.
+  digestSince     DateTime?           @map("digest_since") @db.Timestamptz
+  // When the next digest is built; null for a target that sends each review
+  // and has nothing held. Set to now when a target leaves digest mode, so what
+  // it held goes out as a final digest.
+  digestDueAt     DateTime?           @map("digest_due_at") @db.Timestamptz
   // Paused targets keep their settings but get no deliveries.
   active          Boolean             @default(true)
   // Deliveries in a row that failed for good, across jobs; a success (tests
@@ -752,6 +776,7 @@ model NotificationTarget {
   deliveries NotificationDelivery[]
 
   @@index([workspaceId])
+  @@index([digestDueAt])
   @@map("notification_targets")
 }
 
@@ -760,6 +785,9 @@ enum NotificationDeliveryStatus {
   pending
   sent
   failed
+  // A review waiting for its target's next digest; never sent on its own, and
+  // deleted once the digest that covers it is queued.
+  held
 
   @@map("notification_delivery_status")
 }

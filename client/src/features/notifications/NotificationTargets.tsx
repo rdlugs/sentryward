@@ -83,11 +83,12 @@ import {
   type NotificationEvent,
   type NotificationKind,
   type MinSeverity,
+  type DeliverySettings,
   type NotificationTarget,
   type TargetFilters,
 } from "./api"
 import { DeliveriesSheet, LastDeliveryCell, TargetActiveSwitch, TargetName } from "./components"
-import { causeHint, failingTargets } from "./delivery"
+import { causeHint, failingTargets, hourLabel, WEEKDAYS } from "./delivery"
 import { FailingTargets } from "./FailingTargets"
 
 const eventsSchema = z
@@ -129,6 +130,68 @@ function scopeDefaults(target?: NotificationTarget): ScopeInput {
   }
 }
 
+// Delivery as the form holds it: selects work in strings, so the hour and
+// weekday are converted by toDelivery.
+const deliveryFields = {
+  deliveryMode: z.enum(["each", "daily", "weekly"]),
+  digestHour: z.string(),
+  digestWeekday: z.string(),
+  digestTimeZone: z.string().min(1, "Choose a timezone"),
+}
+type DeliveryInput = z.infer<z.ZodObject<typeof deliveryFields>>
+
+function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+function toDelivery({ deliveryMode, digestHour, digestWeekday, digestTimeZone }: DeliveryInput): DeliverySettings {
+  if (deliveryMode === "each") return { mode: "each" }
+  const hour = Number(digestHour)
+  if (deliveryMode === "daily") return { mode: "daily", hour, timeZone: digestTimeZone }
+  return { mode: "weekly", hour, weekday: Number(digestWeekday), timeZone: digestTimeZone }
+}
+
+// A new target starts on each review, with a digest at 09:00 Monday in the
+// browser's timezone ready if digests are chosen.
+function deliveryDefaults(target?: NotificationTarget): DeliveryInput {
+  const delivery = target?.delivery
+  return {
+    deliveryMode: delivery?.mode ?? "each",
+    digestHour: String(delivery?.hour ?? 9),
+    digestWeekday: String(delivery?.weekday ?? 1),
+    digestTimeZone: delivery?.timeZone ?? browserTimeZone(),
+  }
+}
+
+// Saving the same choice again would restart the digest period, so an edit
+// sends delivery only when it changed.
+function sameDelivery(a: DeliverySettings, target: NotificationTarget) {
+  const b = target.delivery
+  if (a.mode !== b.mode) return false
+  if (a.mode === "each") return true
+  return a.hour === b.hour && a.timeZone === b.timeZone && (a.mode !== "weekly" || a.weekday === b.weekday)
+}
+
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, hour) => ({ value: String(hour), label: hourLabel(hour) }))
+const WEEKDAY_OPTIONS = [1, 2, 3, 4, 5, 6, 0].map((day) => ({ value: String(day), label: WEEKDAYS[day]! }))
+
+let timeZones: string[] | null = null
+function timeZoneOptions(current: string) {
+  if (!timeZones) {
+    try {
+      timeZones = Intl.supportedValuesOf("timeZone")
+    } catch {
+      timeZones = []
+    }
+    if (!timeZones.includes("UTC")) timeZones = ["UTC", ...timeZones]
+  }
+  return timeZones.includes(current) ? timeZones : [current, ...timeZones]
+}
+
 const SEVERITY_OPTIONS: { value: "any" | MinSeverity; label: string }[] = [
   { value: "any", label: "Any" },
   ...(Object.keys(MIN_SEVERITY_LABELS) as MinSeverity[]).map((value) => ({
@@ -145,6 +208,7 @@ const createSchema = z
     events: eventsSchema,
     recipientIds: z.array(z.string()),
     ...scopeFields,
+    ...deliveryFields,
   })
   .superRefine((data, ctx) => {
     checkScope(data, ctx)
@@ -164,6 +228,7 @@ const editSchema = z
     events: eventsSchema,
     recipientIds: z.array(z.string()),
     ...scopeFields,
+    ...deliveryFields,
   })
   .superRefine(checkScope)
 type EditInput = z.infer<typeof editSchema>
@@ -334,6 +399,99 @@ function ScopeFields<T extends FieldValues & ScopeInput>({ control }: { control:
   )
 }
 
+function OptionSelect({
+  id,
+  label,
+  value,
+  onChange,
+  onBlur,
+  options,
+}: {
+  id: string
+  label: string
+  value: string
+  onChange: (value: string) => void
+  onBlur: () => void
+  options: { value: string; label: string }[]
+}) {
+  return (
+    <Field>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger id={id} className="w-full" onBlur={onBlur}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent position="popper" className="max-h-72">
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </Field>
+  )
+}
+
+const MODE_OPTIONS = [
+  { value: "each", label: "Each review" },
+  { value: "daily", label: "Daily digest" },
+  { value: "weekly", label: "Weekly digest" },
+]
+
+// Each review, or a daily or weekly digest at a chosen hour and timezone.
+function DeliveryFields<T extends FieldValues & DeliveryInput>({ control }: { control: Control<T> }) {
+  const mode = useWatch({ control, name: "deliveryMode" as Path<T> })
+  return (
+    <FieldSet>
+      <FieldLegend variant="label">Delivery</FieldLegend>
+      <FieldDescription>
+        A digest sums up the period&apos;s reviews that match the events and scope above, and is not sent when there
+        were none.
+      </FieldDescription>
+      <Controller
+        control={control}
+        name={"deliveryMode" as Path<T>}
+        render={({ field }) => (
+          <OptionSelect id="notification-delivery-mode" label="Send" options={MODE_OPTIONS} {...field} />
+        )}
+      />
+      {mode !== "each" && (
+        <>
+          {mode === "weekly" && (
+            <Controller
+              control={control}
+              name={"digestWeekday" as Path<T>}
+              render={({ field }) => (
+                <OptionSelect id="notification-digest-weekday" label="Day" options={WEEKDAY_OPTIONS} {...field} />
+              )}
+            />
+          )}
+          <Controller
+            control={control}
+            name={"digestHour" as Path<T>}
+            render={({ field }) => (
+              <OptionSelect id="notification-digest-hour" label="Time" options={HOUR_OPTIONS} {...field} />
+            )}
+          />
+          <Controller
+            control={control}
+            name={"digestTimeZone" as Path<T>}
+            render={({ field }) => (
+              <OptionSelect
+                id="notification-digest-timezone"
+                label="Timezone"
+                options={timeZoneOptions(field.value).map((zone) => ({ value: zone, label: zone }))}
+                {...field}
+              />
+            )}
+          />
+        </>
+      )}
+    </FieldSet>
+  )
+}
+
 function memberOptions(members: Member[] | undefined) {
   return (members ?? []).map((member) => ({ value: member.id, label: member.name, description: member.email }))
 }
@@ -399,13 +557,14 @@ function AddTargetSheet({
       events: ["blocked", "failed"],
       recipientIds: [],
       ...scopeDefaults(),
+      ...deliveryDefaults(),
     },
   })
   const kind = useWatch({ control: form.control, name: "kind" })
 
   async function onSubmit(input: CreateInput) {
     const { kind, name, url, events, recipientIds } = input
-    const filters = toFilters(input)
+    const filters = { ...toFilters(input), delivery: toDelivery(input) }
     try {
       const result = await createTarget.mutateAsync(
         kind === "email"
@@ -479,6 +638,7 @@ function AddTargetSheet({
               )}
               <CheckboxList control={form.control} name="events" legend="Events" options={EVENT_OPTIONS} />
               <ScopeFields control={form.control} />
+              <DeliveryFields control={form.control} />
             </div>
             <SheetFooter className={FOOTER_CLASS}>
               <SheetClose asChild>
@@ -515,11 +675,13 @@ function EditTargetSheet({
       events: target.events,
       recipientIds: target.recipientIds,
       ...scopeDefaults(target),
+      ...deliveryDefaults(target),
     },
   })
 
   async function onSubmit(input: EditInput) {
     const { name, events, recipientIds } = input
+    const delivery = toDelivery(input)
     if (target.kind === "email" && recipientIds.length === 0) {
       form.setError("recipientIds", { message: "Choose at least one member" })
       return
@@ -531,6 +693,7 @@ function EditTargetSheet({
         events,
         ...(target.kind === "email" ? { recipientIds } : {}),
         ...toFilters(input),
+        ...(sameDelivery(delivery, target) ? {} : { delivery }),
       })
       toast.success(`Saved ${name}`)
       onOpenChange(false)
@@ -570,6 +733,7 @@ function EditTargetSheet({
             )}
             <CheckboxList control={form.control} name="events" legend="Events" options={EVENT_OPTIONS} />
             <ScopeFields control={form.control} />
+            <DeliveryFields control={form.control} />
           </div>
           <SheetFooter className={FOOTER_CLASS}>
             <SheetClose asChild>

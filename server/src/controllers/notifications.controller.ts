@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import type { Prisma } from "../generated/prisma/client.ts";
+import type { NotificationTarget, Prisma } from "../generated/prisma/client.ts";
 import { encrypt } from "../lib/crypto.ts";
 import { assertSafeUrl } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
@@ -7,11 +7,13 @@ import { mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
 import {
   createNotificationSchema,
+  type DeliveryInput,
   deliveriesQuerySchema,
   notificationParamsSchema,
   notificationSettingsSchema,
   updateNotificationSchema,
 } from "../schemas/notifications.schema.ts";
+import { nextDigestAt } from "../services/digestSchedule.ts";
 import {
   DELIVERY_ORDER,
   deliveryStates,
@@ -60,6 +62,36 @@ async function assertRepositories(tx: Prisma.TransactionClient, workspaceId: str
   }
 }
 
+// The stored form of a delivery choice, and when the next digest is due.
+// Switching to digests (or changing their schedule) starts counting from now;
+// reviews already held carry over into the next digest. Switching back to one
+// delivery per review keeps the schedule fields (so the form can offer them
+// again) and makes the target due at once, so whatever it held goes out as a
+// final digest on the worker's next poll. Pass the target being updated, if
+// any.
+function deliveryData(input: DeliveryInput, current: NotificationTarget | null, now = new Date()) {
+  if (input.mode === "each") {
+    const wasDigest = current !== null && current.deliveryMode !== "each";
+    return { deliveryMode: input.mode, ...(wasDigest ? { digestDueAt: now } : {}) };
+  }
+  const schedule = {
+    deliveryMode: input.mode,
+    digestHour: input.hour,
+    digestWeekday: input.mode === "weekly" ? input.weekday : null,
+    digestTimeZone: input.timeZone,
+  };
+  // A target switched back to each review still owes a final digest until the
+  // worker builds it (digestDueAt set); coming back to digests before then
+  // keeps that period, so its held reviews go out in the next digest under
+  // the right "from".
+  const startsPeriod = current === null || (current.deliveryMode === "each" && current.digestDueAt === null);
+  return {
+    ...schedule,
+    digestDueAt: nextDigestAt(schedule, now),
+    ...(startsPeriod ? { digestSince: now } : {}),
+  };
+}
+
 export async function listNotifications(req: Request, res: Response) {
   const [targets, workspace] = await Promise.all([
     prisma.notificationTarget.findMany({ where: { workspaceId: req.workspaceId }, orderBy: { createdAt: "asc" } }),
@@ -68,7 +100,9 @@ export async function listNotifications(req: Request, res: Response) {
   const states = await deliveryStates(targets.map((target) => target.id));
   // mailConfigured lets the dashboard explain why email targets cannot be added.
   res.json({
-    targets: targets.map((target) => publicTarget(target, states.last(target.id), states.pending(target.id))),
+    targets: targets.map((target) =>
+      publicTarget(target, states.last(target.id), states.pending(target.id), states.held(target.id)),
+    ),
     mailConfigured: mailer.configured(),
     settings: { autoPauseAfter: workspace.notifyAutoPauseAfter },
   });
@@ -91,7 +125,8 @@ export async function updateNotificationSettings(req: Request, res: Response) {
 export async function listDeliveries(req: Request, res: Response) {
   const target = await loadTarget(req);
   const { page, limit } = deliveriesQuerySchema.parse(req.query);
-  const where = { targetId: target.id };
+  // Reviews held for a digest are not deliveries yet; the digest is.
+  const where = { targetId: target.id, status: { not: "held" as const } };
   const [deliveries, total] = await prisma.$transaction([
     prisma.notificationDelivery.findMany({
       where,
@@ -118,6 +153,7 @@ export async function createNotification(req: Request, res: Response) {
     repositoryIds: input.repositoryIds,
     minSeverity: input.minSeverity,
     onlyVerdictChanges: input.onlyVerdictChanges,
+    ...deliveryData(input.delivery, null),
   };
 
   if (input.kind === "email") {
@@ -174,8 +210,10 @@ export async function updateNotification(req: Request, res: Response) {
   // reason stays until repositories are saved, or switching it off and on
   // again would get round the check above.
   const clearReason = input.active !== undefined ? !scopePaused : target.pausedReason === SCOPE_REASON && !scopePaused;
+  const { delivery, ...fields } = input;
   const data = {
-    ...input,
+    ...fields,
+    ...(delivery ? deliveryData(delivery, target) : {}),
     ...(input.active !== undefined ? { consecutiveFailures: 0 } : {}),
     ...(clearReason ? { pausedReason: null } : {}),
   };
@@ -187,7 +225,9 @@ export async function updateNotification(req: Request, res: Response) {
     return row;
   });
   const states = await deliveryStates([updated.id]);
-  res.json({ target: publicTarget(updated, states.last(updated.id), states.pending(updated.id)) });
+  res.json({
+    target: publicTarget(updated, states.last(updated.id), states.pending(updated.id), states.held(updated.id)),
+  });
 }
 
 // Sends a sample; a delivery that fails is reported as the result, not an error.

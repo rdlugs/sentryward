@@ -218,8 +218,12 @@ export async function pruneDeliveries(
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - days * DAY_MS);
   // Pending rows are still being sent; giving up bounds how long they last.
+  // Held rows wait for their digest, which deletes them, so the fixed window
+  // leaves them alone. A scoped pass is a workspace's privacy retention,
+  // which wins over a complete digest: a held row carries forge text (titles,
+  // errors) about a review that pass has already deleted.
   const where: Prisma.NotificationDeliveryWhereInput = {
-    status: { not: "pending" },
+    status: { notIn: workspaceIds ? ["pending"] : ["pending", "held"] },
     createdAt: { lt: cutoff },
     ...(workspaceIds ? { target: { workspaceId: { in: workspaceIds } } } : {}),
   };
@@ -239,7 +243,7 @@ export async function pruneDeliveries(
         SELECT id FROM (
           SELECT id, row_number() OVER (PARTITION BY target_id ORDER BY created_at DESC, id DESC) AS rank
           FROM notification_deliveries
-          WHERE status <> 'pending'
+          WHERE status NOT IN ('pending', 'held')
         ) ranked
         WHERE rank > ${DELIVERIES_PER_TARGET}
         LIMIT ${batchSize}

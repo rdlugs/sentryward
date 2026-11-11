@@ -14,8 +14,10 @@ import { assertSafeUrl } from "../lib/hostSafety.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
+import { plural } from "../review/core/plural.ts";
 import { atLeast, SEVERITIES } from "../review/core/severity.ts";
 import type { ResultSummary } from "../review/render/json.ts";
+import { formatDigestTime } from "./digestSchedule.ts";
 
 export const SIGNATURE_HEADER = "X-Sentryward-Signature";
 export const EVENT_HEADER = "X-Sentryward-Event";
@@ -39,6 +41,196 @@ export interface NotificationPayload {
   repository: { provider: string; fullPath: string };
   change: { number: number; title: string | null; url: string | null };
   findings: { total: number; bySeverity: ResultSummary["bySeverity"] } | null;
+}
+
+// A digest: what a target in daily or weekly mode gets instead of one
+// delivery per review, built by worker/digests.ts from the reviews it held.
+export interface DigestPayload {
+  event: "digest";
+  // The target's schedule, or null for the final digest sent when a target
+  // goes back to one delivery per review.
+  schedule: "daily" | "weekly" | null;
+  period: { from: string; to: string; timeZone: string };
+  counts: {
+    reviews: number;
+    failed: number;
+    resolved: number;
+    byVerdict: { pass: number; blocked: number; error: number };
+  };
+  // Repositories by blocked reviews in the period, most first.
+  topBlockedRepositories: { provider: string; fullPath: string; blocked: number }[];
+  // Changes whose newest review was blocked, at most DIGEST_BLOCKED_LIMIT, with
+  // `blockedTruncated` counting those left out.
+  blocked: NotificationPayload[];
+  blockedTruncated: number;
+  // Every review, blocked and failed first, then the rest, each oldest first;
+  // at most DIGEST_REVIEW_LIMIT, with `truncated` counting those left out.
+  // Up to DIGEST_FAILED_RESERVE of those places are kept for failed reviews,
+  // so a busy period of blocked ones cannot leave the failures out.
+  reviews: NotificationPayload[];
+  truncated: number;
+}
+
+// What a delivery row carries and deliver() sends.
+export type DeliveryPayload = NotificationPayload | DigestPayload;
+
+export const DIGEST_REVIEW_LIMIT = 200;
+// Blocked entries repeat payloads already in `reviews`, so they get a smaller
+// cap of their own to keep a webhook body well short of doubling.
+export const DIGEST_BLOCKED_LIMIT = 50;
+// Places in `reviews` kept for failed reviews: they come after blocked ones,
+// and the failure details the email and Slack digests show are read from it.
+export const DIGEST_FAILED_RESERVE = 50;
+const TOP_BLOCKED_REPOSITORIES = 5;
+
+const DIGEST_PRIORITY: Record<string, number> = { blocked: 0, failed: 1, resolved: 2, completed: 3 };
+const FAILED_PRIORITY = DIGEST_PRIORITY.failed!;
+
+export type DigestPeriod = { from: Date; to: Date; timeZone: string; schedule: DigestPayload["schedule"] };
+
+// "github:acme/api#42": a change, across the reviews a digest holds.
+export function changeKey(review: Pick<NotificationPayload, "repository" | "change">): string {
+  return `${review.repository.provider}:${review.repository.fullPath}#${review.change.number}`;
+}
+
+// Rolls held reviews into one digest a page at a time (oldest first), so a
+// busy week never has to sit in memory at once. Counts cover every review;
+// only the lists are capped, and only the first DIGEST_REVIEW_LIMIT of each
+// priority are kept as they arrive. Which changes are still blocked needs the
+// newest review of every change, so the caller works that out in the database
+// (stillBlockedChanges) and hands build() the capped list: what this keeps is
+// bounded by the caps and the number of repositories, not by the period.
+export function createDigestBuilder(period: DigestPeriod) {
+  const counts: DigestPayload["counts"] = {
+    reviews: 0,
+    failed: 0,
+    resolved: 0,
+    byVerdict: { pass: 0, blocked: 0, error: 0 },
+  };
+  const repos = new Map<string, DigestPayload["topBlockedRepositories"][number]>();
+  const byPriority = new Map<number, NotificationPayload[]>();
+  return {
+    add(held: NotificationPayload[]) {
+      for (const review of held) {
+        counts.reviews++;
+        const failed = review.review.status === "failed";
+        if (failed) counts.failed++;
+        if (review.event === "resolved") counts.resolved++;
+        // Failed runs are left out of every verdict figure, so the headline
+        // and the most-blocked list agree, and say nothing about whether the
+        // change is still blocked.
+        const verdict = failed ? null : review.review.verdict;
+        if (verdict) counts.byVerdict[verdict]++;
+        if (verdict === "blocked") {
+          const repoKey = `${review.repository.provider}:${review.repository.fullPath}`;
+          const repo = repos.get(repoKey) ?? { ...review.repository, blocked: 0 };
+          repo.blocked++;
+          repos.set(repoKey, repo);
+        }
+        const priority = DIGEST_PRIORITY[review.event] ?? 4;
+        const list = byPriority.get(priority) ?? [];
+        if (list.length < DIGEST_REVIEW_LIMIT) list.push(review);
+        byPriority.set(priority, list);
+      }
+    },
+    // `blocked`: the still-blocked changes (stillBlockedChanges), already
+    // capped, with `blockedTruncated` counting the rest. `from` overrides the
+    // period's start once the caller knows the oldest review.
+    build({
+      blocked = [],
+      blockedTruncated = 0,
+      from = period.from,
+    }: { blocked?: NotificationPayload[]; blockedTruncated?: number; from?: Date } = {}): DigestPayload {
+      // Failed reviews get their reserved places first; the rest are filled
+      // in priority order, and the list keeps that order.
+      const reserved = Math.min(byPriority.get(FAILED_PRIORITY)?.length ?? 0, DIGEST_FAILED_RESERVE);
+      let room = DIGEST_REVIEW_LIMIT - reserved;
+      const reviews = [...byPriority.entries()]
+        .sort(([a], [b]) => a - b)
+        .flatMap(([priority, list]) => {
+          const base = priority === FAILED_PRIORITY ? reserved : 0;
+          const extra = Math.min(list.length - base, room);
+          room -= extra;
+          return list.slice(0, base + extra);
+        });
+      return {
+        event: "digest",
+        schedule: period.schedule,
+        period: { from: from.toISOString(), to: period.to.toISOString(), timeZone: period.timeZone },
+        counts,
+        topBlockedRepositories: [...repos.values()]
+          .sort((a, b) => b.blocked - a.blocked || a.fullPath.localeCompare(b.fullPath))
+          .slice(0, TOP_BLOCKED_REPOSITORIES),
+        blocked,
+        blockedTruncated,
+        reviews,
+        truncated: Math.max(0, counts.reviews - DIGEST_REVIEW_LIMIT),
+      };
+    },
+  };
+}
+
+// One call for a list already in memory (tests, small digests).
+export function digestPayloadFor(held: NotificationPayload[], period: DigestPeriod): DigestPayload {
+  const builder = createDigestBuilder(period);
+  builder.add(held);
+  return builder.build();
+}
+
+// The changes a target's held reviews (up to `until`) still show as blocked,
+// oldest first, at most `limit` with `truncated` counting the rest. A change
+// counts when its newest held review that did not fail was blocked and no
+// newer finished review of it, held or not, says otherwise: a target only
+// holds the reviews its events let through, so a pass after a block may never
+// have been held. A change whose jobs retention already deleted is left as the
+// held review says. Worked out in the database, so a period with many changes
+// never has them all in memory; call it before the held rows are deleted.
+export async function stillBlockedChanges(
+  tx: Prisma.TransactionClient,
+  targetId: string,
+  until: Date,
+  limit: number,
+): Promise<{ blocked: NotificationPayload[]; truncated: number }> {
+  // Ordered like the builder reads held rows (created_at, id), newest last,
+  // so the same review is taken as the change's latest.
+  const rows = await tx.$queryRaw<{ payload: NotificationPayload; total: number }[]>`
+    WITH latest AS (
+      SELECT DISTINCT ON (
+        d.payload->'repository'->>'provider',
+        d.payload->'repository'->>'fullPath',
+        d.payload->'change'->>'number'
+      ) d.id, d.job_id, d.payload, d.created_at
+      FROM notification_deliveries d
+      WHERE d.target_id = ${targetId}::uuid
+        AND d.status = 'held'
+        AND d.created_at <= ${until}
+        AND d.payload->'review'->>'status' IS DISTINCT FROM 'failed'
+      ORDER BY
+        d.payload->'repository'->>'provider',
+        d.payload->'repository'->>'fullPath',
+        d.payload->'change'->>'number',
+        d.created_at DESC,
+        d.id DESC
+    )
+    SELECT l.payload, (count(*) OVER ())::int AS total
+    FROM latest l
+    LEFT JOIN review_jobs b ON b.id = l.job_id
+    LEFT JOIN LATERAL (
+      SELECT true AS found, r.verdict::text AS verdict
+      FROM review_jobs r
+      WHERE r.repository_id = b.repository_id
+        AND r.number = b.number
+        AND r.status IN ('completed', 'partial')
+        AND r.finished_at <= ${until}
+      ORDER BY r.finished_at DESC, r.created_at DESC
+      LIMIT 1
+    ) newest ON true
+    WHERE l.payload->'review'->>'verdict' = 'blocked'
+      AND (newest.found IS NULL OR newest.verdict = 'blocked')
+    ORDER BY l.created_at, l.id
+    LIMIT ${limit}
+  `;
+  return { blocked: rows.map((row) => row.payload), truncated: Math.max(0, (rows[0]?.total ?? 0) - rows.length) };
 }
 
 type Verdict = ReviewJob["verdict"];
@@ -208,6 +400,105 @@ export function escapeSlack(value: string): string {
   return value.replace(/[&<>]/g, (c) => SLACK_ENTITIES[c]!);
 }
 
+// Our own words and numbers only, so it is safe as a subject and as mrkdwn.
+function digestHeadline(payload: DigestPayload): string {
+  const name = payload.schedule === "daily" ? "Daily digest" : payload.schedule === "weekly" ? "Weekly digest" : "Digest";
+  const { counts } = payload;
+  const parts = [plural(counts.reviews, "review")];
+  if (counts.byVerdict.blocked) parts.push(`${counts.byVerdict.blocked} blocked`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  if (counts.resolved) parts.push(`${counts.resolved} resolved`);
+  if (counts.byVerdict.pass) parts.push(`${counts.byVerdict.pass} passed`);
+  return `${name}: ${parts.join(", ")}`;
+}
+
+function digestPeriod(payload: DigestPayload): string {
+  const { from, to, timeZone } = payload.period;
+  return `${formatDigestTime(new Date(from), timeZone)} to ${formatDigestTime(new Date(to), timeZone)} (${timeZone})`;
+}
+
+// "acme/api#42 Add login", from forge text: plain contexts only.
+function changeLabel(review: NotificationPayload): string {
+  const title = review.change.title ? ` ${oneLine(review.change.title)}` : "";
+  return `${oneLine(review.repository.fullPath)}#${review.change.number}${title}`;
+}
+
+function topRepositories(payload: DigestPayload): string | null {
+  if (!payload.topBlockedRepositories.length) return null;
+  const list = payload.topBlockedRepositories.map((repo) => `${oneLine(repo.fullPath)} (${repo.blocked})`);
+  return `Most blocked: ${list.join(", ")}`;
+}
+
+function failedReviews(payload: DigestPayload): NotificationPayload[] {
+  return payload.reviews.filter((review) => review.review.status === "failed");
+}
+
+// Slack allows 50 blocks a message; these caps keep a digest well under it.
+const SLACK_DIGEST_BLOCKED = 20;
+const SLACK_DIGEST_FAILED = 5;
+
+// Same rule as slackMessage: forge text only in plain_text, mrkdwn only for
+// our own links.
+function slackDigest(payload: DigestPayload) {
+  const headline = digestHeadline(payload);
+  const blocks: object[] = [
+    { type: "section", text: plainText(headline) },
+    { type: "context", elements: [plainText(digestPeriod(payload))] },
+  ];
+  const top = topRepositories(payload);
+  if (top) blocks.push({ type: "section", text: plainText(top) });
+  const item = (review: NotificationPayload, label: string) => ({
+    type: "context",
+    elements: [plainText(label), { type: "mrkdwn", text: `<${review.review.url}|View review>` }],
+  });
+  if (payload.blocked.length) {
+    blocks.push({ type: "section", text: plainText("Still blocked") });
+    for (const review of payload.blocked.slice(0, SLACK_DIGEST_BLOCKED)) blocks.push(item(review, changeLabel(review)));
+    const shown = Math.min(payload.blocked.length, SLACK_DIGEST_BLOCKED);
+    const more = payload.blocked.length + payload.blockedTruncated - shown;
+    if (more > 0) blocks.push({ type: "context", elements: [plainText(`and ${more} more`)] });
+  }
+  const failed = failedReviews(payload);
+  if (failed.length) {
+    blocks.push({ type: "section", text: plainText("Failed") });
+    for (const review of failed.slice(0, SLACK_DIGEST_FAILED)) {
+      blocks.push(item(review, `${changeLabel(review)}: ${oneLine(review.review.error ?? "no reason recorded")}`));
+    }
+    const more = payload.counts.failed - Math.min(failed.length, SLACK_DIGEST_FAILED);
+    if (more > 0) blocks.push({ type: "context", elements: [plainText(`and ${more} more`)] });
+  }
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `<${env.CLIENT_ORIGIN}/reviews|All reviews>` }] });
+  return { text: escapeSlack(headline), blocks };
+}
+
+// Plain text, so forge text needs no escaping; each entry is flattened to one
+// line so a title cannot pass for a heading of ours.
+function digestEmail(payload: DigestPayload): { subject: string; text: string } {
+  const subject = digestHeadline(payload);
+  const lines = [subject, digestPeriod(payload), ""];
+  const top = topRepositories(payload);
+  if (top) lines.push(top, "");
+  if (payload.blocked.length) {
+    lines.push("Still blocked:");
+    for (const review of payload.blocked) {
+      lines.push(`- ${changeLabel(review)}`, `  ${review.change.url ?? review.review.url}`, `  Review: ${review.review.url}`);
+    }
+    if (payload.blockedTruncated) lines.push(`${plural(payload.blockedTruncated, "more blocked change")} not listed.`);
+    lines.push("");
+  }
+  const failed = failedReviews(payload);
+  if (failed.length) {
+    lines.push("Failed:");
+    for (const review of failed) {
+      lines.push(`- ${changeLabel(review)}: ${oneLine(review.review.error ?? "no reason recorded")}`, `  ${review.review.url}`);
+    }
+    lines.push("");
+  }
+  if (payload.truncated) lines.push(`${plural(payload.truncated, "more review")} not listed.`, "");
+  lines.push(`All reviews: ${env.CLIENT_ORIGIN}/reviews`, "");
+  return { subject, text: lines.join("\n") };
+}
+
 // "sha256=<hex>" over the exact body sent, as GitHub signs its webhooks.
 export function signature(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
@@ -302,7 +593,7 @@ function targetUrl(target: NotificationTarget): string {
 }
 
 // Throws on failure; callers decide whether that is logged or reported.
-export async function deliver(target: NotificationTarget, workspaceId: string, payload: NotificationPayload) {
+export async function deliver(target: NotificationTarget, workspaceId: string, payload: DeliveryPayload) {
   switch (target.kind) {
     case "webhook": {
       if (!target.encryptedSecret) throw new PermanentDeliveryError("No signing secret stored");
@@ -314,7 +605,8 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
       return;
     }
     case "slack": {
-      await post(targetUrl(target), JSON.stringify(slackMessage(payload)));
+      const message = payload.event === "digest" ? slackDigest(payload) : slackMessage(payload);
+      await post(targetUrl(target), JSON.stringify(message));
       return;
     }
     case "email": {
@@ -329,8 +621,10 @@ export async function deliver(target: NotificationTarget, workspaceId: string, p
       if (!members.length) {
         throw new PermanentDeliveryError("None of this target's recipients are members of the workspace any more");
       }
-      const subject = describe(payload);
-      const text = `${subject}\n\n${payload.review.url}\n`;
+      const { subject, text } =
+        payload.event === "digest"
+          ? digestEmail(payload)
+          : { subject: describe(payload), text: `${describe(payload)}\n\n${payload.review.url}\n` };
       // One message each, so recipients do not see each other's addresses.
       const results = await Promise.allSettled(members.map(({ user }) => mailer.send({ to: user.email, subject, text })));
       const failed = results.filter((result) => result.status === "rejected").length;
@@ -516,14 +810,20 @@ export async function notifyJob(jobId: string): Promise<void> {
       const now = new Date();
       await tx.notificationDelivery.createMany({
         data: targets.map(({ target, event }) => {
+          // A digest target holds the row until its digest is built
+          // (worker/digests.ts); the filters above already chose it. One
+          // with no due time (a schedule left incomplete outside the API)
+          // would never be picked up, so it gets each review instead of
+          // holding rows nothing sends.
+          const digest = target.deliveryMode !== "each" && target.digestDueAt !== null;
           return {
             targetId: target.id,
             jobId: job.id,
             event,
-            status: "pending" as const,
+            status: digest ? ("held" as const) : ("pending" as const),
             attempts: 0,
             payload: payloadFor(job, job.repository, event) as unknown as Prisma.InputJsonValue,
-            nextAttemptAt: now,
+            nextAttemptAt: digest ? null : now,
             createdAt: now,
           };
         }),
@@ -572,8 +872,10 @@ export const PAUSED_BEFORE_SEND = "Target was paused before this could be sent";
 // Fails a target's queued deliveries when it is paused, so a pause drops them
 // for good rather than until a resume (see notifyJob). Rows a worker is sending
 // right now are left to it: runDelivery settles them rather than rescheduling
-// once it sees the target paused. Call in the transaction that pauses.
-export function dropPendingDeliveries(tx: Prisma.TransactionClient, targetId: string, now = new Date()) {
+// once it sees the target paused. Reviews held for a digest are deleted, as
+// they never show in the history. Call in the transaction that pauses.
+export async function dropPendingDeliveries(tx: Prisma.TransactionClient, targetId: string, now = new Date()) {
+  await tx.notificationDelivery.deleteMany({ where: { targetId, status: "held" } });
   return tx.notificationDelivery.updateMany({
     where: { targetId, status: "pending", lockedAt: null },
     data: {
@@ -736,7 +1038,7 @@ export async function lastDeliveries(targetIds: string[]): Promise<Map<string, L
   >`
     SELECT DISTINCT ON (target_id) target_id, status, event, http_status, error, attempts, next_attempt_at, created_at
     FROM notification_deliveries
-    WHERE target_id = ANY(${targetIds}::uuid[])
+    WHERE target_id = ANY(${targetIds}::uuid[]) AND status <> 'held'
     ORDER BY target_id, created_at DESC, id DESC
   `;
   return new Map(
@@ -804,11 +1106,32 @@ export async function pendingDeliveries(targetIds: string[]): Promise<Map<string
   );
 }
 
-// Both per-target delivery views the dashboard shows, for a list of targets.
-export async function deliveryStates(targetIds: string[]) {
-  const [last, pending] = await Promise.all([lastDeliveries(targetIds), pendingDeliveries(targetIds)]);
-  return { last: (id: string) => last.get(id) ?? null, pending: (id: string) => pending.get(id) ?? null };
+// How many reviews each target holds for its next digest.
+export async function heldCounts(targetIds: string[]): Promise<Map<string, number>> {
+  if (!targetIds.length) return new Map();
+  const rows = await prisma.notificationDelivery.groupBy({
+    by: ["targetId"],
+    where: { targetId: { in: targetIds }, status: "held" },
+    _count: { _all: true },
+  });
+  return new Map(rows.map((row) => [row.targetId, row._count._all]));
 }
+
+// The per-target delivery views the dashboard shows, for a list of targets.
+export async function deliveryStates(targetIds: string[]) {
+  const [last, pending, held] = await Promise.all([
+    lastDeliveries(targetIds),
+    pendingDeliveries(targetIds),
+    heldCounts(targetIds),
+  ]);
+  return {
+    last: (id: string) => last.get(id) ?? null,
+    pending: (id: string) => pending.get(id) ?? null,
+    held: (id: string) => held.get(id) ?? 0,
+  };
+}
+
+export type TargetStates = Awaited<ReturnType<typeof deliveryStates>>;
 
 export function publicDelivery(delivery: NotificationDelivery) {
   return {
@@ -831,6 +1154,7 @@ export function publicTarget(
   target: NotificationTarget,
   lastDelivery: LastDelivery | null = null,
   pending: PendingDeliveries | null = null,
+  held = 0,
 ) {
   let host: string | null = null;
   let undecryptable = false;
@@ -853,6 +1177,16 @@ export function publicTarget(
     repositoryIds: target.repositoryIds,
     minSeverity: target.minSeverity,
     onlyVerdictChanges: target.onlyVerdictChanges,
+    delivery: {
+      mode: target.deliveryMode,
+      hour: target.digestHour,
+      weekday: target.digestWeekday,
+      timeZone: target.digestTimeZone,
+      // Only while digests are on: a final digest after switching back is
+      // an implementation detail, not a schedule.
+      nextDigestAt: target.deliveryMode === "each" ? null : target.digestDueAt,
+      held,
+    },
     active: target.active,
     pausedReason: target.pausedReason,
     pauseCause: pauseCause(target.pausedReason),

@@ -11,6 +11,7 @@ import type {
   ReviewResult,
   Walkthrough,
 } from "../core/models.ts";
+import { plural } from "../core/plural.ts";
 import { SEVERITIES, type Severity } from "../core/severity.ts";
 import { DESCRIPTION_SUMMARY_END, DESCRIPTION_SUMMARY_START, SUMMARY_MARKER } from "../core/markers.ts";
 import { agentPromptBlock, allFindingsPrompt, findingPrompt } from "./agentPrompt.ts";
@@ -168,10 +169,6 @@ function indexLine(finding: Located & { severity: Severity; title: string }): st
 
 function bucketSummary(bucket: Bucket, count: number): string {
   return `<summary>${BUCKET_ICON[bucket]} ${BUCKET_TITLE[bucket]} (${count})</summary>`;
-}
-
-function plural(count: number, word: string, words = `${word}s`): string {
-  return `${count} ${count === 1 ? word : words}`;
 }
 
 export function fence(code: string, language = ""): string {

@@ -19,6 +19,7 @@ const webhook = {
   repositoryIds: [],
   minSeverity: null,
   onlyVerdictChanges: false,
+  delivery: { mode: "each", hour: null, weekday: null, timeZone: null, nextDigestAt: null, held: 0 },
   active: true,
   pausedReason: null,
   pauseCause: null,
@@ -125,6 +126,7 @@ describe("Notifications", () => {
       repositoryIds: [],
       minSeverity: null,
       onlyVerdictChanges: false,
+      delivery: { mode: "each" },
     })
   })
 
@@ -166,6 +168,7 @@ describe("Notifications", () => {
       repositoryIds: ["r1"],
       minSeverity: "major",
       onlyVerdictChanges: true,
+      delivery: { mode: "each" },
     })
   })
 
@@ -203,6 +206,55 @@ describe("Notifications", () => {
       onlyVerdictChanges: false,
     })
   })
+
+  it("adds a weekly digest target and shows its schedule under its name", async () => {
+    const digest = {
+      ...webhook,
+      delivery: {
+        mode: "weekly",
+        hour: 8,
+        weekday: 5,
+        timeZone: "UTC",
+        nextDigestAt: "2026-11-13T08:00:00.000Z",
+        held: 3,
+      },
+    }
+    let created = false
+    const fetchSpy = mockApi({
+      "GET /api/notifications": () =>
+        jsonResponse(200, { targets: created ? [digest] : [], mailConfigured: false, settings }),
+      "POST /api/notifications": () => {
+        created = true
+        return jsonResponse(201, { target: digest, secret: "abc123" })
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("Name"), "CI alerts")
+    await userEvent.type(within(sheet).getByLabelText("URL"), "https://ci.example.com/hook")
+    // Digest-only fields stay hidden until a digest is chosen.
+    expect(within(sheet).queryByRole("combobox", { name: "Time" })).not.toBeInTheDocument()
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Send" }))
+    await userEvent.click(screen.getByRole("option", { name: "Weekly digest" }))
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Day" }))
+    await userEvent.click(screen.getByRole("option", { name: "Friday" }))
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Time" }))
+    await userEvent.click(screen.getByRole("option", { name: "08:00" }))
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Timezone" }))
+    await userEvent.click(screen.getByRole("option", { name: "UTC" }))
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
+
+    expect(await within(sheet).findByLabelText("Signing secret")).toBeInTheDocument()
+    const [, init] = calls(fetchSpy, "POST", "/api/notifications")[0]!
+    expect(JSON.parse(String(init?.body)).delivery).toEqual({ mode: "weekly", hour: 8, weekday: 5, timeZone: "UTC" })
+    expect(
+      await screen.findByText("Weekly digest · Fri 08:00 UTC · 3 reviews held", undefined, { timeout: 3000 }),
+    ).toBeInTheDocument()
+    // Four selects to drive; slow under the full suite's load.
+  }, 15_000)
 
   it("asks for repositories again when a target's were all removed", async () => {
     const reason = "Paused: its repositories were removed"
