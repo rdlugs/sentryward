@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidTimeZone } from "../services/digestSchedule.ts";
 import { pageSchema } from "./pagination.ts";
 
 const NOTIFICATION_EVENTS = ["blocked", "failed", "resolved", "completed"] as const;
@@ -23,10 +24,27 @@ const repositoryIds = z
 const minSeverity = z.enum(["minor", "major", "critical"]).nullable();
 const onlyVerdictChanges = z.boolean();
 
+// One delivery per review, or a digest at hour:00 (0-23) in timeZone, weekly
+// on weekday (0 is Sunday).
+const hour = z.number().int().min(0, "Choose an hour").max(23, "Choose an hour");
+const timeZone = z.string().max(100).refine(isValidTimeZone, "Choose a valid timezone");
+const delivery = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("each") }),
+  z.object({ mode: z.literal("daily"), hour, timeZone }),
+  z.object({
+    mode: z.literal("weekly"),
+    hour,
+    timeZone,
+    weekday: z.number().int().min(0, "Choose a day").max(6, "Choose a day"),
+  }),
+]);
+export type DeliveryInput = z.infer<typeof delivery>;
+
 const filters = {
   repositoryIds: repositoryIds.default([]),
   minSeverity: minSeverity.default(null),
   onlyVerdictChanges: onlyVerdictChanges.default(false),
+  delivery: delivery.default({ mode: "each" }),
 };
 
 export const createNotificationSchema = z.discriminatedUnion("kind", [
@@ -45,6 +63,7 @@ export const updateNotificationSchema = z
     repositoryIds: repositoryIds.optional(),
     minSeverity: minSeverity.optional(),
     onlyVerdictChanges: onlyVerdictChanges.optional(),
+    delivery: delivery.optional(),
     active: z.boolean().optional(),
   })
   .refine((data) => Object.values(data).some((value) => value !== undefined), {

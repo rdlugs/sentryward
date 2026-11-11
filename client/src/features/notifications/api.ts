@@ -55,13 +55,35 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   email: "Email",
 }
 
+// How a target gets reviews: one delivery each, or a digest at hour:00 in its
+// own timezone, every day or once a week (weekday 0 is Sunday).
+export type DeliveryMode = "each" | "daily" | "weekly"
+
+export type DeliverySettings =
+  | { mode: "each" }
+  | { mode: "daily"; hour: number; timeZone: string }
+  | { mode: "weekly"; hour: number; weekday: number; timeZone: string }
+
+export interface TargetDelivery {
+  mode: DeliveryMode
+  // Kept after switching back to each review, so the form can offer them again.
+  hour: number | null
+  weekday: number | null
+  timeZone: string | null
+  // When the next digest is built; null when sending each review.
+  nextDigestAt: string | null
+  // Reviews waiting for the next digest.
+  held: number
+}
+
 // Pending: queued, or waiting to be retried after a failed attempt.
 export type DeliveryStatus = "pending" | "sent" | "failed"
 
 // The server's MAX_DELIVERY_ATTEMPTS: a delivery is sent at most this often.
 export const MAX_DELIVERY_ATTEMPTS = 5
-// A NotificationEvent, or "test" for a delivery sent from the dashboard.
-export type DeliveryEvent = NotificationEvent | "test"
+// A NotificationEvent, "test" for a delivery sent from the dashboard, or
+// "digest" for a daily or weekly digest.
+export type DeliveryEvent = NotificationEvent | "test" | "digest"
 
 export interface LastDelivery {
   status: DeliveryStatus
@@ -112,6 +134,7 @@ export interface NotificationTarget extends TargetFilters {
   // Saved under a different server ENCRYPTION_KEY; only adding it again helps.
   undecryptable: boolean
   recipientIds: string[]
+  delivery: TargetDelivery
   // A paused target keeps its settings but gets no deliveries.
   active: boolean
   // Why the server paused it after failed deliveries; null otherwise, and
@@ -130,7 +153,7 @@ export interface NotificationTarget extends TargetFilters {
   updatedAt: string
 }
 
-export type NotificationTargetInput = TargetFilters &
+export type NotificationTargetInput = TargetFilters & { delivery: DeliverySettings } &
   (
     | { kind: "webhook" | "slack"; name: string; events: NotificationEvent[]; url: string }
     | { kind: "email"; name: string; events: NotificationEvent[]; recipientIds: string[] }
@@ -140,6 +163,7 @@ export interface NotificationTargetUpdate extends Partial<TargetFilters> {
   name?: string
   events?: NotificationEvent[]
   recipientIds?: string[]
+  delivery?: DeliverySettings
   active?: boolean
 }
 

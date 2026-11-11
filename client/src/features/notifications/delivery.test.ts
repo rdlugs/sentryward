@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { LastDelivery, NotificationTarget, PendingRetry } from "./api"
 import {
+  deliverySummary,
   causeHint,
   deliveryDetail,
   failingStatus,
@@ -44,6 +45,7 @@ const target = (overrides: Partial<NotificationTarget> = {}): NotificationTarget
   repositoryIds: [],
   minSeverity: null,
   onlyVerdictChanges: false,
+  delivery: { mode: "each", hour: null, weekday: null, timeZone: null, nextDigestAt: null, held: 0 },
   active: true,
   pausedReason: null,
   pauseCause: null,
@@ -170,5 +172,23 @@ describe("scopeSummary", () => {
 
   it("counts the ones it cannot name next to the ones it can", () => {
     expect(scopeSummary(target({ repositoryIds: ["r1", "r2", "r3"] }), names)).toBe("acme/payments +2")
+  })
+})
+
+describe("deliverySummary", () => {
+  const delivery = (overrides: Partial<NotificationTarget["delivery"]>) =>
+    target({ delivery: { ...target().delivery, ...overrides } })
+
+  it("is null for a target sending each review", () => {
+    expect(deliverySummary(delivery({ mode: "each", hour: 9, timeZone: "UTC" }))).toBeNull()
+  })
+
+  it("names the schedule and what is held", () => {
+    expect(deliverySummary(delivery({ mode: "daily", hour: 9, timeZone: "Europe/Berlin" }))).toBe(
+      "Daily digest · 09:00 Europe/Berlin",
+    )
+    expect(deliverySummary(delivery({ mode: "weekly", hour: 17, weekday: 1, timeZone: "UTC", held: 1 }))).toBe(
+      "Weekly digest · Mon 17:00 UTC · 1 review held",
+    )
   })
 })

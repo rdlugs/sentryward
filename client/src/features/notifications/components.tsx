@@ -20,7 +20,7 @@ import {
   type LastDelivery,
   type NotificationTarget,
 } from "./api"
-import { deliveryOutcome, retryNote, scopeSummary } from "./delivery"
+import { deliveryOutcome, deliverySummary, retryNote, scopeSummary } from "./delivery"
 
 // Pieces both tabs of the Notifications page use.
 
@@ -30,6 +30,7 @@ const DELIVERY_EVENT_LABELS: Record<DeliveryEvent, string> = {
   resolved: "Resolved",
   completed: "Completed",
   test: "Test",
+  digest: "Digest",
 }
 
 const OUTCOME_COLORS: Record<LastDelivery["status"], string> = {
@@ -199,10 +200,12 @@ function useRepoNames() {
 
 export function TargetName({ target }: { target: NotificationTarget }) {
   const scope = scopeSummary(target, useRepoNames())
+  const delivery = deliverySummary(target)
   return (
     <div className="flex flex-col gap-1">
       <span className="font-medium">{target.name}</span>
       {scope && <span className="text-xs text-muted-foreground">{scope}</span>}
+      {delivery && <span className="text-xs text-muted-foreground">{delivery}</span>}
       {target.pausedReason && (
         <span className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
           <AlertTriangle className="size-3.5 shrink-0" aria-hidden />

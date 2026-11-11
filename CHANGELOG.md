@@ -10,6 +10,22 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Daily and weekly notification digests (#253). Each target chooses **Each
+  review** (the default) or a daily or weekly digest at an hour (and weekday)
+  in its own IANA timezone, DST included. A digest target holds the reviews
+  that pass its events and scope as `held` outbox rows, and the worker rolls
+  them into one `digest` delivery when due: counts by verdict, failed and
+  resolved reviews, the five most-blocked repositories, the still-blocked
+  changes with links, and the failed reviews (lists capped at 200, counts
+  cover all). Empty periods send nothing; each digest is queued once under a
+  row lock, and a worker that was down catches up on its next poll. Webhooks
+  get `event: "digest"` with the list, Slack one summary message, email a
+  plain-text summary. Pausing drops held reviews; switching back to each
+  review sends them as a final digest. Held reviews stay out of the delivery
+  log and retention. The add and edit panels gain a **Delivery** section, and
+  the list shows the schedule under the target's name. `POST`/`PATCH
+  /api/notifications` accept, and `GET` returns, `delivery` (migration
+  applied on start).
 - Notification targets can be limited by repository and minimum severity
   (#251). A target hears about all repositories (the default) or only the ones
   chosen, and about every review (the default) or only those with at least

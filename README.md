@@ -930,6 +930,27 @@ on until repositories (or All) are saved when editing it. The list shows a
 target's scope under its name, for example "acme/payments · ≥ major · verdict
 changes".
 
+**Digests.** Each target picks how reviews reach it under **Delivery**: **Each
+review** (the default), or a **Daily digest** or **Weekly digest** at a chosen
+hour:00 (and, weekly, a chosen day) in a chosen timezone, which defaults to the
+browser's. A digest target still applies its events and scope to every review,
+but instead of sending each match it holds it in the outbox until the digest is
+due, then sends one message summing up the period: how many reviews, by verdict,
+how many failed and how many were resolved, the five repositories with the most
+blocked reviews, the changes whose newest review in the period was blocked (with
+links to the change and the review), and the failed reviews with their errors.
+The lists stop at 200 reviews (`truncated` counts the rest); the counts cover
+every one. A period with no matching reviews sends nothing. Because held reviews
+are rows in the outbox, a worker that was down at the due time builds the digest
+on its next poll, and each digest is queued exactly once (then sent and retried
+like any other delivery). Times follow daylight saving: an hour skipped by a
+spring-forward change goes out at the first valid time after it. Pausing a
+digest target drops what it held, like any queued delivery. Switching a target
+back to **Each review** sends whatever it held as a final digest on the worker's
+next poll; changing a digest's schedule keeps what is held for the next one. The
+list shows the schedule under the target's name, for example "Weekly digest ·
+Mon 09:00 Europe/Berlin · 3 reviews held".
+
 **Pausing.** Admins can switch a target off in the list to pause its deliveries
 while keeping its events, recipients, URL and secret. Pausing drops deliveries
 rather than holding them: a review that finishes while a target is paused is
@@ -986,12 +1007,33 @@ There are three kinds:
 
   `change.title`, `change.url` and `findings` are `null` for a review that
   failed before it ran. `event` (and the header) is `failed`, `blocked`,
-  `resolved`, `completed` or `test`.
+  `resolved`, `completed`, `test` or `digest`. A digest carries the period's
+  reviews, each in the shape above:
+
+  ```json
+  {
+    "event": "digest",
+    "schedule": "weekly",
+    "period": { "from": "2026-11-02T08:00:00.000Z", "to": "2026-11-09T08:00:00.000Z", "timeZone": "Europe/Berlin" },
+    "counts": { "reviews": 12, "failed": 1, "resolved": 2, "byVerdict": { "pass": 8, "blocked": 3, "error": 0 } },
+    "topBlockedRepositories": [{ "provider": "github", "fullPath": "acme/api", "blocked": 2 }],
+    "blocked": [{ "event": "blocked", "review": { "...": "..." }, "repository": { "...": "..." }, "change": { "...": "..." }, "findings": { "...": "..." } }],
+    "reviews": ["... every review, blocked and failed first ..."],
+    "truncated": 0
+  }
+  ```
+
+  `schedule` is `daily`, `weekly`, or `null` for the final digest sent after a
+  target switches back to each review.
 - **Slack**: an incoming-webhook URL, posted a one-line message linking to the
   review ("Review failed", "Review blocked", "Blocking issues resolved" or
-  "Review completed", with the repository and number).
+  "Review completed", with the repository and number). A digest is one message
+  with the counts, the most blocked repositories, up to 20 still-blocked
+  changes and 5 failed reviews, each linking to its review.
 - **Email**: chosen members of the workspace, through the configured mail
-  transport (`SMTP_URL`). Members who leave are no longer emailed.
+  transport (`SMTP_URL`). Members who leave are no longer emailed. A digest is
+  a plain-text email whose subject sums up the counts (for example "Weekly
+  digest: 12 reviews, 3 blocked, 1 failed, 2 resolved, 8 passed").
 
 **Delivery.** **Send test** posts a sample (`"event": "test"`) and reports the
 outcome; tests are sent once, at once, and never retried. A review's deliveries
@@ -1014,7 +1056,7 @@ that reached some of its recipients is not retried, so nobody gets it twice. A
 delivery the endpoint accepted is never sent again, with one exception: a worker
 that dies after sending but before recording it sends it again once its claim
 goes stale (5 minutes), so a receiver that must not act twice should dedupe on
-`review.id` and `event`. URLs are stored encrypted, and only their
+`review.id` and `event` (for a digest, on `period.from` and `period.to`). URLs are stored encrypted, and only their
 host is ever shown again. In production a URL must be https and resolve only to
 public addresses, the same rule as self-hosted forge hosts, checked when the
 target is saved and again before each delivery; redirects are not followed.
@@ -1026,7 +1068,9 @@ queued. A pending delivery that already failed keeps its last status or error
 and shows when it is tried next. The list's **Last delivery** column shows each
 target's latest one (for example "Sent · 4 minutes ago", "Retrying · 503 · 4
 minutes ago", "Failed · 503 · 1 hour ago", or "Never"), and **View deliveries** in a target's
-menu opens its history, linking each delivery to its review. Admins and members
+menu opens its history, linking each delivery to its review. Reviews a digest
+target is holding are not deliveries yet and do not show; the digest does, once
+queued. Admins and members
 can both read it. Stored errors have the target URL cut out first, since the URL
 can be the credential. The worker's retention pass keeps the last 30 days (or
 the workspace's privacy retention, when that is shorter), and at most the 100
@@ -1792,11 +1836,11 @@ rate limited (20 requests per 15 minutes per IP).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures`, `scope` or `null`), the scope (`repositoryIds`, empty for all; `minSeverity`, `minor`, `major`, `critical` or `null`; `onlyVerdictChanges`), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
-| GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
+| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures`, `scope` or `null`), the scope (`repositoryIds`, empty for all; `minSeverity`, `minor`, `major`, `critical` or `null`; `onlyVerdictChanges`), `delivery` (`{ mode, hour, weekday, timeZone, nextDigestAt, held }`: `mode` `each`, `daily` or `weekly`, the schedule (kept after switching back to `each`), when the next digest is built (`null` for `each`) and how many reviews it holds), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
+| GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, including `test` and `digest`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
 | PATCH  | `/api/notifications/settings` | Workspace admins: `{ autoPauseAfter }`, 0 to 50 failed deliveries in a row before a target is paused (0 never); returns `{ settings }` |
-| POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity` and `onlyVerdictChanges`; events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
-| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, active? }`; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent |
+| POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity`, `onlyVerdictChanges` and `delivery` (`{ mode: "each" }`, the default, `{ mode: "daily", hour, timeZone }` or `{ mode: "weekly", hour, weekday, timeZone }`, `hour` 0-23, `weekday` 0-6 from Sunday, `timeZone` an IANA name); events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
+| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent |
 | POST   | `/api/notifications/:id/test` | Workspace admins: sends a sample delivery; returns `{ result }`, `{ ok: true }` or `{ ok: false, error }` |
 | DELETE | `/api/notifications/:id` | Workspace admins: removes a target |
 

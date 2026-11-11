@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma.ts";
 import { notifyJob, queueMissedNotifications } from "../services/notifications.ts";
 import { execute } from "./execute.ts";
 import { claimDueDeliveries, recoverStaleDeliveries, runDelivery } from "./deliveryQueue.ts";
+import { runDueDigests } from "./digests.ts";
 import { claimNext, recoverStale, requeueInterrupted } from "./queue.ts";
 import { claimNextReply, recoverStaleReplies } from "./replyQueue.ts";
 import { executeReply } from "./executeReply.ts";
@@ -146,6 +147,13 @@ async function loop(): Promise<void> {
       await tick();
     } catch (err) {
       console.error("[worker] poll failed", err);
+    }
+    // Before dispatch, so a digest queued here goes out in the same pass.
+    try {
+      const digests = await runDueDigests();
+      if (digests > 0) console.log(`[worker] queued ${digests} notification digest(s)`);
+    } catch (err) {
+      console.error("[worker] notification digests failed", err);
     }
     try {
       await dispatchDeliveries();
