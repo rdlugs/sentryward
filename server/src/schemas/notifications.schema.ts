@@ -53,11 +53,12 @@ export const createNotificationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("email"), name, events, recipientIds, ...filters }),
 ]);
 
-// The URL is not editable: replacing it is removing the target and adding it
-// again, which for a webhook also issues a new secret.
+// A new URL keeps the target's settings, history and (for a webhook) secret;
+// rotating the secret is its own endpoint. Email targets have no URL.
 export const updateNotificationSchema = z
   .object({
     name: name.optional(),
+    url: url.optional(),
     events: events.optional(),
     recipientIds: recipientIds.optional(),
     repositoryIds: repositoryIds.optional(),
@@ -70,6 +71,9 @@ export const updateNotificationSchema = z
     message: "Nothing to update",
     path: ["name"],
   });
+
+// A member's own notifications: email about reviews of changes they opened.
+export const personalNotificationSchema = z.object({ enabled: z.boolean(), events });
 
 // How many failed deliveries in a row pause a target; 0 never does.
 export const notificationSettingsSchema = z.object({

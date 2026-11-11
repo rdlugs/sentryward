@@ -10,6 +10,28 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Personal notifications (#258). Any member can switch on email about reviews
+  of the pull and merge requests they opened, from a **Your pull requests**
+  card on the Notifications page (`GET`/`PUT /api/notifications/personal`),
+  choosing blocked, failed, resolved and completed. A change is matched to a
+  member through the forge user id of its author, recorded on the review job
+  (`author_id`) when the worker fetches the change, against a GitHub or
+  GitLab sign-in identity the member linked on the same host; the card points
+  to Sign-in methods for any host without one. Personal targets go through
+  the same outbox, are hidden from the workspace's targets and from admins,
+  are deleted when the member leaves the workspace, and are skipped for a
+  review a workspace email target already sends that member. Reviews where
+  the member is a requested reviewer are not covered yet.
+- Notification URLs can be edited and webhook secrets rotated in place
+  (#257). `PATCH /api/notifications/:id` accepts `url` for webhook and Slack
+  targets, checked like a new target's, keeping events, scope, secret and
+  history; the edit panel has a URL field showing the current host. `POST
+  /api/notifications/:id/rotate-secret` (admins, webhooks) returns a new
+  secret once, from **Rotate secret** in the target's menu. For 24 hours the
+  previous secret keeps signing too: `X-Sentryward-Signature-V2` and
+  `X-Sentryward-Signature` carry `sha256=<new>,sha256=<old>`, so receivers
+  should accept any listed value (the README's verification example does).
+  Targets report `secretRotatedUntil`.
 - Webhook deliveries carry a delivery id, a signed timestamp, the head commit
   and the trigger (#256). The body gains `deliveryId` (the same on every retry
   of a delivery, so a receiver can tell a retry from a new one) and

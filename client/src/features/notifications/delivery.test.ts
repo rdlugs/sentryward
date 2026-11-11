@@ -49,6 +49,7 @@ const target = (overrides: Partial<NotificationTarget> = {}): NotificationTarget
   active: true,
   pausedReason: null,
   pauseCause: null,
+  secretRotatedUntil: null,
   consecutiveFailures: 0,
   lastDelivery: null,
   pending: { count: 0, retry: null },

@@ -135,6 +135,9 @@ export interface NotificationTarget extends TargetFilters {
   undecryptable: boolean
   recipientIds: string[]
   delivery: TargetDelivery
+  // Webhooks only: while set, deliveries are also signed with the secret the
+  // last rotation replaced, until this time.
+  secretRotatedUntil: string | null
   // A paused target keeps its settings but gets no deliveries.
   active: boolean
   // Why the server paused it after failed deliveries; null otherwise, and
@@ -161,6 +164,8 @@ export type NotificationTargetInput = TargetFilters & { delivery: DeliverySettin
 
 export interface NotificationTargetUpdate extends Partial<TargetFilters> {
   name?: string
+  // Webhook and Slack targets only; the current one is never sent back.
+  url?: string
   events?: NotificationEvent[]
   recipientIds?: string[]
   delivery?: DeliverySettings
@@ -222,6 +227,17 @@ export function useUpdateNotificationTarget() {
   })
 }
 
+// The new secret comes back only from this call. The old one keeps signing
+// deliveries alongside it for a grace period (secretRotatedUntil).
+export function useRotateNotificationSecret() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      api<{ target: NotificationTarget; secret: string }>(`/notifications/${id}/rotate-secret`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY }),
+  })
+}
+
 // A test is recorded like any delivery, so the list's last delivery and an open
 // history both refetch afterwards, whatever the outcome.
 export function useTestNotificationTarget() {
@@ -250,5 +266,43 @@ export function useDeleteNotificationTarget() {
   return useMutation({
     mutationFn: (id: string) => api<void>(`/notifications/${id}`, { method: "DELETE" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY }),
+  })
+}
+
+// A member's own email about reviews of changes they opened. Kept apart from
+// the workspace's targets: any member manages theirs, and admins never see it.
+export const PERSONAL_NOTIFICATIONS_KEY = ["personal-notifications"]
+
+// A forge host the workspace reviews on, and whether the member linked a
+// sign-in identity there; changes they open are only recognised from a linked
+// account.
+export interface PersonalForge {
+  provider: "github" | "gitlab"
+  host: string
+  linked: boolean
+}
+
+export interface PersonalNotifications {
+  enabled: boolean
+  events: NotificationEvent[]
+  // Set when repeated failed deliveries paused it; saving clears it.
+  pausedReason: string | null
+  forges: PersonalForge[]
+  mailConfigured: boolean
+}
+
+export function usePersonalNotifications() {
+  return useQuery({
+    queryKey: PERSONAL_NOTIFICATIONS_KEY,
+    queryFn: () => api<PersonalNotifications>("/notifications/personal"),
+  })
+}
+
+export function useUpdatePersonalNotifications() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { enabled: boolean; events: NotificationEvent[] }) =>
+      api<PersonalNotifications>("/notifications/personal", { method: "PUT", body: JSON.stringify(input) }),
+    onSuccess: (data) => queryClient.setQueryData(PERSONAL_NOTIFICATIONS_KEY, data),
   })
 }

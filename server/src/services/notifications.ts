@@ -2,12 +2,14 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { env } from "../config/env.ts";
 import { Prisma } from "../generated/prisma/client.ts";
 import type {
+  ForgeProvider,
   NotificationDelivery,
   NotificationEvent,
   NotificationKind,
   NotificationTarget,
   ReviewJob,
   ReviewStatus,
+  SignInProvider,
 } from "../generated/prisma/client.ts";
 import { DecryptError, decrypt } from "../lib/crypto.ts";
 import { assertSafeUrl } from "../lib/hostSafety.ts";
@@ -662,6 +664,36 @@ export function newWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
 
+// How long a rotated-out secret keeps signing deliveries next to the new one.
+export const SECRET_GRACE_MS = 24 * 60 * 60_000;
+
+// The secrets a webhook delivery is signed with at `now`: the current one,
+// then the one a rotation replaced while its grace period lasts.
+export function signingSecrets(
+  target: Pick<NotificationTarget, "encryptedSecret" | "encryptedPreviousSecret" | "previousSecretExpiresAt">,
+  now: Date,
+): string[] {
+  if (!target.encryptedSecret) throw new PermanentDeliveryError("No signing secret stored");
+  const secrets = [decrypt(target.encryptedSecret)];
+  if (target.encryptedPreviousSecret && target.previousSecretExpiresAt && target.previousSecretExpiresAt > now) {
+    // A previous secret that cannot be read only loses its grace period; the
+    // delivery still goes out signed with the current one.
+    try {
+      secrets.push(decrypt(target.encryptedPreviousSecret));
+    } catch (err) {
+      if (!(err instanceof DecryptError)) throw err;
+    }
+  }
+  return secrets;
+}
+
+// One "sha256=<hex>" per secret, comma separated, current secret first. A
+// receiver accepts the delivery when any of them matches, so it keeps working
+// whichever secret it holds during a rotation.
+function signatures(secrets: string[], sign: (secret: string) => string): string {
+  return secrets.map(sign).join(",");
+}
+
 // A delivery the far end answered with a non-2xx status. retryAfterMs is the
 // wait a 429 asked for, when it named one.
 export class DeliveryError extends Error {
@@ -762,7 +794,6 @@ export async function deliver(
 ) {
   switch (target.kind) {
     case "webhook": {
-      if (!target.encryptedSecret) throw new PermanentDeliveryError("No signing secret stored");
       // Added at send time, not stored: each try gets its own timestamp, so a
       // retry hours later is not rejected as old.
       const now = options.now ?? new Date();
@@ -772,13 +803,13 @@ export async function deliver(
       // The body's timestamp is the header's second, so the two never disagree,
       // and both are set after the payload so a stored key cannot replace them.
       const body = JSON.stringify({ ...payload, deliveryId, timestamp: new Date(seconds * 1000).toISOString() });
-      const secret = decrypt(target.encryptedSecret);
+      const secrets = signingSecrets(target, now);
       await post(targetUrl(target), body, {
         [EVENT_HEADER]: payload.event,
         [DELIVERY_HEADER]: deliveryId,
         [TIMESTAMP_HEADER]: timestamp,
-        [SIGNATURE_V2_HEADER]: timestampedSignature(secret, timestamp, body),
-        [SIGNATURE_HEADER]: signature(secret, body),
+        [SIGNATURE_V2_HEADER]: signatures(secrets, (secret) => timestampedSignature(secret, timestamp, body)),
+        [SIGNATURE_HEADER]: signatures(secrets, (secret) => signature(secret, body)),
       });
       return;
     }
@@ -937,6 +968,38 @@ async function attempt(target: NotificationTarget, payload: NotificationPayload)
   return outcome;
 }
 
+// The sign-in provider whose identities are accounts on each forge; null for
+// a forge nobody can sign in with, whose authors are never matched.
+const SIGN_IN_FOR_FORGE: Record<ForgeProvider, SignInProvider | null> = { github: "github", gitlab: "gitlab" };
+
+// A personal target hears about reviews of changes its member opened: the
+// change's author id must be a sign-in identity the member linked on the same
+// forge host, which the provider verified, so nobody can claim another
+// person's changes. Returns the target and its member's user id, or null.
+async function personalTarget(
+  tx: Prisma.TransactionClient,
+  job: Pick<ReviewJob, "authorId">,
+  connection: { workspaceId: string; provider: ForgeProvider; host: string },
+  possibleEvents: NotificationEvent[],
+): Promise<{ target: NotificationTarget; userId: string } | null> {
+  const provider = SIGN_IN_FOR_FORGE[connection.provider];
+  if (!job.authorId || !provider) return null;
+  const identity = await tx.userIdentity.findUnique({
+    where: { provider_host_providerUserId: { provider, host: connection.host, providerUserId: job.authorId } },
+    select: { userId: true },
+  });
+  if (!identity) return null;
+  const target = await tx.notificationTarget.findFirst({
+    where: {
+      workspaceId: connection.workspaceId,
+      active: true,
+      events: { hasSome: possibleEvents },
+      membership: { userId: identity.userId, workspaceId: connection.workspaceId },
+    },
+  });
+  return target ? { target, userId: identity.userId } : null;
+}
+
 // Queues the job's deliveries when it reaches its final status, whoever
 // finished it; the worker sends them (worker/deliveryQueue.ts). The rows are
 // written in the same transaction that stamps notifiedAt, so a crash either
@@ -953,7 +1016,9 @@ export async function notifyJob(jobId: string): Promise<void> {
       if (count === 0) return;
       const job = await tx.reviewJob.findUniqueOrThrow({
         where: { id: jobId },
-        include: { repository: { include: { connection: { select: { workspaceId: true } } } } },
+        include: {
+          repository: { include: { connection: { select: { workspaceId: true, provider: true, host: true } } } },
+        },
       });
       const baseEvents = eventsFor(job);
       if (!baseEvents.length) return;
@@ -964,15 +1029,18 @@ export async function notifyJob(jobId: string): Promise<void> {
       // queued for it (dropPendingDeliveries), so a paused target misses this
       // job for good rather than catching up when it is resumed. A test
       // delivery still reaches it.
-      const candidates = await tx.notificationTarget.findMany({
+      const workspaceTargets = await tx.notificationTarget.findMany({
         where: {
           workspaceId: job.repository.connection.workspaceId,
+          membershipId: null,
           active: true,
           events: { hasSome: possibleEvents },
           // An empty list is every repository.
           OR: [{ repositoryIds: { isEmpty: true } }, { repositoryIds: { has: job.repositoryId } }],
         },
       });
+      const personal = await personalTarget(tx, job, job.repository.connection, possibleEvents);
+      const candidates = personal ? [...workspaceTargets, personal.target] : workspaceTargets;
       if (!candidates.length) return;
       const needsPrevious =
         job.status !== "failed" &&
@@ -981,10 +1049,19 @@ export async function notifyJob(jobId: string): Promise<void> {
       const events = needsPrevious ? eventsFor(job, previous) : baseEvents;
       const summary = job.summary as ResultSummary | null;
       const facts: JobFilterFacts = { bySeverity: summary?.bySeverity ?? {}, verdict: job.verdict, previous };
-      const targets = candidates.flatMap((target) => {
+      const targets = workspaceTargets.flatMap((target) => {
         const event = eventForTarget(events, target, facts);
         return event ? [{ target, event }] : [];
       });
+      if (personal) {
+        const event = eventForTarget(events, personal.target, facts);
+        // A member already mailed about this review by a workspace email
+        // target is not mailed a second time.
+        const mailed = targets.some(
+          ({ target }) => target.kind === "email" && target.recipientIds.includes(personal.userId),
+        );
+        if (event && !mailed) targets.push({ target: personal.target, event });
+      }
       if (!targets.length) return;
       const now = new Date();
       await tx.notificationDelivery.createMany({
@@ -1153,9 +1230,10 @@ export async function emailAdminsAboutPause(targetId: string, reason: string): P
   try {
     const target = await prisma.notificationTarget.findUnique({
       where: { id: targetId },
-      select: { name: true, workspace: { select: { id: true, name: true } } },
+      select: { name: true, membershipId: true, workspace: { select: { id: true, name: true } } },
     });
-    if (!target) return;
+    // A member's personal target is theirs to switch back on, not the admins'.
+    if (!target || target.membershipId) return;
     const admins = await prisma.membership.findMany({
       where: { workspaceId: target.workspace.id, role: { in: ["owner", "admin"] } },
       select: { user: { select: { email: true } } },
@@ -1333,6 +1411,27 @@ export function publicDelivery(delivery: NotificationDelivery) {
   };
 }
 
+export const PERSONAL_TARGET_NAME = "Reviews of my changes";
+// What a member who has never saved their personal notifications is shown.
+export const PERSONAL_EVENTS_DEFAULT: NotificationEvent[] = ["failed", "blocked", "resolved"];
+
+export interface PersonalForge {
+  provider: ForgeProvider;
+  host: string;
+  linked: boolean;
+}
+
+// A member's view of their personal target; null before the first save.
+export function publicPersonal(target: NotificationTarget | null, forges: PersonalForge[], mailConfigured: boolean) {
+  return {
+    enabled: target?.active ?? false,
+    events: target ? EVENT_ORDER.filter((event) => target.events.includes(event)) : PERSONAL_EVENTS_DEFAULT,
+    pausedReason: target?.pausedReason ?? null,
+    forges,
+    mailConfigured,
+  };
+}
+
 // Only the host of a URL ever leaves the server: the full Slack URL is the
 // credential, and a webhook URL may carry one in its query.
 export function publicTarget(
@@ -1372,6 +1471,12 @@ export function publicTarget(
       nextDigestAt: target.deliveryMode === "each" ? null : target.digestDueAt,
       held,
     },
+    // While set, deliveries are also signed with the secret the last rotation
+    // replaced.
+    secretRotatedUntil:
+      target.previousSecretExpiresAt && target.previousSecretExpiresAt > new Date()
+        ? target.previousSecretExpiresAt
+        : null,
     active: target.active,
     pausedReason: target.pausedReason,
     pauseCause: pauseCause(target.pausedReason),

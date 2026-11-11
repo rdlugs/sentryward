@@ -204,9 +204,11 @@ export async function complete(
 // The change's title, stored as soon as the worker has fetched the change so
 // every run that got that far is searchable by it, skipped and cancelled ones
 // included. No status guard: the title describes the change, not the run, so
-// writing it after a cancel changes nothing that run reports.
-export async function recordTitle(id: string, title: string): Promise<void> {
-  await prisma.reviewJob.updateMany({ where: { id }, data: { title } });
+// writing it after a cancel changes nothing that run reports. The author's
+// forge id goes with it, for personal notifications; undefined (a change
+// cached before it was fetched) leaves the column alone.
+export async function recordTitle(id: string, title: string, authorId?: string): Promise<void> {
+  await prisma.reviewJob.updateMany({ where: { id }, data: { title, authorId } });
 }
 
 // Only by the attempt that holds the job (see claimState): a run that lost its

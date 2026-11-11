@@ -27,6 +27,7 @@ describe("GitHubAdapter", () => {
           body: null,
           draft: true,
           html_url: "https://github.com/acme/web/pull/42",
+          user: { login: "octo", id: 583231 },
           base: { sha: "base1", ref: "main" },
           head: { sha: "head1", ref: "feature" },
         },
@@ -59,6 +60,8 @@ describe("GitHubAdapter", () => {
       headSha: "head1",
     });
     expect(change).toMatchObject({ title: "Add b", description: "", isDraft: true, headRef: "feature" });
+    // The id, not the login, is what personal notifications match on.
+    expect(change).toMatchObject({ author: "octo", authorId: "583231" });
     expect(change.files.map((f) => [f.path, f.changeType, f.patchUnavailable])).toEqual([
       ["src/a.ts", "modified", false],
       ["img.png", "added", false],
@@ -628,6 +631,7 @@ describe("GitLabAdapter", () => {
           description: "Closes #1",
           draft: true,
           web_url: "https://gitlab.acme.com/team/app/-/merge_requests/7",
+          author: { username: "ada", id: 31 },
           source_branch: "feature",
           target_branch: "main",
           diff_refs: { base_sha: "b", start_sha: "s", head_sha: "h" },
@@ -675,7 +679,7 @@ describe("GitLabAdapter", () => {
     const change = await gl.getChange("team/app", 7);
 
     expect(change.forgeRef).toMatchObject({ baseSha: "b", startSha: "s", headSha: "h", host: "gitlab.acme.com" });
-    expect(change).toMatchObject({ isDraft: true, description: "Closes #1", baseRef: "main" });
+    expect(change).toMatchObject({ isDraft: true, description: "Closes #1", baseRef: "main", author: "ada", authorId: "31" });
     expect(change.files.map((f) => [f.path, f.changeType, f.patchUnavailable])).toEqual([
       ["a.ts", "modified", false],
       ["gone.ts", "deleted", false],

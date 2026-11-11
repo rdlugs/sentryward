@@ -11,6 +11,7 @@ import {
   deliveriesQuerySchema,
   notificationParamsSchema,
   notificationSettingsSchema,
+  personalNotificationSchema,
   updateNotificationSchema,
 } from "../schemas/notifications.schema.ts";
 import { nextDigestAt } from "../services/digestSchedule.ts";
@@ -19,19 +20,39 @@ import {
   deliveryStates,
   dropPendingDeliveries,
   newWebhookSecret,
+  PERSONAL_TARGET_NAME,
   publicDelivery,
+  publicPersonal,
   publicTarget,
   SCOPE_REASON,
+  SECRET_GRACE_MS,
   testTarget,
 } from "../services/notifications.ts";
 
+// Workspace targets only: a member's personal target is never listed, edited,
+// tested or shown in a delivery log through these routes, even to admins.
 async function loadTarget(req: Request) {
   const { id } = notificationParamsSchema.parse(req.params);
-  const target = await prisma.notificationTarget.findFirst({ where: { id, workspaceId: req.workspaceId } });
+  const target = await prisma.notificationTarget.findFirst({
+    where: { id, workspaceId: req.workspaceId, membershipId: null },
+  });
   if (!target) {
     throw new HttpError(404, "Notification target not found");
   }
   return target;
+}
+
+// The same check every delivery makes (services/notifications.ts post), run
+// on save so a refused URL is a field error rather than a target that fails.
+async function assertSafeTargetUrl(url: string) {
+  try {
+    await assertSafeUrl(url);
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw new HttpError(400, "Validation failed", { url: [error.message] });
+    }
+    throw error;
+  }
 }
 
 // Recipients are chosen from the workspace's members, never typed in, so a
@@ -94,7 +115,10 @@ function deliveryData(input: DeliveryInput, current: NotificationTarget | null, 
 
 export async function listNotifications(req: Request, res: Response) {
   const [targets, workspace] = await Promise.all([
-    prisma.notificationTarget.findMany({ where: { workspaceId: req.workspaceId }, orderBy: { createdAt: "asc" } }),
+    prisma.notificationTarget.findMany({
+      where: { workspaceId: req.workspaceId, membershipId: null },
+      orderBy: { createdAt: "asc" },
+    }),
     prisma.workspace.findUniqueOrThrow({ where: { id: req.workspaceId }, select: { notifyAutoPauseAfter: true } }),
   ]);
   const states = await deliveryStates(targets.map((target) => target.id));
@@ -169,14 +193,7 @@ export async function createNotification(req: Request, res: Response) {
     return;
   }
 
-  try {
-    await assertSafeUrl(input.url);
-  } catch (error) {
-    if (error instanceof HttpError) {
-      throw new HttpError(400, "Validation failed", { url: [error.message] });
-    }
-    throw error;
-  }
+  await assertSafeTargetUrl(input.url);
   const secret = input.kind === "webhook" ? newWebhookSecret() : undefined;
   const target = await prisma.$transaction(async (tx) => {
     await assertRepositories(tx, workspaceId, input.repositoryIds);
@@ -196,6 +213,13 @@ export async function updateNotification(req: Request, res: Response) {
     }
     await assertMembers(target.workspaceId, input.recipientIds);
   }
+  // Queued deliveries read the URL when they are sent, so they go to the new one.
+  if (input.url !== undefined) {
+    if (target.kind === "email") {
+      throw new HttpError(400, "Validation failed", { url: ["Email targets have no URL"] });
+    }
+    await assertSafeTargetUrl(input.url);
+  }
   // Paused because its repositories were deleted: an empty list now means
   // every repository, so it stays off until an admin saves a choice (All
   // included) on purpose. Saving one clears the reason; it stays paused.
@@ -210,9 +234,10 @@ export async function updateNotification(req: Request, res: Response) {
   // reason stays until repositories are saved, or switching it off and on
   // again would get round the check above.
   const clearReason = input.active !== undefined ? !scopePaused : target.pausedReason === SCOPE_REASON && !scopePaused;
-  const { delivery, ...fields } = input;
+  const { delivery, url, ...fields } = input;
   const data = {
     ...fields,
+    ...(url !== undefined ? { encryptedUrl: encrypt(url) } : {}),
     ...(delivery ? deliveryData(delivery, target) : {}),
     ...(input.active !== undefined ? { consecutiveFailures: 0 } : {}),
     ...(clearReason ? { pausedReason: null } : {}),
@@ -230,6 +255,31 @@ export async function updateNotification(req: Request, res: Response) {
   });
 }
 
+// A new signing secret, in this response only, as on create. The one it
+// replaces keeps signing deliveries (alongside the new one) for
+// SECRET_GRACE_MS, so the receiver can be switched over without dropping any;
+// a second rotation within that window forgets the oldest of the three.
+export async function rotateNotificationSecret(req: Request, res: Response) {
+  const target = await loadTarget(req);
+  if (target.kind !== "webhook") {
+    throw new HttpError(400, "Only webhook targets have a signing secret");
+  }
+  const secret = newWebhookSecret();
+  const updated = await prisma.notificationTarget.update({
+    where: { id: target.id },
+    data: {
+      encryptedSecret: encrypt(secret),
+      encryptedPreviousSecret: target.encryptedSecret,
+      previousSecretExpiresAt: target.encryptedSecret ? new Date(Date.now() + SECRET_GRACE_MS) : null,
+    },
+  });
+  const states = await deliveryStates([updated.id]);
+  res.json({
+    target: publicTarget(updated, states.last(updated.id), states.pending(updated.id), states.held(updated.id)),
+    secret,
+  });
+}
+
 // Sends a sample; a delivery that fails is reported as the result, not an error.
 export async function testNotification(req: Request, res: Response) {
   const target = await loadTarget(req);
@@ -238,9 +288,73 @@ export async function testNotification(req: Request, res: Response) {
 
 export async function deleteNotification(req: Request, res: Response) {
   const { id } = notificationParamsSchema.parse(req.params);
-  const { count } = await prisma.notificationTarget.deleteMany({ where: { id, workspaceId: req.workspaceId } });
+  const { count } = await prisma.notificationTarget.deleteMany({
+    where: { id, workspaceId: req.workspaceId, membershipId: null },
+  });
   if (count === 0) {
     throw new HttpError(404, "Notification target not found");
   }
   res.status(204).end();
+}
+
+// The forge hosts this workspace reviews on, and whether the member has
+// linked a sign-in identity on each: only changes opened from a linked
+// account can be matched to them.
+async function personalState(userId: string, workspaceId: string) {
+  const [membership, connections, identities] = await Promise.all([
+    prisma.membership.findUniqueOrThrow({
+      where: { userId_workspaceId: { userId, workspaceId } },
+      select: { personalNotifications: true },
+    }),
+    prisma.forgeConnection.findMany({
+      where: { workspaceId },
+      distinct: ["provider", "host"],
+      select: { provider: true, host: true },
+      orderBy: [{ provider: "asc" }, { host: "asc" }],
+    }),
+    prisma.userIdentity.findMany({ where: { userId }, select: { provider: true, host: true } }),
+  ]);
+  const forges = connections.map(({ provider, host }) => ({
+    provider,
+    host,
+    linked: identities.some((identity) => identity.provider === provider && identity.host === host),
+  }));
+  return publicPersonal(membership.personalNotifications, forges, mailer.configured());
+}
+
+// Any member, for themselves: the personal target is created on first save.
+export async function getPersonalNotifications(req: Request, res: Response) {
+  res.json(await personalState(req.userId!, req.workspaceId!));
+}
+
+// Saving clears an auto-pause: the member has seen the reason and chose to
+// carry on, as an admin switching a workspace target does.
+export async function updatePersonalNotifications(req: Request, res: Response) {
+  const { enabled, events } = personalNotificationSchema.parse(req.body);
+  const userId = req.userId!;
+  const workspaceId = req.workspaceId!;
+  if (enabled && !mailer.configured()) {
+    throw new HttpError(400, "Email notifications need mail to be configured (SMTP_URL)");
+  }
+  const membership = await prisma.membership.findUniqueOrThrow({
+    where: { userId_workspaceId: { userId, workspaceId } },
+    select: { id: true },
+  });
+  const state = { events, active: enabled, consecutiveFailures: 0, pausedReason: null };
+  await prisma.$transaction(async (tx) => {
+    const target = await tx.notificationTarget.upsert({
+      where: { membershipId: membership.id },
+      create: {
+        ...state,
+        workspaceId,
+        membershipId: membership.id,
+        kind: "email",
+        name: PERSONAL_TARGET_NAME,
+        recipientIds: [userId],
+      },
+      update: state,
+    });
+    if (!enabled) await dropPendingDeliveries(tx, target.id);
+  });
+  res.json(await personalState(userId, workspaceId));
 }

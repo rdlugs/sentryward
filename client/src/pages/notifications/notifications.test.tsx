@@ -23,6 +23,7 @@ const webhook = {
   active: true,
   pausedReason: null,
   pauseCause: null,
+  secretRotatedUntil: null,
   consecutiveFailures: 0,
   lastDelivery: null,
   pending: { count: 0, retry: null },
@@ -484,7 +485,7 @@ describe("Notifications", () => {
     // The menu is there for the delivery history only.
     await userEvent.click(screen.getByRole("button", { name: "Actions for CI alerts" }))
     expect(await screen.findByRole("menuitem", { name: "View deliveries" })).toBeInTheDocument()
-    for (const name of ["Send test", "Edit", "Remove"]) {
+    for (const name of ["Send test", "Edit", "Rotate secret", "Remove"]) {
       expect(screen.queryByRole("menuitem", { name })).not.toBeInTheDocument()
     }
   })
@@ -941,5 +942,163 @@ describe("Notifications", () => {
 
     expect(await screen.findByText("Removed CI alerts")).toBeInTheDocument()
     expect(calls(fetchSpy, "DELETE", "/api/notifications/n1")).toHaveLength(1)
+  })
+
+  it("changes a webhook's URL in place, sending it only when one is entered", async () => {
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
+      "PATCH /api/notifications/n1": { target: { ...webhook, host: "new.example.com" } },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }))
+    const sheet = await screen.findByRole("dialog")
+    const url = within(sheet).getByLabelText("New URL")
+    expect(url).toHaveValue("")
+    expect(within(sheet).getByText(/Sending to ci\.example\.com/)).toBeInTheDocument()
+    await userEvent.type(url, "not a url")
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save" }))
+    expect(await within(sheet).findByText("Enter an http or https URL")).toBeInTheDocument()
+    expect(calls(fetchSpy, "PATCH", "/api/notifications/n1")).toHaveLength(0)
+
+    await userEvent.clear(url)
+    await userEvent.type(url, "https://new.example.com/hook")
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save" }))
+
+    await vi.waitFor(() => expect(calls(fetchSpy, "PATCH", "/api/notifications/n1")).toHaveLength(1))
+    const [, init] = calls(fetchSpy, "PATCH", "/api/notifications/n1")[0]!
+    expect(JSON.parse(String(init?.body))).toMatchObject({ name: "CI alerts", url: "https://new.example.com/hook" })
+  })
+
+  it("shows the server's reason when it refuses a new URL", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
+      "PATCH /api/notifications/n1": () =>
+        jsonResponse(400, { message: "Validation failed", errors: { url: ["Private addresses are not allowed"] } }),
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("New URL"), "https://10.0.0.1/hook")
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save" }))
+
+    expect(await within(sheet).findByText("Private addresses are not allowed")).toBeInTheDocument()
+  })
+
+  it("asks before rotating a webhook's secret, then shows the new one once", async () => {
+    const until = "2026-11-12T09:30:00.000Z"
+    const fetchSpy = mockApi({
+      "GET /api/notifications": { targets: [webhook, slackTarget], mailConfigured: false, settings },
+      "POST /api/notifications/n1/rotate-secret": {
+        target: { ...webhook, secretRotatedUntil: until },
+        secret: "fresh-secret",
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    // Slack targets have no secret to rotate.
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for Team channel" }))
+    expect(await screen.findByRole("menuitem", { name: "Edit" })).toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: "Rotate secret" })).not.toBeInTheDocument()
+    await userEvent.keyboard("{Escape}")
+
+    await userEvent.click(screen.getByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rotate secret" }))
+    const sheet = await screen.findByRole("dialog")
+    expect(calls(fetchSpy, "POST", "/api/notifications/n1/rotate-secret")).toHaveLength(0)
+    await userEvent.click(within(sheet).getByRole("button", { name: "Rotate secret" }))
+
+    expect(await within(sheet).findByLabelText("Signing secret")).toHaveValue("fresh-secret")
+    expect(within(sheet).getByText("Secret rotated")).toBeInTheDocument()
+    expect(within(sheet).getByText(/also carries a signature made with the previous secret/)).toBeInTheDocument()
+    expect(calls(fetchSpy, "POST", "/api/notifications/n1/rotate-secret")).toHaveLength(1)
+  })
+})
+
+describe("Personal notifications", () => {
+  const personal = {
+    enabled: false,
+    events: ["failed", "blocked", "resolved"],
+    pausedReason: null,
+    forges: [{ provider: "github", host: "github.com", linked: true }],
+    mailConfigured: true,
+  }
+
+  it("lets a member switch on email about their own changes and choose events", async () => {
+    const asMember = testWorkspaces.map((workspace) => ({ ...workspace, role: "member" }))
+    let saved = personal
+    const fetchSpy = mockApi({
+      "GET /api/auth/me": { user: testUser, workspaces: asMember },
+      "GET /api/workspaces": { workspaces: asMember },
+      "GET /api/notifications": { targets: [], mailConfigured: true, settings },
+      "GET /api/notifications/personal": () => jsonResponse(200, saved),
+      "PUT /api/notifications/personal": (init?: RequestInit) => {
+        saved = { ...saved, ...JSON.parse(String(init?.body)) }
+        return jsonResponse(200, saved)
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    const toggle = await screen.findByRole("switch", { name: "Email me about reviews of my changes" })
+    expect(toggle).not.toBeChecked()
+    await userEvent.click(toggle)
+    await vi.waitFor(() => expect(toggle).toBeChecked())
+    await userEvent.click(screen.getByRole("checkbox", { name: "Resolved" }))
+
+    await vi.waitFor(() => expect(calls(fetchSpy, "PUT", "/api/notifications/personal")).toHaveLength(2))
+    const bodies = calls(fetchSpy, "PUT", "/api/notifications/personal").map(([, init]) => JSON.parse(String(init?.body)))
+    expect(bodies).toEqual([
+      { enabled: true, events: ["failed", "blocked", "resolved"] },
+      { enabled: true, events: ["failed", "blocked"] },
+    ])
+  })
+
+  it("keeps the last event chosen", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: true, settings },
+      "GET /api/notifications/personal": { ...personal, enabled: true, events: ["blocked"] },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByRole("checkbox", { name: "Blocked" })).toBeDisabled()
+    expect(screen.getByRole("checkbox", { name: "Failed" })).toBeEnabled()
+  })
+
+  it("points to Sign-in methods for a forge account that is not linked", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: true, settings },
+      "GET /api/notifications/personal": {
+        ...personal,
+        forges: [
+          { provider: "github", host: "github.com", linked: true },
+          { provider: "gitlab", host: "gitlab.acme.com", linked: false },
+        ],
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByText(/Link GitLab \(gitlab\.acme\.com\) under/)).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "Settings, Sign-in methods" })).toHaveAttribute("href", "/settings?tab=sign-in")
+  })
+
+  it("cannot be switched on without mail", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: false, settings },
+      "GET /api/notifications/personal": { ...personal, mailConfigured: false },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByRole("switch", { name: "Email me about reviews of my changes" })).toBeDisabled()
+    expect(screen.getByText("Mail is not configured")).toBeInTheDocument()
   })
 })

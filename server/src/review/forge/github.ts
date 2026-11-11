@@ -74,7 +74,7 @@ interface GhPull {
   body: string | null;
   draft?: boolean;
   html_url: string;
-  user?: { login: string } | null;
+  user?: { login: string; id?: number } | null;
   labels?: { name: string }[];
   base: { sha: string; ref: string };
   head: { sha: string; ref: string };
@@ -295,6 +295,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       headRef: pull.head.ref,
       isDraft: pull.draft ?? false,
       author: pull.user?.login,
+      authorId: pull.user?.id === undefined ? undefined : String(pull.user.id),
       labels: (pull.labels ?? []).map((label) => label.name),
       files: files.map((file) =>
         toChangedFile({

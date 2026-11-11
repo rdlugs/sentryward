@@ -14,6 +14,7 @@ import {
   notifyJob,
   payloadFor,
   redactError,
+  SECRET_GRACE_MS,
   signature,
   testTarget,
   timestampedSignature,
@@ -1088,13 +1089,19 @@ describe("/api/notifications", () => {
       request(app).post("/api/notifications").send({ kind: "slack", name: "x", events: ["failed"], url: "https://a.b/c" }),
       request(app).patch(`/api/notifications/${hook.id}`).send({ name: "x" }),
       request(app).patch(`/api/notifications/${hook.id}`).send({ active: false }),
+      request(app).patch(`/api/notifications/${hook.id}`).send({ url: "https://elsewhere.example.com/x" }),
       request(app).post(`/api/notifications/${hook.id}/test`),
+      request(app).post(`/api/notifications/${hook.id}/rotate-secret`),
       request(app).delete(`/api/notifications/${hook.id}`),
     ]) {
       const res = await call.set("Cookie", memberCookie).set(...header);
       expect(res.status).toBe(403);
     }
-    expect((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } })).active).toBe(true);
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(stored.active).toBe(true);
+    expect(decrypt(stored.encryptedUrl!)).toBe("https://hooks.example.com/sw");
+    expect(decrypt(stored.encryptedSecret!)).toBe("shh");
+    expect(stored.encryptedPreviousSecret).toBeNull();
   });
 
   it("hides another workspace's targets", async () => {
@@ -1107,5 +1114,157 @@ describe("/api/notifications", () => {
     expect(removed.status).toBe(404);
     const tested = await request(app).post(`/api/notifications/${hook.id}/test`).set("Cookie", otherCookie);
     expect(tested.status).toBe(404);
+  });
+});
+
+describe("editing a target's URL and rotating its secret", () => {
+  it("changes a webhook or Slack URL in place, keeping its settings and secret", async () => {
+    const hook = await target("webhook", ["failed", "blocked"]);
+    const slack = await target("slack", ["failed"], "https://hooks.slack.com/services/T/B/old");
+
+    const res = await request(app)
+      .patch(`/api/notifications/${hook.id}`)
+      .set("Cookie", cookie)
+      .send({ url: "https://new.example.com/hook?token=abc" });
+    expect(res.status).toBe(200);
+    expect(res.body.target).toMatchObject({ host: "new.example.com", events: ["failed", "blocked"], name: "webhook" });
+    expect(JSON.stringify(res.body)).not.toContain("token=abc");
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(decrypt(stored.encryptedUrl!)).toBe("https://new.example.com/hook?token=abc");
+    expect(decrypt(stored.encryptedSecret!)).toBe("shh");
+
+    const slackRes = await request(app)
+      .patch(`/api/notifications/${slack.id}`)
+      .set("Cookie", cookie)
+      .send({ url: "https://hooks.slack.com/services/T/B/new" });
+    expect(slackRes.status).toBe(200);
+    const storedSlack = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: slack.id } });
+    expect(decrypt(storedSlack.encryptedUrl!)).toBe("https://hooks.slack.com/services/T/B/new");
+  });
+
+  it("sends queued deliveries to the new URL", async () => {
+    const stub = fetchStub([{ method: "POST", url: /example\.com/ }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const hook = await target("webhook", ["completed"]);
+    const job = await finishedJob("completed", "pass");
+    await notifyJob(job.id);
+
+    await request(app)
+      .patch(`/api/notifications/${hook.id}`)
+      .set("Cookie", cookie)
+      .send({ url: "https://moved.example.com/hook" })
+      .expect(200);
+    for (const id of await claimDueDeliveries(100)) await runDelivery(id);
+
+    expect(stub.calls.map((call) => call.url)).toEqual(["https://moved.example.com/hook"]);
+  });
+
+  it("refuses an unsafe URL, a URL that is not http(s), and a URL for an email target", async () => {
+    const hook = await target("webhook", ["failed"]);
+    const email = await prisma.notificationTarget.create({
+      data: { workspaceId, kind: "email", name: "Leads", events: ["failed"], recipientIds: [userId] },
+    });
+
+    const notHttp = await request(app).patch(`/api/notifications/${hook.id}`).set("Cookie", cookie).send({ url: "ftp://x.y/z" });
+    expect(notHttp.status).toBe(400);
+    expect(notHttp.body.errors.url).toBeDefined();
+
+    const original = env.NODE_ENV;
+    env.NODE_ENV = "production";
+    try {
+      const unsafe = await request(app)
+        .patch(`/api/notifications/${hook.id}`)
+        .set("Cookie", cookie)
+        .send({ url: "https://127.0.0.1/hook" });
+      expect(unsafe.status).toBe(400);
+      expect(unsafe.body.errors.url).toBeDefined();
+    } finally {
+      env.NODE_ENV = original;
+    }
+
+    const forEmail = await request(app)
+      .patch(`/api/notifications/${email.id}`)
+      .set("Cookie", cookie)
+      .send({ url: "https://hooks.example.com/x" });
+    expect(forEmail.status).toBe(400);
+    expect(forEmail.body.errors.url).toEqual(["Email targets have no URL"]);
+
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(decrypt(stored.encryptedUrl!)).toBe("https://hooks.example.com/sw");
+    expect((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: email.id } })).encryptedUrl).toBeNull();
+  });
+
+  it("rotates a webhook secret, returning the new one once and keeping the old one for the grace period", async () => {
+    const hook = await target("webhook", ["failed"]);
+    const before = Date.now();
+
+    const res = await request(app).post(`/api/notifications/${hook.id}/rotate-secret`).set("Cookie", cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.secret).toMatch(/^[0-9a-f]{64}$/);
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(decrypt(stored.encryptedSecret!)).toBe(res.body.secret);
+    expect(decrypt(stored.encryptedPreviousSecret!)).toBe("shh");
+    const expires = stored.previousSecretExpiresAt!.getTime();
+    expect(expires).toBeGreaterThanOrEqual(before + SECRET_GRACE_MS);
+    expect(expires).toBeLessThanOrEqual(Date.now() + SECRET_GRACE_MS);
+    expect(res.body.target.secretRotatedUntil).toBe(stored.previousSecretExpiresAt!.toISOString());
+
+    const list = await request(app).get("/api/notifications").set("Cookie", cookie);
+    expect(JSON.stringify(list.body)).not.toContain(res.body.secret);
+    expect(list.body.targets[0].secretRotatedUntil).toBe(stored.previousSecretExpiresAt!.toISOString());
+  });
+
+  it("keeps only the secret just replaced when rotated twice", async () => {
+    const hook = await target("webhook", ["failed"]);
+    const first = await request(app).post(`/api/notifications/${hook.id}/rotate-secret`).set("Cookie", cookie);
+    const second = await request(app).post(`/api/notifications/${hook.id}/rotate-secret`).set("Cookie", cookie);
+
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(decrypt(stored.encryptedSecret!)).toBe(second.body.secret);
+    expect(decrypt(stored.encryptedPreviousSecret!)).toBe(first.body.secret);
+  });
+
+  it("only rotates webhooks in the workspace", async () => {
+    const slack = await target("slack", ["failed"]);
+    const refused = await request(app).post(`/api/notifications/${slack.id}/rotate-secret`).set("Cookie", cookie);
+    expect(refused.status).toBe(400);
+
+    const hook = await target("webhook", ["failed"]);
+    const { cookie: otherCookie } = await createUser("other@example.com");
+    const elsewhere = await request(app).post(`/api/notifications/${hook.id}/rotate-secret`).set("Cookie", otherCookie);
+    expect(elsewhere.status).toBe(404);
+    expect(decrypt((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } })).encryptedSecret!)).toBe("shh");
+  });
+
+  it("signs with both secrets during the grace period, newest first, then with the new one only", async () => {
+    const stub = fetchStub([{ method: "POST", url: /hooks\.example\.com/ }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const now = new Date("2026-11-11T09:30:00.000Z");
+    const hook = await prisma.notificationTarget.update({
+      where: { id: (await target("webhook", ["completed"])).id },
+      data: {
+        encryptedSecret: encrypt("new"),
+        encryptedPreviousSecret: encrypt("shh"),
+        previousSecretExpiresAt: new Date(now.getTime() + 60_000),
+      },
+    });
+    const job = await finishedJob("completed", "pass");
+    const payload = payloadFor(job, { provider: "github", fullPath: "acme/web" }, "completed");
+
+    await deliver(hook, workspaceId, payload, { now });
+    await deliver(hook, workspaceId, payload, { now: new Date(now.getTime() + 60_000) });
+
+    const [during, after] = stub.calls;
+    const ts = during!.headers["x-sentryward-timestamp"]!;
+    expect(during!.headers["x-sentryward-signature-v2"]).toBe(
+      `${timestampedSignature("new", ts, during!.body!)},${timestampedSignature("shh", ts, during!.body!)}`,
+    );
+    expect(during!.headers["x-sentryward-signature"]).toBe(
+      `${signature("new", during!.body!)},${signature("shh", during!.body!)}`,
+    );
+    const afterTs = after!.headers["x-sentryward-timestamp"]!;
+    expect(after!.headers["x-sentryward-signature-v2"]).toBe(timestampedSignature("new", afterTs, after!.body!));
+    expect(after!.headers["x-sentryward-signature"]).toBe(signature("new", after!.body!));
   });
 });

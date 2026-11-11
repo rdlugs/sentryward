@@ -228,7 +228,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   if (repo.connection.credentialsRejectedAt) await recordCredentials(repo.connection, true);
   // Stored now, not with the result, so a run that is skipped, cancelled or
   // fails from here on can still be found by the change's title.
-  await recordTitle(job.id, changeSet.title);
+  await recordTitle(job.id, changeSet.title, changeSet.authorId);
   const loaded = await loadReviewConfig({
     adapter: forge,
     project: repo.fullPath,
@@ -241,7 +241,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   // The repository file asked for fresh reads after a cached one was used.
   if (config.review.disableCache && !savedDisablesCache && deps.cache) {
     changeSet = await forge.getChange(repo.fullPath, job.number);
-    await recordTitle(job.id, changeSet.title);
+    await recordTitle(job.id, changeSet.title, changeSet.authorId);
   }
   const skip = skipReason(job, config, changeSet);
   if (skip) {
