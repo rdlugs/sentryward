@@ -448,12 +448,12 @@ describe("progressMarkdown", () => {
   });
 
   it("shows the change's scope from its hunks", () => {
-    expect(progressMarkdown(makeChangeSet(), ALL_OUTPUTS)).toContain("\n📂 1 file · ➕ 2 ➖ 0\n");
+    expect(progressMarkdown(makeChangeSet(), ALL_OUTPUTS)).toContain("\n📂 1 file · `+2` `-0`\n");
     const changeSet = makeChangeSet([
       { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
       { path: "src/old.ts", changeType: "modified", patch: "@@ -1,3 +1,2 @@\n a\n-b\n--- c\n+d" },
     ]);
-    expect(progressMarkdown(changeSet, ALL_OUTPUTS)).toContain("\n📂 2 files · ➕ 3 ➖ 2\n");
+    expect(progressMarkdown(changeSet, ALL_OUTPUTS)).toContain("\n📂 2 files · `+3` `-2`\n");
   });
 
   it("links the dashboard's live progress only when given a target", () => {
@@ -472,7 +472,7 @@ describe("progressMarkdown", () => {
 describe("cancelledMarkdown", () => {
   it("is the same card shape with the reason as plain text, marker last", () => {
     const body = cancelledMarkdown("The change was closed");
-    expect(body.startsWith(`⏹️ **Review cancelled**\n\nThe change was closed.\n\n${BRAND_FOOTER}\n`)).toBe(true);
+    expect(body.startsWith(`🚫 **Review cancelled**\n\nThe change was closed.\n\n${BRAND_FOOTER}\n`)).toBe(true);
     expect(body).not.toContain("<div");
     expect(body).not.toContain("<sub>The change");
     expect(body.indexOf(BRAND_FOOTER)).toBeLessThan(body.indexOf(SUMMARY_MARKER));

@@ -35,7 +35,7 @@ export function progressMarkdown(changeSet: ChangeSet, outputs: ProgressOutputs)
 // Replaces the progress note when a run stops early, so the change does not
 // keep promising a review that will never arrive.
 export function cancelledMarkdown(reason: string): string {
-  return card(["⏹️ **Review cancelled**", `${reason}.`]);
+  return card(["🚫 **Review cancelled**", `${reason}.`]);
 }
 
 function card(lines: string[]): string {
@@ -55,5 +55,5 @@ function scope(changeSet: ChangeSet): string {
     }
   }
   const files = changeSet.files.length;
-  return `📂 ${files} ${files === 1 ? "file" : "files"} · ➕ ${added} ➖ ${removed}`;
+  return `📂 ${files} ${files === 1 ? "file" : "files"} · \`+${added}\` \`-${removed}\``;
 }
