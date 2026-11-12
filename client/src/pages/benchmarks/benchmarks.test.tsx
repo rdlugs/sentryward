@@ -81,7 +81,8 @@ const nextPage = (card: HTMLElement) => userEvent.click(within(card).getByRole("
 
 const pad = (n: number) => String(n).padStart(2, "0")
 
-// Twelve of everything: two pages at the default size of ten.
+// Twelve of everything: two pages at the default size of ten. Best model
+// pages by model row, so its twelve groups of three are 36 rows.
 function manyRows(): Partial<BenchmarkReport> {
   const base = report()
   const numbers = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -92,6 +93,7 @@ function manyRows(): Partial<BenchmarkReport> {
       models: [
         { model: SONNET, ...figures(6, 5, 0) },
         { model: HAIKU, ...figures(4, 1, 1) },
+        { model: PROXY, ...figures(2, 0, 1) },
       ],
       best: SONNET,
     }))
@@ -181,14 +183,24 @@ describe("Benchmarks page", () => {
     expect(screen.queryByRole("button", { name: "Next page" })).not.toBeInTheDocument()
   })
 
-  it("shows pagination controls under each table that has rows", async () => {
+  it("leaves pagination controls off tables that fit on one page", async () => {
     mockApi({ "GET /api/repos": REPOS, "GET /api/benchmarks?period=30d": report() })
     renderWithProviders(<App />, { route: "/benchmarks" })
     await screen.findByRole("region", { name: "Benchmark totals" })
 
-    expect(within(modelsCard()).getByText("Showing 1-2 of 2")).toBeInTheDocument()
-    expect(within(bestCard()).getByText("Showing 1-1 of 1")).toBeInTheDocument()
-    expect(within(reposCard()).getByText("Showing 1-1 of 1")).toBeInTheDocument()
+    expect(within(modelsCard()).getByText(SONNET)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Next page" })).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Showing /)).not.toBeInTheDocument()
+  })
+
+  it("shows pagination controls under each table with more than a page of rows", async () => {
+    mockApi({ "GET /api/repos": REPOS, "GET /api/benchmarks?period=30d": report(manyRows()) })
+    renderWithProviders(<App />, { route: "/benchmarks" })
+    await screen.findByRole("region", { name: "Benchmark totals" })
+
+    expect(within(modelsCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
+    expect(within(bestCard()).getByText("Showing 1-10 of 36")).toBeInTheDocument()
+    expect(within(reposCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
   })
 
   it("pages each table on its own", async () => {
@@ -205,32 +217,63 @@ describe("Benchmarks page", () => {
     expect(within(reposCard()).queryByText("acme/repo-10")).not.toBeInTheDocument()
     // The other tables stay where they were.
     expect(within(modelsCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
-    expect(within(bestCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
+    expect(within(bestCard()).getByText("Showing 1-10 of 36")).toBeInTheDocument()
 
     await nextPage(modelsCard())
     expect(await within(modelsCard()).findByText("anthropic/model-12")).toBeInTheDocument()
-    expect(within(bestCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
+    expect(within(bestCard()).getByText("Showing 1-10 of 36")).toBeInTheDocument()
   })
 
-  it("pages best model by whole groups and starts over when the grouping changes", async () => {
+  it("pages best model by model row, naming a group again on the page it runs onto", async () => {
     mockApi({ "GET /api/repos": REPOS, "GET /api/benchmarks?period=30d": report(manyRows()) })
     renderWithProviders(<App />, { route: "/benchmarks" })
     await screen.findByRole("region", { name: "Benchmark totals" })
 
-    // Ten languages, each with both of its models: twenty rows plus the header.
-    expect(within(bestCard()).getAllByRole("row")).toHaveLength(21)
-    expect(within(bestCard()).getByText("lang-10")).toBeInTheDocument()
-    expect(within(bestCard()).queryByText("lang-11")).not.toBeInTheDocument()
+    // Ten model rows plus the header: three whole languages and the first
+    // model of the fourth.
+    expect(within(bestCard()).getAllByRole("row")).toHaveLength(11)
+    expect(within(bestCard()).getAllByText("lang-04")).toHaveLength(1)
+    expect(within(bestCard()).queryByText("lang-05")).not.toBeInTheDocument()
 
     await nextPage(bestCard())
-    expect(await within(bestCard()).findByText("Showing 11-12 of 12")).toBeInTheDocument()
-    expect(within(bestCard()).getAllByRole("row")).toHaveLength(5)
-    expect(within(bestCard()).getByText("lang-11")).toBeInTheDocument()
+    expect(await within(bestCard()).findByText("Showing 11-20 of 36")).toBeInTheDocument()
+    const rows = within(bestCard()).getAllByRole("row")
+    expect(rows).toHaveLength(11)
+    // lang-04 carries on here with its second model, under its name.
+    expect(within(rows[1]).getByText("lang-04")).toBeInTheDocument()
+    expect(within(rows[1]).getByText(HAIKU)).toBeInTheDocument()
+    // Its third model follows unnamed, as on any page.
+    expect(within(bestCard()).getAllByText("lang-04")).toHaveLength(1)
+  })
+
+  it("starts best model over when the grouping changes", async () => {
+    mockApi({ "GET /api/repos": REPOS, "GET /api/benchmarks?period=30d": report(manyRows()) })
+    renderWithProviders(<App />, { route: "/benchmarks?bestPage=2" })
+    await screen.findByRole("region", { name: "Benchmark totals" })
+    expect(within(bestCard()).getByText("Showing 11-20 of 36")).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole("tab", { name: "By category" }))
     await screen.findByRole("table", { name: "Findings by category and model" })
-    expect(within(bestCard("category")).getByText("Showing 1-10 of 12")).toBeInTheDocument()
+    expect(within(bestCard("category")).getByText("Showing 1-10 of 36")).toBeInTheDocument()
     expect(within(bestCard("category")).getByText("cat-01")).toBeInTheDocument()
+  })
+
+  it("opens best model on the grouping and page in the URL", async () => {
+    mockApi({ "GET /api/repos": REPOS, "GET /api/benchmarks?period=30d": report(manyRows()) })
+    renderWithProviders(<App />, { route: "/benchmarks?bestGroup=category&bestPage=2" })
+
+    await screen.findByRole("table", { name: "Findings by category and model" })
+    expect(within(bestCard("category")).getByText("Showing 11-20 of 36")).toBeInTheDocument()
+    expect(within(bestCard("category")).getByText("cat-04")).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "By category" })).toHaveAttribute("aria-selected", "true")
+  })
+
+  it("falls back to languages for a grouping the URL does not know", async () => {
+    mockApi({ "GET /api/repos": REPOS, "GET /api/benchmarks?period=30d": report(manyRows()) })
+    renderWithProviders(<App />, { route: "/benchmarks?bestGroup=nonsense" })
+
+    await screen.findByRole("table", { name: "Findings by language and model" })
+    expect(within(bestCard()).getByText("lang-01")).toBeInTheDocument()
   })
 
   it("starts every table over at page 1 for another period or repository", async () => {
@@ -242,14 +285,17 @@ describe("Benchmarks page", () => {
     })
     renderWithProviders(<App />, { route: "/benchmarks?modelsPage=2&bestPage=2&reposPage=2" })
     await screen.findByRole("region", { name: "Benchmark totals" })
-    for (const card of [modelsCard(), bestCard(), reposCard()]) {
+    for (const card of [modelsCard(), reposCard()]) {
       expect(within(card).getByText("Showing 11-12 of 12")).toBeInTheDocument()
     }
+    expect(within(bestCard()).getByText("Showing 11-20 of 36")).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole("tab", { name: "7D" }))
     await waitFor(() => expect(within(reposCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument())
     expect(within(modelsCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
-    expect(within(bestCard()).getByText("Showing 1-10 of 12")).toBeInTheDocument()
+    expect(within(bestCard()).getByText("Showing 1-10 of 36")).toBeInTheDocument()
+    // The new figures are in, so nothing is dimmed as loading any more.
+    await waitFor(() => expect(reposCard().closest("[aria-busy]")).toHaveAttribute("aria-busy", "false"))
 
     await nextPage(reposCard())
     expect(await within(reposCard()).findByText("Showing 11-12 of 12")).toBeInTheDocument()

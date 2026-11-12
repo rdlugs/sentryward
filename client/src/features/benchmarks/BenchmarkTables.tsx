@@ -1,4 +1,3 @@
-import { Fragment, useState } from "react"
 import { TablePagination } from "@/components/TablePagination"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -7,7 +6,8 @@ import { CATEGORY_LABEL } from "@/features/findings/options"
 import type { FindingCategory } from "@/features/findings/types"
 import { formatCount } from "@/features/usage/format"
 import { Segmented } from "@/features/usage/Segmented"
-import { paginate, usePagination } from "@/hooks/use-pagination"
+import { PAGE_SIZES, paginate, usePagination, type Pagination } from "@/hooks/use-pagination"
+import { useUrlFilters } from "@/hooks/use-url-filters"
 import { formatDuration } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import { Cost, Dash, Rate } from "./format"
@@ -21,11 +21,11 @@ export const MODELS_PAGINATION = "models"
 export const BEST_PAGINATION = "best"
 export const REPOS_PAGINATION = "repos"
 
-type Pagination = ReturnType<typeof usePagination>
-
-// Under a table, and only when it has rows: the empty state stands alone.
+// Under a table, and only once it can run to a second page: three tables are
+// stacked here, and a bar of disabled controls under each short one is noise.
+// A table that fits the smallest size fits every size, so nothing is hidden.
 function Pager({ page, pagination }: { page: { page: number; total: number }; pagination: Pagination }) {
-  if (page.total === 0) return null
+  if (page.total <= PAGE_SIZES[0]) return null
   return (
     <TablePagination
       page={page.page}
@@ -89,7 +89,7 @@ export function ModelTable({ report }: { report: BenchmarkReport }) {
                 <TableCell className={numeric}><Rate value={row.findings.falsePositiveRate} /></TableCell>
               </TableRow>
             ))}
-            {report.byModel.length === 0 && <Empty colSpan={9}>No model calls in this period.</Empty>}
+            {page.total === 0 && <Empty colSpan={9}>No model calls in this period.</Empty>}
           </TableBody>
         </Table>
         <Pager page={page} pagination={pagination} />
@@ -140,7 +140,7 @@ export function RepositoryTable({ report }: { report: BenchmarkReport }) {
                 <TableCell className={numeric}><Rate value={row.duplicates.rate} /></TableCell>
               </TableRow>
             ))}
-            {report.byRepository.length === 0 && <Empty colSpan={9}>No reviews in this period.</Empty>}
+            {page.total === 0 && <Empty colSpan={9}>No reviews in this period.</Empty>}
           </TableBody>
         </Table>
         <Pager page={page} pagination={pagination} />
@@ -149,7 +149,8 @@ export function RepositoryTable({ report }: { report: BenchmarkReport }) {
   )
 }
 
-type Group = "language" | "category"
+const GROUP_VALUES = ["language", "category"] as const
+type Group = (typeof GROUP_VALUES)[number]
 
 const GROUPS: { value: Group; label: string }[] = [
   { value: "language", label: "By language" },
@@ -165,18 +166,18 @@ function groupLabel(group: Group, key: string) {
 // findings, highest confirmed rate) is marked; rows with too few findings to
 // judge are dimmed rather than hidden, since a small team may have only those.
 export function BreakdownTable({ report }: { report: BenchmarkReport }) {
-  const [group, setGroup] = useState<Group>("language")
-  const rows: Breakdown[] = group === "language" ? report.byLanguage : report.byCategory
+  // ?bestGroup= sits beside ?bestPage=, so a reloaded or shared link opens on
+  // the list its page belongs to. Changing it starts over at page 1 in the
+  // same URL update (see useUrlFilters): the other grouping is a different list.
+  const filters = useUrlFilters({ group: "language" }, { prefix: BEST_PAGINATION, allowed: { group: GROUP_VALUES } })
+  const group = filters.values.group as Group
+  const groups: Breakdown[] = group === "language" ? report.byLanguage : report.byCategory
   const label = group === "language" ? "Language" : "Category"
   const pagination = usePagination(BEST_PAGINATION)
-  // Paged by language or category, not by model row: a group's label is only
-  // on its first row, so splitting one across pages would leave rows unnamed.
+  // Paged by model row, not by language or category: a group has as many rows
+  // as it has models, so paging by group would leave the table's length open.
+  const rows = groups.flatMap((entry) => entry.models.map((model, index) => ({ entry, model, first: index === 0 })))
   const page = paginate(rows, pagination.page, pagination.size)
-  // The other grouping is a different list, so it starts over at page 1.
-  function onGroupChange(next: Group) {
-    setGroup(next)
-    pagination.setPage(1)
-  }
   return (
     <Card>
       <CardHeader className="flex flex-wrap items-start justify-between gap-2">
@@ -187,7 +188,7 @@ export function BreakdownTable({ report }: { report: BenchmarkReport }) {
             confirmed rate among models with at least {report.minSample} such findings.
           </CardDescription>
         </div>
-        <Segmented label="Break down findings" options={GROUPS} value={group} onChange={onGroupChange} />
+        <Segmented label="Break down findings" options={GROUPS} value={group} onChange={(next) => filters.set({ group: next })} />
       </CardHeader>
       <CardContent>
         <Table aria-label={`Findings by ${label.toLowerCase()} and model`}>
@@ -201,33 +202,31 @@ export function BreakdownTable({ report }: { report: BenchmarkReport }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {page.rows.map((row) => (
-              <Fragment key={row.key}>
-                {row.models.map((model, index) => {
-                  const few = model.decided < report.minSample
-                  return (
-                    <TableRow key={model.model ?? "tools"} className={cn(few && "text-muted-foreground")}>
-                      <TableCell className="font-medium">{index === 0 ? groupLabel(group, row.key) : null}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {model.model === null ? (
-                            <span className="text-muted-foreground">Tools and rules</span>
-                          ) : (
-                            <span className="font-mono text-xs">{model.model}</span>
-                          )}
-                          {model.model !== null && model.model === row.best && <Badge>Best</Badge>}
-                          {few && <span className="text-xs">few findings</span>}
-                        </div>
-                      </TableCell>
-                      <TableCell className={numeric}>{formatCount(model.found)}</TableCell>
-                      <TableCell className={numeric}><Rate value={model.confirmedRate} /></TableCell>
-                      <TableCell className={numeric}><Rate value={model.falsePositiveRate} /></TableCell>
-                    </TableRow>
-                  )
-                })}
-              </Fragment>
-            ))}
-            {rows.length === 0 && <Empty colSpan={5}>No findings in this period.</Empty>}
+            {page.rows.map(({ entry, model, first }, index) => {
+              const few = model.decided < report.minSample
+              return (
+                <TableRow key={`${entry.key}:${model.model ?? "tools"}`} className={cn(few && "text-muted-foreground")}>
+                  {/* Named on its first model, and again at the top of a page
+                      it runs onto, so no page starts with unnamed rows. */}
+                  <TableCell className="font-medium">{first || index === 0 ? groupLabel(group, entry.key) : null}</TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {model.model === null ? (
+                        <span className="text-muted-foreground">Tools and rules</span>
+                      ) : (
+                        <span className="font-mono text-xs">{model.model}</span>
+                      )}
+                      {model.model !== null && model.model === entry.best && <Badge>Best</Badge>}
+                      {few && <span className="text-xs">few findings</span>}
+                    </div>
+                  </TableCell>
+                  <TableCell className={numeric}>{formatCount(model.found)}</TableCell>
+                  <TableCell className={numeric}><Rate value={model.confirmedRate} /></TableCell>
+                  <TableCell className={numeric}><Rate value={model.falsePositiveRate} /></TableCell>
+                </TableRow>
+              )
+            })}
+            {page.total === 0 && <Empty colSpan={5}>No findings in this period.</Empty>}
           </TableBody>
         </Table>
         <Pager page={page} pagination={pagination} />

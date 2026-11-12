@@ -1,5 +1,5 @@
 import { useSearchParams } from "react-router"
-import { paginationKeys } from "./use-pagination"
+import { resetPages } from "./use-pagination"
 
 // The search param a filter lives in: ?status=, or ?fpStatus= with a prefix,
 // matching the prefixed pagination params of a second table on the page.
@@ -36,7 +36,7 @@ export function useUrlFilters<K extends string>(
           if (value === defaults[key]) updated.delete(paramName(key, options.prefix))
           else updated.set(paramName(key, options.prefix), value)
         }
-        updated.delete(paginationKeys(options.prefix).page)
+        resetPages(updated, [options.prefix])
         return updated
       },
       { replace: true },
