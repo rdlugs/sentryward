@@ -5,7 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { SortableHead } from "@/components/SortableHead"
 import { TablePagination } from "@/components/TablePagination"
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table"
-import { paginate, usePagination } from "@/hooks/use-pagination"
+import { paginate, usePagination, type Pagination } from "@/hooks/use-pagination"
 import { useSort } from "@/hooks/use-sort"
 import { timeAgo } from "@/lib/time"
 import { costUnknown, formatCount, formatUsd } from "./format"
@@ -94,8 +94,6 @@ function compare(a: string | number | null, b: string | number | null) {
   if (a === null || b === null) return a === b ? 0 : a === null ? 1 : -1
   return typeof a === "string" ? a.localeCompare(String(b)) : a - Number(b)
 }
-
-type Pagination = ReturnType<typeof usePagination>
 
 function DataTable<R>({
   label,

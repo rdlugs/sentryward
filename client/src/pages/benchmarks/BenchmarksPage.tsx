@@ -8,11 +8,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton"
 import { useBenchmarks } from "@/features/benchmarks/api"
 import { BenchmarkCards } from "@/features/benchmarks/BenchmarkCards"
-import { BreakdownTable, ModelTable, RepositoryTable } from "@/features/benchmarks/BenchmarkTables"
+import {
+  BEST_PAGINATION,
+  BreakdownTable,
+  MODELS_PAGINATION,
+  ModelTable,
+  REPOS_PAGINATION,
+  RepositoryTable,
+} from "@/features/benchmarks/BenchmarkTables"
 import { useRepos } from "@/features/forge/api"
 import { Segmented } from "@/features/usage/Segmented"
 import { USAGE_PERIODS, type UsagePeriod } from "@/features/usage/types"
+import { resetPages } from "@/hooks/use-pagination"
 import { ALL } from "@/lib/filters"
+import { cn } from "@/lib/utils"
 
 const PERIOD_OPTIONS: { value: UsagePeriod; label: string }[] = [
   { value: "24h", label: "24h" },
@@ -41,6 +50,8 @@ export function BenchmarksPage() {
       const next = new URLSearchParams(current)
       if (key === "repo" && value === ALL) next.delete("repo")
       else next.set(key, value)
+      // Another period or repository is other rows, so every table starts over at page 1.
+      resetPages(next, [MODELS_PAGINATION, BEST_PAGINATION, REPOS_PAGINATION])
       return next
     })
   }
@@ -78,12 +89,17 @@ export function BenchmarksPage() {
           <AlertTitle>Could not load benchmarks.</AlertTitle>
         </Alert>
       ) : (
-        <>
+        // Dimmed while another period or repository loads: these are still the
+        // old figures, already back on page 1. The gap repeats PageShell's.
+        <div
+          aria-busy={isPlaceholderData}
+          className={cn("flex flex-col gap-6 transition-opacity compact:gap-4 spacious:gap-8", isPlaceholderData && "opacity-60")}
+        >
           <BenchmarkCards totals={data.totals} />
           <ModelTable report={data} />
           <BreakdownTable report={data} />
           <RepositoryTable report={data} />
-        </>
+        </div>
       )}
     </PageShell>
   )

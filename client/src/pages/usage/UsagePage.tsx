@@ -12,7 +12,7 @@ import { Segmented } from "@/features/usage/Segmented"
 import { USAGE_PERIODS, type UsagePeriod } from "@/features/usage/types"
 import { UsageChart } from "@/features/usage/UsageChart"
 import { USAGE_PAGINATION, UsageTable } from "@/features/usage/UsageTable"
-import { paginationKeys } from "@/hooks/use-pagination"
+import { resetPages } from "@/hooks/use-pagination"
 
 const PERIOD_OPTIONS: { value: UsagePeriod; label: string }[] = [
   { value: "24h", label: "24h" },
@@ -33,7 +33,7 @@ export function UsagePage() {
       const updated = new URLSearchParams(current)
       updated.set("period", next)
       // Another period lists other rows, so both lists start over at page 1.
-      for (const prefix of [RECENT_PAGINATION, USAGE_PAGINATION]) updated.delete(paginationKeys(prefix).page)
+      resetPages(updated, [RECENT_PAGINATION, USAGE_PAGINATION])
       return updated
     })
   }

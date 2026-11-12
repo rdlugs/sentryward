@@ -18,6 +18,12 @@ export function paginationKeys(prefix?: string) {
   return prefix ? { page: `${prefix}Page`, size: `${prefix}Size` } : { page: "page", size: "size" }
 }
 
+// Drops each table's page from the params, for an updater that changes what the
+// tables list (another period, filter or grouping): they start over at page 1.
+export function resetPages(params: URLSearchParams, prefixes: (string | undefined)[]) {
+  for (const prefix of prefixes) params.delete(paginationKeys(prefix).page)
+}
+
 // ?page= and ?size= keep the current page linkable and survive a reload.
 // Defaults are left out of the URL, and other params (e.g. ?tab=) are kept.
 // A prefix gives a second table on the same page its own params (?fpPage=).
@@ -51,6 +57,8 @@ export function usePagination(prefix?: string) {
     setSize: (next: number) => update({ page: 1, size: next }),
   }
 }
+
+export type Pagination = ReturnType<typeof usePagination>
 
 // Clamps to the last page so a filter that shrinks the list never strands the
 // table on an empty page.
