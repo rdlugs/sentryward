@@ -91,7 +91,11 @@ function finishedJob(status: ReviewStatus, verdict: ReviewVerdict | null, error:
   });
 }
 
-function target(kind: "webhook" | "slack" | "google_chat", events: NotificationEvent[], url = "https://hooks.example.com/sw") {
+function target(
+  kind: "webhook" | "slack" | "google_chat" | "discord" | "teams",
+  events: NotificationEvent[],
+  url = "https://hooks.example.com/sw",
+) {
   return prisma.notificationTarget.create({
     data: {
       workspaceId,
@@ -667,6 +671,444 @@ describe("notifyJob", () => {
     expect(row.error).not.toMatch(/chat-key-value|chat-token-value|AAAA/);
   });
 
+  const DISCORD_URL = "https://discord.com/api/webhooks/123456789012345678/discord-token-value";
+  const discordStub = (times = 1) =>
+    fetchStub(Array.from({ length: times }, () => ({ method: "POST", url: /discord\.com\/api\/webhooks/ })));
+  const discordReviewLink = (id: string) => `[View review](${env.CLIENT_ORIGIN}/reviews/${id})`;
+  const embed = (title: string, color: number, lines: string[]) => ({
+    embeds: [{ title, description: lines.join("\n"), color }],
+    allowed_mentions: { parse: [] },
+  });
+
+  // The code comes from Discord's JSON error body: only Unknown Webhook says
+  // the webhook is gone, Unknown Channel is a deleted thread.
+  it.each([
+    [10015, false],
+    [10003, true],
+  ])("reads Discord's code %i from a 404 (active afterwards: %s)", async (code, active) => {
+    const stub = fetchStub([{ method: "POST", url: /discord\.com\/api\/webhooks/, status: 404, body: { code } }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const hook = await target("discord", ["failed"], DISCORD_URL);
+    const job = await finishedJob("failed", "error", "boom");
+
+    await notifyAndSend(job.id);
+
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(stored.active).toBe(active);
+  });
+
+  it("posts a failed review to Discord as an embed with its error and a review link", async () => {
+    const stub = discordStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("discord", ["failed"], DISCORD_URL);
+    const job = await finishedJob("failed", "error", "No API key for anthropic");
+
+    await notifyAndSend(job.id);
+
+    expect(stub.calls[0]!.url).toBe(DISCORD_URL);
+    // No signature headers: the URL is the credential.
+    expect(Object.keys(stub.calls[0]!.headers).filter((name) => name.startsWith("x-sentryward"))).toEqual([]);
+    // No `content`, which Discord would show above the embed; and a failed
+    // review has no summary, so no change URL and no PR link.
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual(
+      embed("⚠️ Review failed", 0xf59e0b, ["acme/web \\#7", "No API key for anthropic", discordReviewLink(job.id)]),
+    );
+  });
+
+  it("posts a blocked review to Discord with its title, the severities and a PR link", async () => {
+    const stub = discordStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("discord", ["blocked"], DISCORD_URL);
+    const job = await finishedJob("completed", "blocked");
+
+    await notifyAndSend(job.id);
+
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual(
+      embed("\u{1F534} Review blocked", 0xdc2626, [
+        "acme/web \\#7",
+        "**Add login**",
+        "3 findings (1 major · 2 minor)",
+        `${discordReviewLink(job.id)} · [Open PR](https://github.com/acme/web/pull/7)`,
+      ]),
+    );
+  });
+
+  it.each([
+    ["no change URL", undefined],
+    ["a change URL that is not http(s)", "javascript:alert(1)"],
+    ["a change URL too long to send", `https://github.com/acme/web/pull/7?${"x".repeat(1000)}`],
+  ])("leaves the Discord PR link out with %s", async (_label, webUrl) => {
+    const stub = discordStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("discord", ["blocked"], DISCORD_URL);
+    const job = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 7,
+        headSha: "aaa",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, webUrl },
+        finishedAt: new Date(),
+      },
+    });
+
+    await notifyAndSend(job.id);
+
+    const { description } = JSON.parse(stub.calls[0]!.body!).embeds[0];
+    expect(description.split("\n").at(-1)).toBe(discordReviewLink(job.id));
+  });
+
+  it("encodes a change URL so it cannot end a Discord link early", async () => {
+    const stub = discordStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("discord", ["blocked"], DISCORD_URL);
+    const job = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 7,
+        headSha: "aaa",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, webUrl: "https://github.com/acme/web/pull/7?a=(x)&b=) [Approve](https://evil.example" },
+        finishedAt: new Date(),
+      },
+    });
+
+    await notifyAndSend(job.id);
+
+    const { description } = JSON.parse(stub.calls[0]!.body!).embeds[0];
+    const link = description.split("\n").at(-1).split(" · ")[1];
+    expect(link).toMatch(/^\[Open PR\]\(https:\/\/github\.com\/acme\/web\/pull\/7\?[^()\s<>]*\)$/);
+    expect(link).toContain("%28x%29");
+  });
+
+  it("sends a test notification to Discord", async () => {
+    const stub = discordStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    const discord = await target("discord", ["failed"], DISCORD_URL);
+
+    expect(await testTarget(discord)).toEqual({ ok: true });
+
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual(
+      embed("\u{1F514} Test notification", 0x3b82f6, [
+        "example/repository \\#1",
+        "**Test notification from Sentryward**",
+        "0 findings",
+        `[View review](${env.CLIENT_ORIGIN}/reviews)`,
+      ]),
+    );
+  });
+
+  // Discord's own markup is added to the Slack list.
+  const DISCORD_HOSTILE = [
+    ...HOSTILE,
+    "[Approve](https://evil.example) ||spoiler|| <@123> <#456> <@&789> @everyone",
+    "# heading\n> quote\n- item\n1. step",
+    "back\\slash \\*not bold\\* https://evil.example/reset",
+  ];
+
+  it.each(DISCORD_HOSTILE)("escapes forge text in Discord embeds: %j", async (hostile) => {
+    const stub = discordStub(2);
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("discord", ["failed", "blocked"], DISCORD_URL);
+    const blocked = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 8,
+        headSha: "bbb",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, title: hostile },
+        finishedAt: new Date(),
+      },
+    });
+    const failed = await finishedJob("failed", "error", hostile);
+
+    await notifyAndSend(blocked.id);
+    await notifyAndSend(failed.id);
+
+    const flat = hostile.replace(/\s+/g, " ").trim();
+    // What Discord shows: each backslash gives the character after it.
+    const shown = (text: string) => text.replaceAll("​", "").replace(/\\(.)/g, "$1");
+    const jobs = [blocked, failed];
+    stub.calls.forEach((call, i) => {
+      const body = JSON.parse(call.body!);
+      expect(body.content).toBeUndefined();
+      expect(body.allowed_mentions).toEqual({ parse: [] });
+      expect(body.embeds).toHaveLength(1);
+      // The title is our own words only.
+      expect(body.embeds[0].title).toBe(i === 0 ? "\u{1F534} Review blocked" : "⚠️ Review failed");
+      const lines = body.embeds[0].description.split("\n") as string[];
+      // One line each: a second line of forge text could pass for one of ours.
+      expect(lines).toHaveLength(i === 0 ? 4 : 3);
+      const forge = i === 0 ? lines[1]!.replace(/^\*\*(.*)\*\*$/, "$1") : lines[1]!;
+      expect(lines[1]!.startsWith("**")).toBe(i === 0);
+      expect(shown(forge)).toBe(flat);
+      // With every escaped character taken out, nothing Discord reads as
+      // markup, a mention or a link is left.
+      const unescaped = forge.replace(/\\[^0-9A-Za-z\s]/g, "");
+      expect(unescaped).not.toMatch(/[\\*_~`|<>#\-[\]():]/);
+      expect(unescaped).not.toMatch(/@(?!​)/);
+      // Links are to our review and the checked change URL, nothing else.
+      expect(lines.at(-1)).toBe(
+        i === 0 ? `${discordReviewLink(jobs[i]!.id)} · [Open PR](https://github.com/acme/web/pull/7)` : discordReviewLink(jobs[i]!.id),
+      );
+    });
+  });
+
+  it("clips long forge text in a Discord embed without cutting an escape or an emoji", async () => {
+    const stub = discordStub(2);
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("discord", ["failed"], DISCORD_URL);
+    await notifyAndSend((await finishedJob("failed", "error", "*".repeat(5000))).id);
+    // The emoji's two code units sit either side of the 700-character cut.
+    await notifyAndSend((await finishedJob("failed", "error", `${"x".repeat(698)}\u{1F600}${"y".repeat(50)}`)).id);
+
+    // 700 characters kept, each two once escaped.
+    expect(JSON.parse(stub.calls[0]!.body!).embeds[0].description.split("\n")[1]).toBe(`${"\\*".repeat(699)}…`);
+    expect(stub.calls[1]!.body!).not.toMatch(/\\ud[89ab][0-9a-f]{2}/i);
+    expect(JSON.parse(stub.calls[1]!.body!).embeds[0].description.split("\n")[1]).toBe(`${"x".repeat(698)}…`);
+  });
+
+  it("keeps the worst review inside Discord's embed limits", async () => {
+    const stub = discordStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    const discord = await target("discord", ["failed"], DISCORD_URL);
+    const hostile = "*".repeat(5000);
+
+    await deliver(discord, workspaceId, {
+      event: "failed",
+      review: { id: "r1", url: `${env.CLIENT_ORIGIN}/reviews/r1`, status: "failed", verdict: "error", error: hostile, trigger: "manual" },
+      repository: { provider: "github", fullPath: hostile },
+      change: { number: 7, title: hostile, url: `https://github.com/acme/web/pull/7?${"x".repeat(950)}`, headSha: "aaa" },
+      findings: null,
+    });
+
+    const [{ title, description }] = JSON.parse(stub.calls[0]!.body!).embeds;
+    expect(description).toContain("[Open PR](");
+    expect(description.length).toBeLessThanOrEqual(4096);
+    expect(title.length + description.length).toBeLessThan(6000);
+  });
+
+  it("never stores a Discord URL's token in an error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error(`request to ${DISCORD_URL} failed; token discord-token-value`);
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await target("discord", ["completed"], DISCORD_URL);
+
+    await notifyAndSend((await finishedJob("completed", "pass")).id);
+
+    const row = await prisma.notificationDelivery.findFirstOrThrow();
+    expect(row.error).not.toMatch(/discord-token-value|123456789012345678/);
+  });
+
+  const TEAMS_URL =
+    "https://prod-12.westeurope.logic.azure.com:443/workflows/0123456789abcdef/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=teams-sig-value";
+  const teamsStub = (times = 1) =>
+    fetchStub(Array.from({ length: times }, () => ({ method: "POST", url: /logic\.azure\.com/ })));
+  const heading = (text: string) => ({ type: "TextBlock", text, weight: "Bolder", wrap: true, size: "Medium" });
+  const line = (text: string) => ({ type: "TextBlock", text, wrap: true });
+  const rich = (text: string, extra: object = {}) => ({
+    type: "RichTextBlock",
+    inlines: [{ type: "TextRun", text, ...extra }],
+  });
+  const openUrl = (title: string, url: string) => ({ type: "Action.OpenUrl", title, url });
+  const reviewAction = (id: string) => openUrl("View review", `${env.CLIENT_ORIGIN}/reviews/${id}`);
+  const prAction = openUrl("Open PR", "https://github.com/acme/web/pull/7");
+  const teamsCard = (body: unknown[], actions: unknown[]) => ({
+    type: "message",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        contentUrl: null,
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.4",
+          body,
+          actions,
+        },
+      },
+    ],
+  });
+  const cardOf = (raw: string) =>
+    JSON.parse(raw).attachments[0].content as {
+      body: { type: string; text?: string; inlines?: { type: string; text: string }[] }[];
+      actions: unknown[];
+    };
+
+  it("posts a failed review to Teams as an Adaptive Card with its error and a review action", async () => {
+    const stub = teamsStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("teams", ["failed"], TEAMS_URL);
+    const job = await finishedJob("failed", "error", "No API key for anthropic");
+
+    await notifyAndSend(job.id);
+
+    expect(stub.calls[0]!.url).toBe(TEAMS_URL);
+    // No signature headers: the URL is the credential.
+    expect(Object.keys(stub.calls[0]!.headers).filter((name) => name.startsWith("x-sentryward"))).toEqual([]);
+    // A failed review has no summary, so no change URL and no PR action.
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual(
+      teamsCard([heading("⚠️ Review failed"), rich("acme/web #7"), rich("No API key for anthropic")], [reviewAction(job.id)]),
+    );
+  });
+
+  it("posts a blocked review to Teams with its title, the severities and a PR action", async () => {
+    const stub = teamsStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("teams", ["blocked"], TEAMS_URL);
+    const job = await finishedJob("completed", "blocked");
+
+    await notifyAndSend(job.id);
+
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual(
+      teamsCard(
+        [
+          heading("\u{1F534} Review blocked"),
+          rich("acme/web #7"),
+          rich("Add login", { weight: "Bolder" }),
+          line("3 findings (1 major · 2 minor)"),
+        ],
+        [reviewAction(job.id), prAction],
+      ),
+    );
+  });
+
+  it.each([
+    ["no change URL", undefined],
+    ["a change URL that is not http(s)", "javascript:alert(1)"],
+    ["a change URL too long to send", `https://github.com/acme/web/pull/7?${"x".repeat(4000)}`],
+  ])("leaves the Teams PR action out with %s", async (_label, webUrl) => {
+    const stub = teamsStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("teams", ["blocked"], TEAMS_URL);
+    const job = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 7,
+        headSha: "aaa",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, webUrl },
+        finishedAt: new Date(),
+      },
+    });
+
+    await notifyAndSend(job.id);
+
+    expect(cardOf(stub.calls[0]!.body!).actions).toEqual([reviewAction(job.id)]);
+  });
+
+  it("sends a test notification to Teams", async () => {
+    const stub = teamsStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    const teams = await target("teams", ["failed"], TEAMS_URL);
+
+    expect(await testTarget(teams)).toEqual({ ok: true });
+
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual(
+      teamsCard(
+        [
+          heading("\u{1F514} Test notification"),
+          rich("example/repository #1"),
+          rich("Test notification from Sentryward", { weight: "Bolder" }),
+          line("0 findings"),
+        ],
+        [openUrl("View review", `${env.CLIENT_ORIGIN}/reviews`)],
+      ),
+    );
+  });
+
+  // A TextBlock renders markdown, so its syntax is added to the Slack list.
+  const TEAMS_HOSTILE = [...HOSTILE, "[Approve](https://evil.example) **bold** _italic_\n- item\n1. step <at>Everyone</at>"];
+
+  it.each(TEAMS_HOSTILE)("keeps forge text out of markdown in Teams cards: %j", async (hostile) => {
+    const stub = teamsStub(2);
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("teams", ["failed", "blocked"], TEAMS_URL);
+    const blocked = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 8,
+        headSha: "bbb",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, title: hostile },
+        finishedAt: new Date(),
+      },
+    });
+    const failed = await finishedJob("failed", "error", hostile);
+
+    await notifyAndSend(blocked.id);
+    await notifyAndSend(failed.id);
+
+    const flat = hostile.replace(/\s+/g, " ").trim();
+    const jobs = [blocked, failed];
+    stub.calls.forEach((call, i) => {
+      const { body, actions } = cardOf(call.body!);
+      // Only these two element types, and every TextBlock (which renders
+      // markdown) is one of our own lines.
+      expect(new Set(body.map((element) => element.type))).toEqual(new Set(["TextBlock", "RichTextBlock"]));
+      const blocks = body.flatMap((element) => (element.type === "TextBlock" ? [element.text] : []));
+      expect(blocks).toEqual(
+        i === 0 ? ["\u{1F534} Review blocked", "3 findings (1 major · 2 minor)"] : ["⚠️ Review failed"],
+      );
+      // The forge text is there, in a run that shows it as written.
+      const runs = body.flatMap((element) => element.inlines ?? []);
+      for (const run of runs) expect(run.type).toBe("TextRun");
+      expect(runs.map((run) => run.text.replaceAll("​", ""))).toContain(flat);
+      for (const run of runs) {
+        expect(run.text).not.toContain("\n");
+        // Nothing left that a client would link: no scheme and no dotted name.
+        expect(run.text).not.toMatch(/:\/\/(?!​)|\w\.\w/);
+      }
+      // Actions open our review and the checked change URL, nothing else.
+      expect(actions).toEqual(i === 0 ? [reviewAction(jobs[i]!.id), prAction] : [reviewAction(jobs[i]!.id)]);
+    });
+  });
+
+  it("clips long forge text in a Teams card, inside the message size limit and without cutting an emoji", async () => {
+    const stub = teamsStub(2);
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("teams", ["failed"], TEAMS_URL);
+    // A control character is six bytes once JSON escapes it: the worst case.
+    await notifyAndSend((await finishedJob("failed", "error", "\u0001".repeat(5000))).id);
+    // The emoji's two code units sit either side of the 1000-character cut.
+    await notifyAndSend((await finishedJob("failed", "error", `${"x".repeat(998)}\u{1F600}${"y".repeat(50)}`)).id);
+
+    expect(cardOf(stub.calls[0]!.body!).body[2]!.inlines![0]!.text).toHaveLength(1000);
+    expect(Buffer.byteLength(stub.calls[0]!.body!)).toBeLessThan(28_000);
+    expect(stub.calls[1]!.body!).not.toMatch(/\\ud[89ab][0-9a-f]{2}/i);
+    expect(cardOf(stub.calls[1]!.body!).body[2]!.inlines![0]!.text).toBe(`${"x".repeat(998)}…`);
+  });
+
+  it("never stores a Teams URL's signature in an error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error(`request to ${TEAMS_URL} failed; sig=teams-sig-value`);
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await target("teams", ["completed"], TEAMS_URL);
+
+    await notifyAndSend((await finishedJob("completed", "pass")).id);
+
+    const row = await prisma.notificationDelivery.findFirstOrThrow();
+    expect(row.error).not.toMatch(/teams-sig-value|0123456789abcdef/);
+  });
+
   it("does not notify skipped or cancelled jobs", async () => {
     const stub = fetchStub([]);
     vi.stubGlobal("fetch", stub.fetch);
@@ -994,6 +1436,21 @@ describe("delivery log", () => {
     expect(redactError("bad signature a/b+c=d123", encoded)).toBe("bad signature [redacted]");
   });
 
+  // The fixed words of a webhook URL are not a credential on their own.
+  it("keeps the fixed segments of a webhook URL as words", () => {
+    const url =
+      "https://prod-12.westeurope.logic.azure.com:443/workflows/0123456789abcdef/triggers/manual/paths/invoke?sig=teams-sig-value";
+    expect(redactError("request to workflows endpoint failed: triggers unavailable", url)).toBe(
+      "request to workflows endpoint failed: triggers unavailable",
+    );
+    expect(redactError("workflow 0123456789abcdef refused teams-sig-value", url)).toBe(
+      "workflow [redacted] refused [redacted]",
+    );
+    expect(redactError("no such path /workflows/0123456789abcdef/triggers/manual/paths/invoke", url)).toBe(
+      "no such path [redacted]",
+    );
+  });
+
   it("flattens and clips stored errors", () => {
     expect(redactError("a\n\nb", null)).toBe("a b");
     expect(redactError("x".repeat(600), null)).toHaveLength(500);
@@ -1221,6 +1678,54 @@ describe("/api/notifications", () => {
     expect(edited.status).toBe(200);
     const removed = await request(app).delete(`/api/notifications/${stored.id}`).set("Cookie", cookie);
     expect(removed.status).toBeLessThan(300);
+  });
+
+  it.each([
+    [
+      "discord",
+      "https://discord.com/api/webhooks/123456789012345678/discord-token-value",
+      "discord.com",
+      /discord-token-value|123456789012345678/,
+    ],
+    [
+      "teams",
+      "https://prod-12.westeurope.logic.azure.com:443/workflows/0123456789abcdef/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=teams-sig-value",
+      "prod-12.westeurope.logic.azure.com",
+      /teams-sig-value|0123456789abcdef/,
+    ],
+  ] as const)("adds, pauses, edits and removes a %s target, showing only its host and no secret", async (kind, url, host, secret) => {
+    const res = await request(app)
+      .post("/api/notifications")
+      .set("Cookie", cookie)
+      .send({ kind, name: "Channel", events: ["blocked"], url });
+
+    expect(res.status).toBe(201);
+    expect(res.body.secret).toBeUndefined();
+    expect(res.body.target).toMatchObject({ kind, name: "Channel", host, active: true });
+    expect(JSON.stringify(res.body)).not.toMatch(secret);
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: res.body.target.id } });
+    expect(stored.encryptedUrl).not.toMatch(secret);
+    expect(decrypt(stored.encryptedUrl!)).toBe(url);
+    expect(stored.encryptedSecret).toBeNull();
+
+    const list = await request(app).get("/api/notifications").set("Cookie", cookie);
+    expect(JSON.stringify(list.body)).not.toMatch(secret);
+
+    const paused = await request(app).patch(`/api/notifications/${stored.id}`).set("Cookie", cookie).send({ active: false });
+    expect(paused.status).toBe(200);
+    expect(paused.body.target.active).toBe(false);
+    const edited = await request(app)
+      .patch(`/api/notifications/${stored.id}`)
+      .set("Cookie", cookie)
+      .send({ url: `${url}2`, active: true });
+    expect(edited.status).toBe(200);
+    expect(decrypt((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: stored.id } })).encryptedUrl!)).toBe(`${url}2`);
+    // A webhook's secret is not something these kinds have to rotate.
+    const rotated = await request(app).post(`/api/notifications/${stored.id}/rotate-secret`).set("Cookie", cookie);
+    expect(rotated.status).toBe(400);
+    const removed = await request(app).delete(`/api/notifications/${stored.id}`).set("Cookie", cookie);
+    expect(removed.status).toBeLessThan(300);
+    expect(await prisma.notificationTarget.count()).toBe(0);
   });
 
   it("adds email targets only for members, and only with mail configured", async () => {

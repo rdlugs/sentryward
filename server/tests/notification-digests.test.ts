@@ -564,6 +564,177 @@ describe("rendering digests", () => {
     for (const text of texts.slice(11)) expect(text).toContain(": &lt;i&gt;boom&lt;/i&gt;");
   });
 
+  // The most a digest can hold, every forge string `hostile` over and over.
+  function worstDigest(payload: DigestPayload, hostile: string): DigestPayload {
+    const entry = (base: DigestPayload["reviews"][number], i: number) => ({
+      ...base,
+      repository: { ...base.repository, fullPath: `acme/${hostile}` },
+      change: { ...base.change, number: i, title: hostile },
+      review: { ...base.review, error: base.review.error === null ? null : `boom ${hostile}` },
+    });
+    return {
+      ...payload,
+      counts: { ...payload.counts, failed: 60 },
+      topBlockedRepositories: Array.from({ length: 5 }, (_, i) => ({
+        provider: "github",
+        fullPath: `${i}${hostile}`,
+        blocked: 9,
+      })),
+      blocked: Array.from({ length: 50 }, (_, i) => entry(payload.blocked[0]!, i)),
+      blockedTruncated: 7,
+      reviews: Array.from({ length: 60 }, (_, i) => entry(failedOf(payload), i)),
+    };
+  }
+
+  async function sendDigest(kind: "discord" | "teams", url: string, payload: DigestPayload) {
+    const target = await prisma.notificationTarget.update({
+      where: { id: (await prisma.notificationTarget.findFirstOrThrow()).id },
+      data: { kind, encryptedUrl: encrypt(url), encryptedSecret: null },
+    });
+    const stub = fetchStub([{ method: "POST", url: new RegExp(new URL(url).hostname.replaceAll(".", "\\.")) }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    await deliver(target, workspaceId, payload);
+    expect(stub.calls).toHaveLength(1);
+    return stub.calls[0]!.body!;
+  }
+  const discordDigest = (payload: DigestPayload) => sendDigest("discord", "https://discord.com/api/webhooks/1/token", payload);
+  const teamsDigest = (payload: DigestPayload) =>
+    sendDigest("teams", "https://prod-12.westeurope.logic.azure.com/workflows/1/triggers/manual/paths/invoke?sig=s", payload);
+
+  it("posts one Discord embed summarising the period", async () => {
+    const payload = await builtDigest();
+    const body = JSON.parse(await discordDigest(payload));
+
+    expect(body.content).toBeUndefined();
+    expect(body.allowed_mentions).toEqual({ parse: [] });
+    expect(body.embeds).toHaveLength(1);
+    const [embed] = body.embeds;
+    expect(embed.title).toBe("Daily digest");
+    expect(embed.footer.text).toContain("Europe/Berlin");
+    const lines = embed.description.split("\n") as string[];
+    const link = (url: string) => ` · [View review](${url})`;
+    expect(lines).toEqual([
+      "2 reviews, 1 blocked, 1 failed",
+      "Most blocked\\: acme/web \\(1\\)",
+      "",
+      "**Still blocked**",
+      expect.stringMatching(/^acme\/web\\#\d+.* · \[View review\]\(/),
+      "",
+      "**Failed**",
+      expect.stringMatching(/^acme\/web\\#\d+.*: boom · \[View review\]\(/),
+      "",
+      `[All reviews](${env.CLIENT_ORIGIN}/reviews)`,
+    ]);
+    expect(lines[4]!.endsWith(link(payload.blocked[0]!.review.url))).toBe(true);
+    expect(lines[7]!.endsWith(link(failedOf(payload).review.url))).toBe(true);
+  });
+
+  it("escapes forge text in a Discord digest and stays inside the embed limits", async () => {
+    // Every character doubles when escaped: the worst a title can do.
+    const worst = worstDigest(await builtDigest(), "*".repeat(3000));
+
+    const [embed] = JSON.parse(await discordDigest(worst)).embeds;
+
+    expect(embed.description.length).toBeLessThanOrEqual(4096);
+    expect(embed.title.length + embed.description.length + embed.footer.text.length).toBeLessThan(6000);
+    const lines = embed.description.split("\n") as string[];
+    const rows = (heading: string) => {
+      const from = lines.indexOf(`**${heading}**`) + 1;
+      return lines.slice(from, lines.indexOf("", from));
+    };
+    // Fewer rows than the caps of 10 and 5, since each is at its longest; the
+    // ones left out are counted, so the totals still come to 57 and 60.
+    const blocked = rows("Still blocked");
+    const failed = rows("Failed");
+    expect(blocked.length).toBeGreaterThan(2);
+    expect(failed.length).toBeGreaterThan(2);
+    expect(blocked.at(-1)).toBe(`and ${57 - (blocked.length - 1)} more`);
+    expect(failed.at(-1)).toBe(`and ${60 - (failed.length - 1)} more`);
+    for (const row of [...blocked.slice(0, -1), ...failed.slice(0, -1)]) {
+      const [text, link] = row.split(" · ");
+      expect(link).toMatch(/^\[View review\]\(\S+\)$/);
+      // With every escaped character taken out, no markup is left (the ": "
+      // between a failed row's title and its error is ours).
+      for (const part of text!.split(": ")) {
+        expect(part.replace(/\\[^0-9A-Za-z\s]/g, "")).not.toMatch(/[\\*_~`|<>#\-[\]():]/);
+      }
+    }
+    // A failed row's title is clipped apart from its error, so however long
+    // the title, the reason is still there.
+    for (const row of failed.slice(0, -1)) expect(row).toContain(": boom ");
+  });
+
+  it("posts one Teams card summarising the period", async () => {
+    const payload = await builtDigest();
+    const body = JSON.parse(await teamsDigest(payload));
+
+    expect(body.type).toBe("message");
+    expect(body.attachments).toHaveLength(1);
+    expect(body.attachments[0].contentType).toBe("application/vnd.microsoft.card.adaptive");
+    const card = body.attachments[0].content;
+    const run = (text: string) => ({ type: "TextRun", text });
+    // The forge text beside a button of its own, which every client honours.
+    const row = (text: unknown, url: string) => ({
+      type: "ColumnSet",
+      columns: [
+        {
+          type: "Column",
+          width: "stretch",
+          verticalContentAlignment: "Center",
+          items: [{ type: "RichTextBlock", inlines: [{ type: "TextRun", text }] }],
+        },
+        {
+          type: "Column",
+          width: "auto",
+          items: [{ type: "ActionSet", actions: [{ type: "Action.OpenUrl", title: "View review", url }] }],
+        },
+      ],
+    });
+    expect(card.body).toEqual([
+      { type: "TextBlock", text: "Daily digest", weight: "Bolder", wrap: true, size: "Medium" },
+      { type: "TextBlock", text: expect.stringContaining("Europe/Berlin"), wrap: true, isSubtle: true, spacing: "None" },
+      { type: "TextBlock", text: "2 reviews, 1 blocked, 1 failed", wrap: true },
+      { type: "RichTextBlock", inlines: [run("Most blocked: acme/web (1)")] },
+      { type: "TextBlock", text: "Still blocked", weight: "Bolder", wrap: true },
+      row(expect.stringContaining("acme/web#"), payload.blocked[0]!.review.url),
+      { type: "TextBlock", text: "Failed", weight: "Bolder", wrap: true },
+      row(expect.stringMatching(/^acme\/web#\d+.*: /), failedOf(payload).review.url),
+    ]);
+    expect(card.actions).toEqual([{ type: "Action.OpenUrl", title: "All reviews", url: `${env.CLIENT_ORIGIN}/reviews` }]);
+  });
+
+  it("keeps forge text out of markdown in a Teams digest and stays inside the message size limit", async () => {
+    // A control character is six bytes once JSON escapes it: the worst a title
+    // can do to the size. The markup shows forge text is in plain runs only.
+    const worst = worstDigest(await builtDigest(), `[x](https://evil.example) **b** ${"\u0001".repeat(3000)}`);
+
+    const raw = await teamsDigest(worst);
+
+    expect(Buffer.byteLength(raw)).toBeLessThan(28_000);
+    type Element = { type: string; text?: string; inlines?: { text: string }[]; columns?: { items: Element[] }[] };
+    const content = JSON.parse(raw).attachments[0].content as { body: Element[] };
+    // A row's text sits in the first column of its ColumnSet.
+    const body = content.body.flatMap((element) =>
+      element.type === "ColumnSet" ? element.columns!.flatMap((column) => column.items) : [element],
+    );
+    // Every TextBlock, which renders markdown, is one of our own lines.
+    const blocks = body.flatMap((element) => (element.type === "TextBlock" ? [element.text] : []));
+    expect(blocks).toEqual([
+      "Daily digest",
+      expect.stringContaining("Europe/Berlin"),
+      expect.stringMatching(/^\d+ reviews?, /),
+      "Still blocked",
+      "and 47 more",
+      "Failed",
+      "and 55 more",
+    ]);
+    // 10 of 57 blocked changes and 5 of 60 failed reviews, after the top line.
+    const rich = body.filter((element) => element.type === "RichTextBlock");
+    expect(rich).toHaveLength(16);
+    for (const element of rich) expect(element.inlines![0]!.text).not.toMatch(/:\/\/(?!​)|\w\.\w/);
+    for (const element of rich.slice(11)) expect(element.inlines![0]!.text).toContain(": boom ");
+  });
+
   it("emails a plain-text summary", async () => {
     const payload = await builtDigest();
     vi.spyOn(mailer, "configured").mockReturnValue(true);

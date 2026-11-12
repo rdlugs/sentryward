@@ -164,6 +164,46 @@ describe("Notifications", () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({ kind: "google_chat", name: "Review space", url })
   })
 
+  it.each([
+    ["discord", "Discord", "Webhook URL", "https://discord.com/api/webhooks/123/token", "discord.com"],
+    [
+      "teams",
+      "Microsoft Teams",
+      "Workflows webhook URL",
+      "https://prod-12.westeurope.logic.azure.com/workflows/1/triggers/manual/paths/invoke?sig=s",
+      "prod-12.westeurope.logic.azure.com",
+    ],
+  ])("adds a %s target with its webhook URL and no secret", async (kind, label, urlLabel, url, host) => {
+    const added = { ...webhook, id: "n5", kind, name: "Review channel", host }
+    let created = false
+    const fetchSpy = mockApi({
+      "GET /api/notifications": () => jsonResponse(200, { targets: created ? [added] : [], mailConfigured: false, settings }),
+      "POST /api/notifications": () => {
+        created = true
+        return jsonResponse(201, { target: added })
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByText("No notification targets")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Type" }))
+    await userEvent.click(await screen.findByRole("option", { name: label }))
+    await userEvent.type(within(sheet).getByLabelText("Name"), "Review channel")
+    await userEvent.type(within(sheet).getByLabelText(urlLabel), url)
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
+
+    const row = (await screen.findByRole("cell", { name: "Review channel" })).closest("tr")!
+    expect(within(row).getByText(label)).toBeInTheDocument()
+    // Only the host comes back; the token or signature never does.
+    expect(within(row).getByText(host)).toBeInTheDocument()
+    expect(screen.queryByLabelText("Signing secret")).not.toBeInTheDocument()
+    const [, init] = calls(fetchSpy, "POST", "/api/notifications")[0]!
+    expect(JSON.parse(String(init?.body))).toMatchObject({ kind, name: "Review channel", url })
+  })
+
   it("adds a target limited to chosen repositories, a severity and verdict changes", async () => {
     const fetchSpy = mockApi({
       "GET /api/notifications": { targets: [], mailConfigured: false, settings },

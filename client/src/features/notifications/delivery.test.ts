@@ -150,6 +150,11 @@ describe("causeHint", () => {
     expect(causeHint(target({ kind: "google_chat", pauseCause: "gone" }))).toMatch(
       /Google Chat webhook or its space was deleted/,
     )
+    expect(causeHint(target({ kind: "discord", pauseCause: "gone" }))).toMatch(
+      /Discord webhook or its channel was deleted/,
+    )
+    // A Teams workflow is never reported gone on a 404; a 410 reads as any endpoint's.
+    expect(causeHint(target({ kind: "teams", pauseCause: "gone" }))).toMatch(/no longer exists/)
     expect(causeHint(target({ pauseCause: "gone" }))).toMatch(/no longer exists/)
     expect(causeHint(target({ pauseCause: "failures" }))).toBe("Check the delivery errors, send a test, then resume.")
     expect(causeHint(target({ pauseCause: "scope" }))).toMatch(/repository it was limited to was removed/)

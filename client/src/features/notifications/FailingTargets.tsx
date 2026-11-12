@@ -73,7 +73,7 @@ function limitLabel(limit: number) {
 const HOW_IT_WORKS =
   "Each delivery is tried up to 5 times. When every try fails, or the endpoint refuses it, that counts as one " +
   "failure in a row; a successful delivery, tests included, resets the count. A target is paused when the count " +
-  "reaches this limit, and at once when its endpoint says it no longer exists (410, or 404 from Slack or Google Chat). Owners and " +
+  "reaches this limit, and at once when its endpoint says it no longer exists (410, or 404 from Slack, Google Chat or Discord). Owners and " +
   "admins are emailed when that happens."
 
 // The limit sits beside the list it explains. Admins change it in place; a

@@ -696,6 +696,8 @@ enum NotificationKind {
   webhook
   slack
   google_chat
+  discord
+  teams
   email
 
   @@map("notification_kind")

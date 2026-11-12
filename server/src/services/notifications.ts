@@ -96,8 +96,8 @@ export const DIGEST_REVIEW_LIMIT = 200;
 // cap of their own to keep a webhook body well short of doubling.
 export const DIGEST_BLOCKED_LIMIT = 50;
 // Places in `reviews` kept for failed reviews: they come after blocked ones,
-// and the failure details the email, Slack and Google Chat digests show are
-// read from it.
+// and the failure details the email, Slack, Google Chat, Discord and Teams
+// digests show are read from it.
 export const DIGEST_FAILED_RESERVE = 50;
 const TOP_BLOCKED_REPOSITORIES = 5;
 
@@ -460,17 +460,22 @@ function changeNouns(provider: string): { noun: string; abbrev: string } {
   return { noun: info.changeNoun, abbrev: info.changeAbbrev };
 }
 
-// Slack and Google Chat reject a message whose link is too long, which would
-// lose the whole notification; past this the link is left out instead.
+// Slack, Google Chat, Discord and Teams reject a message whose link is too
+// long, which would lose the whole notification; past this the link is left
+// out instead.
 const LINK_URL_LIMIT = 2000;
 
 // A checked change URL, or null when `encode` (a target's own escaping) leaves
 // it over the limit.
-function boundedLinkUrl(url: string | null | undefined, encode: (safe: string) => string = (safe) => safe): string | null {
+function boundedLinkUrl(
+  url: string | null | undefined,
+  encode: (safe: string) => string = (safe) => safe,
+  limit = LINK_URL_LIMIT,
+): string | null {
   const safe = safeLinkUrl(url);
   if (!safe) return null;
   const encoded = encode(safe);
-  return encoded.length > LINK_URL_LIMIT ? null : encoded;
+  return encoded.length > limit ? null : encoded;
 }
 
 // A URL as the target of a mrkdwn link `<url|label>`. URL parsing already
@@ -625,6 +630,14 @@ function digestSections(payload: DigestPayload, caps: { blocked: number; failed:
   };
 }
 
+// A failed digest row's label and error clipped apart: the label to its own
+// limit, so a long one cannot push the reason out, and the error to whatever
+// the label left of the row (less the ": " between them). Unescaped.
+function clipFailedRow(row: { label: string; error: string }, labelLimit: number, rowLimit: number) {
+  const label = clipText(row.label, labelLimit);
+  return { label, error: clipText(row.error, rowLimit - label.length - 2) };
+}
+
 // Slack allows 50 blocks a message; these caps keep a digest well under it.
 const SLACK_DIGEST_BLOCKED = 20;
 const SLACK_DIGEST_FAILED = 5;
@@ -753,9 +766,7 @@ function googleChatDigest(payload: DigestPayload) {
   }
   if (failed.rows.length) {
     const widgets: object[] = failed.rows.map((row) => {
-      // Clipped apart, the error with whatever the label left of the limit.
-      const label = clipText(row.label, CHAT_FAILED_LABEL_LIMIT);
-      const error = clipText(row.error, CHAT_LABEL_LIMIT - label.length - 2);
+      const { label, error } = clipFailedRow(row, CHAT_FAILED_LABEL_LIMIT, CHAT_LABEL_LIMIT);
       return item(row.review, `${chatText(label, CHAT_FAILED_LABEL_LIMIT)}: ${chatText(error, CHAT_LABEL_LIMIT)}`);
     });
     if (failed.more > 0) widgets.push(chatParagraph(`and ${failed.more} more`));
@@ -768,6 +779,273 @@ function googleChatDigest(payload: DigestPayload) {
       { cardId: "digest", card: { header: { title: digestName(payload), subtitle: digestPeriod(payload) }, sections } },
     ],
   };
+}
+
+// Discord allows 4096 characters in an embed's description and 6000 across a
+// message's embeds. Forge text is clipped before it is escaped (an escaped
+// character is at most two), so one review's embed stays inside that; a
+// digest counts what it adds (see discordDigest).
+const DISCORD_LABEL_LIMIT = 200;
+const DISCORD_TITLE_LIMIT = 250;
+const DISCORD_ERROR_LIMIT = 700;
+const DISCORD_TOP_LIMIT = 200;
+// Shorter than LINK_URL_LIMIT: the link shares the description with the text.
+const DISCORD_URL_LIMIT = 1000;
+const DISCORD_ROW_LIMIT = 100;
+const DISCORD_FAILED_LABEL_LIMIT = 50;
+const DISCORD_DIGEST_BLOCKED = 10;
+const DISCORD_DIGEST_FAILED = 5;
+// What a digest's lists may add to the description, escaped, links included.
+const DISCORD_BLOCKED_BUDGET = 2200;
+const DISCORD_FAILED_BUDGET = 1000;
+
+const DISCORD_COLORS: Record<NotificationPayload["event"] | "digest", number> = {
+  failed: 0xf59e0b,
+  blocked: 0xdc2626,
+  resolved: 0x16a34a,
+  completed: 0x16a34a,
+  test: 0x3b82f6,
+  digest: 0x3b82f6,
+};
+
+// Discord's markdown takes a backslash before any punctuation as that
+// character alone. Escaped here: the formatting marks, what starts a quote,
+// heading or list, the brackets of a masked link and of `<@id>`, `<#id>` and
+// `<url>`, and the colon, without which `https://` is not read as a link (a
+// bare domain never is). `@everyone` and `@here` have nothing to escape, so
+// they are broken up; allowed_mentions keeps them from pinging either way.
+function escapeDiscord(value: string): string {
+  return value.replace(/[\\*_~`|<>#\-[\]():.]/g, "\\$&").replace(/@/g, `@${ZERO_WIDTH_SPACE}`);
+}
+
+// Forge text for an embed's description. Clipped first, so the limit counts
+// what is shown and the cut cannot land inside an escape.
+function discordText(value: string, limit: number): string {
+  return escapeDiscord(clipText(value, limit));
+}
+
+// A URL as the target of a masked link `[label](url)`. URL parsing already
+// encodes spaces and angle brackets, but not parentheses, and a `)` would end
+// the URL early; all four are encoded to be sure.
+function discordLinkUrl(url: string | null | undefined): string | null {
+  return boundedLinkUrl(
+    url,
+    (safe) => safe.replace(/[()<>]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`),
+    DISCORD_URL_LIMIT,
+  );
+}
+
+function discordLink(url: string, label: string): string {
+  return `[${label}](${url})`;
+}
+
+// Nothing in a message may ping anyone, whatever the text says.
+const DISCORD_NO_MENTIONS = { parse: [] };
+
+// The rule for every Discord message: forge text only ever goes into the
+// embed's description, escaped so it cannot add formatting, a mention or a
+// link (see escapeDiscord). The embed's title and footer carry our own words
+// only, and the only links are masked ones with our own labels, to our review
+// URL or a checked, encoded change URL. Links rather than buttons: a webhook
+// that no application owns cannot send components. There is no `content`:
+// Discord would show it above the embed, repeating the title.
+function discordMessage(payload: NotificationPayload) {
+  const { title, error } = messageParts(payload);
+  const repository = `${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
+  const lines = [discordText(repository, DISCORD_LABEL_LIMIT)];
+  if (title) lines.push(`**${discordText(title, DISCORD_TITLE_LIMIT)}**`);
+  const findings = error ? null : findingsDetail(payload);
+  if (error) lines.push(discordText(error, DISCORD_ERROR_LIMIT));
+  else if (findings) lines.push(findings);
+  const links = [discordLink(payload.review.url, "View review")];
+  // Past the limit the link is left out rather than risk the whole message.
+  const changeUrl = discordLinkUrl(payload.change.url);
+  if (changeUrl) links.push(discordLink(changeUrl, `Open ${changeNouns(payload.repository.provider).abbrev}`));
+  lines.push(links.join(" · "));
+  return {
+    embeds: [
+      {
+        title: `${EMOJI[payload.event]} ${HEADLINES[payload.event]}`,
+        description: lines.join("\n"),
+        color: DISCORD_COLORS[payload.event],
+      },
+    ],
+    allowed_mentions: DISCORD_NO_MENTIONS,
+  };
+}
+
+// Same rule as discordMessage; one embed. Escaping can double a row, so each
+// list stops at its budget rather than at a count alone, and the rows left
+// out are counted in "and N more": the description never passes Discord's
+// limit, which would lose the whole digest.
+function discordDigest(payload: DigestPayload) {
+  const lines = [digestCounts(payload)];
+  const top = topRepositories(payload);
+  if (top) lines.push(discordText(top, DISCORD_TOP_LIMIT));
+  const section = (heading: string, rows: { review: NotificationPayload; text: string }[], more: number, budget: number) => {
+    if (!rows.length) return;
+    const shown: string[] = [];
+    let used = 0;
+    for (const row of rows) {
+      const line = `${row.text} · ${discordLink(row.review.review.url, "View review")}`;
+      if (used + line.length + 1 > budget) break;
+      shown.push(line);
+      used += line.length + 1;
+    }
+    const hidden = more + rows.length - shown.length;
+    lines.push("", `**${heading}**`, ...shown);
+    if (hidden > 0) lines.push(shown.length ? `and ${hidden} more` : `${hidden} not shown`);
+  };
+  const { blocked, failed } = digestSections(payload, { blocked: DISCORD_DIGEST_BLOCKED, failed: DISCORD_DIGEST_FAILED });
+  section(
+    "Still blocked",
+    blocked.rows.map((row) => ({ review: row.review, text: discordText(row.label, DISCORD_ROW_LIMIT) })),
+    blocked.more,
+    DISCORD_BLOCKED_BUDGET,
+  );
+  section(
+    "Failed",
+    failed.rows.map((row) => {
+      const { label, error } = clipFailedRow(row, DISCORD_FAILED_LABEL_LIMIT, DISCORD_ROW_LIMIT);
+      return { review: row.review, text: `${escapeDiscord(label)}: ${escapeDiscord(error)}` };
+    }),
+    failed.more,
+    DISCORD_FAILED_BUDGET,
+  );
+  lines.push("", discordLink(`${env.CLIENT_ORIGIN}/reviews`, "All reviews"));
+  return {
+    embeds: [
+      {
+        title: digestName(payload),
+        description: lines.join("\n"),
+        color: DISCORD_COLORS.digest,
+        footer: { text: digestPeriod(payload) },
+      },
+    ],
+    allowed_mentions: DISCORD_NO_MENTIONS,
+  };
+}
+
+// Teams refuses a message over 28 KB. A character is at most four bytes and
+// six once JSON escapes it, so one review's card, and a digest with the caps
+// below, stay well short of that.
+const TEAMS_LABEL_LIMIT = 200;
+const TEAMS_TITLE_LIMIT = 300;
+const TEAMS_ERROR_LIMIT = 1000;
+const TEAMS_TOP_LIMIT = 500;
+const TEAMS_FAILED_LABEL_LIMIT = 100;
+const TEAMS_DIGEST_BLOCKED = 10;
+const TEAMS_DIGEST_FAILED = 5;
+
+// Our own words: a TextBlock renders markdown, so forge text never goes in one.
+function teamsHeading(text: string, size?: "Medium") {
+  return { type: "TextBlock", text, weight: "Bolder", wrap: true, ...(size ? { size } : {}) };
+}
+
+function teamsLine(text: string) {
+  return { type: "TextBlock", text, wrap: true };
+}
+
+// A run of a RichTextBlock, which shows its text as written: no markdown.
+function teamsRun(text: string, extra: object = {}) {
+  return { type: "TextRun", text, ...extra };
+}
+
+// Forge text. URLs in it are broken up as for Google Chat (see defangLinks),
+// in case a Teams client links what merely looks like one.
+function teamsText(value: string, limit: number, extra: object = {}) {
+  return teamsRun(defangLinks(clipText(value, limit)), extra);
+}
+
+function teamsRich(...inlines: object[]) {
+  return { type: "RichTextBlock", inlines };
+}
+
+function teamsOpenUrl(title: string, url: string) {
+  return { type: "Action.OpenUrl", title, url };
+}
+
+// The shape a Workflows webhook takes: a message with one Adaptive Card.
+// Version 1.4 is what every Teams client renders.
+function teamsCard(body: object[], actions: object[]) {
+  return {
+    type: "message",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        contentUrl: null,
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.4",
+          body,
+          actions,
+        },
+      },
+    ],
+  };
+}
+
+// The rule for every Teams message: a TextBlock renders markdown, which has no
+// dependable escape, so forge text only ever goes into the TextRuns of a
+// RichTextBlock, which render none. TextBlocks and action titles carry our
+// own words only, and actions only open our review URL or a checked change
+// URL.
+function teamsMessage(payload: NotificationPayload) {
+  const { title, error } = messageParts(payload);
+  const repository = `${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
+  const body: object[] = [
+    teamsHeading(`${EMOJI[payload.event]} ${HEADLINES[payload.event]}`, "Medium"),
+    teamsRich(teamsText(repository, TEAMS_LABEL_LIMIT)),
+  ];
+  if (title) body.push(teamsRich(teamsText(title, TEAMS_TITLE_LIMIT, { weight: "Bolder" })));
+  const findings = error ? null : findingsDetail(payload);
+  if (error) body.push(teamsRich(teamsText(error, TEAMS_ERROR_LIMIT)));
+  else if (findings) body.push(teamsLine(findings));
+  const actions = [teamsOpenUrl("View review", payload.review.url)];
+  // Past the limit the action is left out rather than risk the whole message.
+  const changeUrl = boundedLinkUrl(payload.change.url);
+  if (changeUrl) actions.push(teamsOpenUrl(`Open ${changeNouns(payload.repository.provider).abbrev}`, changeUrl));
+  return teamsCard(body, actions);
+}
+
+// Same rule as teamsMessage; one card. Each row is the forge text beside a
+// "View review" button: a run's selectAction is not honoured by every Teams
+// client, an Action.OpenUrl in an ActionSet is.
+function teamsDigest(payload: DigestPayload) {
+  const body: object[] = [
+    teamsHeading(digestName(payload), "Medium"),
+    { ...teamsLine(digestPeriod(payload)), isSubtle: true, spacing: "None" },
+    teamsLine(digestCounts(payload)),
+  ];
+  const top = topRepositories(payload);
+  if (top) body.push(teamsRich(teamsText(top, TEAMS_TOP_LIMIT)));
+  const item = (review: NotificationPayload, ...runs: object[]) => ({
+    type: "ColumnSet",
+    columns: [
+      { type: "Column", width: "stretch", verticalContentAlignment: "Center", items: [teamsRich(...runs)] },
+      {
+        type: "Column",
+        width: "auto",
+        items: [{ type: "ActionSet", actions: [teamsOpenUrl("View review", review.review.url)] }],
+      },
+    ],
+  });
+  const { blocked, failed } = digestSections(payload, { blocked: TEAMS_DIGEST_BLOCKED, failed: TEAMS_DIGEST_FAILED });
+  if (blocked.rows.length) {
+    body.push(teamsHeading("Still blocked"));
+    for (const row of blocked.rows) body.push(item(row.review, teamsText(row.label, TEAMS_LABEL_LIMIT)));
+    if (blocked.more > 0) body.push(teamsLine(`and ${blocked.more} more`));
+  }
+  if (failed.rows.length) {
+    body.push(teamsHeading("Failed"));
+    for (const row of failed.rows) {
+      const { label, error } = clipFailedRow(row, TEAMS_FAILED_LABEL_LIMIT, TEAMS_LABEL_LIMIT);
+      body.push(item(row.review, teamsText(`${label}: ${error}`, TEAMS_LABEL_LIMIT)));
+    }
+    if (failed.more > 0) body.push(teamsLine(`and ${failed.more} more`));
+  }
+  return teamsCard(body, [teamsOpenUrl("All reviews", `${env.CLIENT_ORIGIN}/reviews`)]);
 }
 
 // Plain text, so forge text needs no escaping; each entry is flattened to one
@@ -853,6 +1131,9 @@ export class DeliveryError extends Error {
   constructor(
     readonly httpStatus: number,
     readonly retryAfterMs: number | null = null,
+    // The service's own error code from the response body, when it gives one
+    // (Discord's JSON `code`); read only for a 404, where it tells why.
+    readonly serviceCode: number | null = null,
   ) {
     super(`Responded with ${httpStatus}`);
   }
@@ -868,12 +1149,17 @@ export const MAX_DELIVERY_ATTEMPTS = 5;
 export const RETRY_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
 // A Retry-After past this is a misconfigured endpoint, not a plan to follow.
 const MAX_RETRY_AFTER_MS = 6 * 60 * 60_000;
+// And one short of this is not followed as written: a delivery re-claimed on
+// the next poll lands in the same burst that was refused (Discord asks for a
+// fraction of a second), and a few of those use up every attempt.
+const MIN_RETRY_AFTER_MS = 5_000;
 
-// Retry-After is either delay-seconds or an HTTP date.
+// Retry-After is either delay-seconds or an HTTP date. Whole seconds by the
+// standard; Discord may send a fraction, which is taken as written.
 export function parseRetryAfter(value: string | null, now = new Date()): number | null {
   if (!value) return null;
   const trimmed = value.trim();
-  const ms = /^\d+$/.test(trimmed) ? Number(trimmed) * 1000 : Date.parse(trimmed) - now.getTime();
+  const ms = /^\d+(\.\d+)?$/.test(trimmed) ? Math.ceil(Number(trimmed) * 1000) : Date.parse(trimmed) - now.getTime();
   if (Number.isNaN(ms)) return null;
   return Math.min(Math.max(ms, 0), MAX_RETRY_AFTER_MS);
 }
@@ -881,19 +1167,52 @@ export function parseRetryAfter(value: string | null, now = new Date()): number 
 export type FailureKind = "retryable" | "permanent" | "gone";
 
 export const GOOGLE_CHAT_HOST = "chat.googleapis.com";
+// Where Discord serves webhooks: the current and the older domain, and the
+// test and canary releases of each client, which hand out URLs on their own.
+export const DISCORD_HOSTS: ReadonlySet<string> = new Set([
+  "discord.com",
+  "ptb.discord.com",
+  "canary.discord.com",
+  "discordapp.com",
+  "ptb.discordapp.com",
+  "canary.discordapp.com",
+]);
+
+// Discord's code for a webhook that no longer exists. A deleted thread named
+// by `?thread_id=` is also a 404, but Unknown Channel (10003): the webhook is
+// fine and only the URL needs changing, so that is not "gone".
+const DISCORD_UNKNOWN_WEBHOOK = 10015;
+
+// A 404 that means the target itself is gone. Only when the service answers:
+// a google_chat or discord target may point at a relay, whose 404 says nothing
+// about the space or the webhook. A fully qualified host (`discord.com.`) is
+// the same host.
+function goneOn404(kind: NotificationKind, host: string | null, err: DeliveryError): boolean {
+  const name = host?.replace(/\.$/, "") ?? null;
+  if (kind === "slack") return true;
+  if (kind === "google_chat") return name === GOOGLE_CHAT_HOST;
+  if (kind === "discord") {
+    return name !== null && DISCORD_HOSTS.has(name) && err.serviceCode === DISCORD_UNKNOWN_WEBHOOK;
+  }
+  return false;
+}
 
 // Whether a failed send is worth repeating. "gone" is an endpoint that says it
 // no longer exists: Slack answers 404 (no_service) or 410 for a deleted
 // incoming webhook, and nothing else uses 410 lightly. Google Chat is taken to
 // answer 404 for a deleted webhook or space, but only when it is Google
 // answering: a google_chat target may point at a relay, whose 404 says nothing
-// about the space, so there it is an ordinary failure. `host` is the host of
-// the target's URL, null when there is none to read.
+// about the space, so there it is an ordinary failure. Discord answers 404 with
+// code 10015 (Unknown Webhook) for a deleted webhook, under the same
+// condition; any other 404 from it is an ordinary failure. A Teams
+// workflow has no such answer to rely on: one that is switched off or deleted
+// counts as an ordinary failure. `host` is the host of the target's URL, null
+// when there is none to read.
 export function classifyFailure(err: unknown, kind: NotificationKind, host: string | null = null): FailureKind {
   if (err instanceof DeliveryError) {
     const status = err.httpStatus;
     if (status === 410) return "gone";
-    if (status === 404 && (kind === "slack" || (kind === "google_chat" && host === GOOGLE_CHAT_HOST))) return "gone";
+    if (status === 404 && goneOn404(kind, host, err)) return "gone";
     if (status === 408 || status === 429 || status >= 500) return "retryable";
     return "permanent";
   }
@@ -905,7 +1224,7 @@ export function classifyFailure(err: unknown, kind: NotificationKind, host: stri
 // How long to wait after the nth failed send (attempts = n) before the next.
 export function retryDelayMs(attempts: number, err: unknown): number {
   const backoff = RETRY_BACKOFF_MS[Math.min(attempts, RETRY_BACKOFF_MS.length) - 1]!;
-  if (err instanceof DeliveryError && err.retryAfterMs !== null) return err.retryAfterMs;
+  if (err instanceof DeliveryError && err.retryAfterMs !== null) return Math.max(err.retryAfterMs, MIN_RETRY_AFTER_MS);
   return backoff;
 }
 
@@ -929,7 +1248,23 @@ async function post(url: string, body: string, headers: Record<string, string> =
     signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
   });
   if (!res.ok) {
-    throw new DeliveryError(res.status, res.status === 429 ? parseRetryAfter(res.headers.get("retry-after")) : null);
+    const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get("retry-after")) : null;
+    throw new DeliveryError(res.status, retryAfter, res.status === 404 ? await serviceCode(res) : null);
+  }
+}
+
+// The numeric `code` of a JSON error body. Read with a cap, since the body is
+// whoever answers; anything unexpected is no code at all.
+const SERVICE_CODE_BODY_LIMIT = 4096;
+
+async function serviceCode(res: Response): Promise<number | null> {
+  try {
+    const text = await res.text();
+    if (text.length > SERVICE_CODE_BODY_LIMIT) return null;
+    const code = (JSON.parse(text) as { code?: unknown } | null)?.code;
+    return typeof code === "number" ? code : null;
+  } catch {
+    return null;
   }
 }
 
@@ -983,6 +1318,16 @@ export async function deliver(
       await post(targetUrl(target), JSON.stringify(message));
       return;
     }
+    case "discord": {
+      const message = payload.event === "digest" ? discordDigest(payload) : discordMessage(payload);
+      await post(targetUrl(target), JSON.stringify(message));
+      return;
+    }
+    case "teams": {
+      const message = payload.event === "digest" ? teamsDigest(payload) : teamsMessage(payload);
+      await post(targetUrl(target), JSON.stringify(message));
+      return;
+    }
     case "email": {
       if (!mailer.configured()) throw new PermanentDeliveryError("Mail is not configured");
       // Members removed since the target was saved are left out.
@@ -1017,6 +1362,20 @@ export function message(err: unknown): string {
 
 const STORED_ERROR_LIMIT = 500;
 const MIN_REDACTED_PART = 8;
+// Fixed path segments of the services' webhook URLs. Taken on their own they
+// are ordinary words a message may use ("workflows endpoint"), so they are not
+// cut out alone; the paths and URLs that contain them still are.
+const STATIC_URL_SEGMENTS: ReadonlySet<string> = new Set([
+  "webhooks",
+  "workflows",
+  "triggers",
+  "messages",
+  "services",
+  "invoke",
+  "manual",
+  "paths",
+  "spaces",
+]);
 
 // Members can read stored errors, and the URL (or its query) may be the
 // credential, so it is cut out of whatever a library put in the message
@@ -1044,6 +1403,7 @@ export function redactError(error: string, url: string | null): string {
         parts.add(parsed.pathname);
         parts.add(decoded(parsed.pathname));
         for (const segment of parsed.pathname.split("/")) {
+          if (STATIC_URL_SEGMENTS.has(segment)) continue;
           parts.add(segment);
           parts.add(decoded(segment));
         }
@@ -1637,8 +1997,9 @@ export function publicPersonal(target: NotificationTarget | null, forges: Person
 }
 
 // Only the host of a URL ever leaves the server: the full Slack URL is the
-// credential, a Google Chat URL carries its key and token in the query, and a
-// webhook URL may carry one there too.
+// credential, a Discord URL ends in its token, a Google Chat URL carries its
+// key and token in the query and a Teams one its signature, and a webhook URL
+// may carry one there too.
 export function publicTarget(
   target: NotificationTarget,
   lastDelivery: LastDelivery | null = null,

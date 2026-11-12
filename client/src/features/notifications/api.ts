@@ -15,7 +15,7 @@ export function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
-export type NotificationKind = "webhook" | "slack" | "google_chat" | "email"
+export type NotificationKind = "webhook" | "slack" | "google_chat" | "discord" | "teams" | "email"
 export type NotificationEvent = "blocked" | "failed" | "resolved" | "completed"
 
 export const EVENT_OPTIONS: { value: NotificationEvent; label: string; description: string }[] = [
@@ -53,6 +53,8 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   webhook: "Webhook",
   slack: "Slack",
   google_chat: "Google Chat",
+  discord: "Discord",
+  teams: "Microsoft Teams",
   email: "Email",
 }
 
@@ -159,13 +161,13 @@ export interface NotificationTarget extends TargetFilters {
 
 export type NotificationTargetInput = TargetFilters & { delivery: DeliverySettings } &
   (
-    | { kind: "webhook" | "slack" | "google_chat"; name: string; events: NotificationEvent[]; url: string }
+    | { kind: Exclude<NotificationKind, "email">; name: string; events: NotificationEvent[]; url: string }
     | { kind: "email"; name: string; events: NotificationEvent[]; recipientIds: string[] }
   )
 
 export interface NotificationTargetUpdate extends Partial<TargetFilters> {
   name?: string
-  // Webhook, Slack and Google Chat targets only; the current one is never sent back.
+  // Every kind but email; the current one is never sent back.
   url?: string
   events?: NotificationEvent[]
   recipientIds?: string[]

@@ -7,7 +7,7 @@ export function NotificationsPage() {
     <PageShell>
       <PageHeader
         title="Notifications"
-        description="Email about your own changes, and the webhooks, Slack channels, Google Chat spaces and email your workspace sends review results to."
+        description="Email about your own changes, and the webhooks, Slack, Discord and Teams channels, Google Chat spaces and email your workspace sends review results to."
       />
       <NotificationTargets />
     </PageShell>
