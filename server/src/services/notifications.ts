@@ -96,7 +96,8 @@ export const DIGEST_REVIEW_LIMIT = 200;
 // cap of their own to keep a webhook body well short of doubling.
 export const DIGEST_BLOCKED_LIMIT = 50;
 // Places in `reviews` kept for failed reviews: they come after blocked ones,
-// and the failure details the email and Slack digests show are read from it.
+// and the failure details the email, Slack and Google Chat digests show are
+// read from it.
 export const DIGEST_FAILED_RESERVE = 50;
 const TOP_BLOCKED_REPOSITORIES = 5;
 
@@ -392,8 +393,15 @@ function messageParts(payload: NotificationPayload) {
   return { headline, title, error, findings };
 }
 
+// Cut by UTF-16 code unit, so a cut can land inside a surrogate pair (an emoji).
+// The half left behind is dropped: a lone surrogate is not valid text, and a
+// receiver that refuses it would lose the whole notification.
 function clipText(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+  if (value.length <= limit) return value;
+  let end = limit - 1;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${value.slice(0, end)}…`;
 }
 
 // A forge title or a provider's error can run to kilobytes; some mail relays
@@ -436,6 +444,14 @@ function severityBreakdown(bySeverity: ResultSummary["bySeverity"] | undefined):
   return parts.length ? parts.join(" · ") : null;
 }
 
+// "3 findings (1 major · 2 minor)", from our own numbers only.
+function findingsDetail(payload: NotificationPayload): string | null {
+  const { findings } = messageParts(payload);
+  if (!findings) return null;
+  const breakdown = severityBreakdown(payload.findings?.bySeverity);
+  return breakdown ? `${findings} (${breakdown})` : findings;
+}
+
 // Stored payloads type provider as a string, so one we no longer know (or a
 // row from before a forge was added) falls back to the generic word.
 function changeNouns(provider: string): { noun: string; abbrev: string } {
@@ -444,18 +460,24 @@ function changeNouns(provider: string): { noun: string; abbrev: string } {
   return { noun: info.changeNoun, abbrev: info.changeAbbrev };
 }
 
-// Slack rejects a message whose link is too long, which would lose the whole
-// notification; past this the link is left out instead.
-const SLACK_URL_LIMIT = 2000;
+// Slack and Google Chat reject a message whose link is too long, which would
+// lose the whole notification; past this the link is left out instead.
+const LINK_URL_LIMIT = 2000;
+
+// A checked change URL, or null when `encode` (a target's own escaping) leaves
+// it over the limit.
+function boundedLinkUrl(url: string | null | undefined, encode: (safe: string) => string = (safe) => safe): string | null {
+  const safe = safeLinkUrl(url);
+  if (!safe) return null;
+  const encoded = encode(safe);
+  return encoded.length > LINK_URL_LIMIT ? null : encoded;
+}
 
 // A URL as the target of a mrkdwn link `<url|label>`. URL parsing already
 // encodes spaces and angle brackets, but not `|`, which would end the URL early
 // and let the rest pass for the label; all three are encoded to be sure.
 function slackLinkUrl(url: string | null | undefined): string | null {
-  const safe = safeLinkUrl(url);
-  if (!safe) return null;
-  const encoded = safe.replace(/[|<>]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-  return encoded.length > SLACK_URL_LIMIT ? null : encoded;
+  return boundedLinkUrl(url, (safe) => safe.replace(/[|<>]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`));
 }
 
 function slackLink(url: string, label: string): string {
@@ -507,10 +529,8 @@ function reviewEmail(payload: NotificationPayload, targetName: string): { subjec
   const parts = messageParts(payload);
   const title = parts.title && clipText(parts.title, EMAIL_TITLE_LIMIT);
   const error = parts.error && clipText(parts.error, EMAIL_ERROR_LIMIT);
-  const { findings } = parts;
   const repository = `${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
-  const breakdown = error ? null : severityBreakdown(payload.findings?.bySeverity);
-  const detail = error ?? (findings ? `${findings}${breakdown ? ` (${breakdown})` : ""}` : null);
+  const detail = error ?? findingsDetail(payload);
   const changeUrl = safeLinkUrl(payload.change.url);
   const { noun } = changeNouns(payload.repository.provider);
   const footer = `You get this as a recipient of "${oneLine(targetName)}".`;
@@ -547,15 +567,22 @@ export function escapeSlack(value: string): string {
 }
 
 // Our own words and numbers only, so it is safe as a subject and as mrkdwn.
-function digestHeadline(payload: DigestPayload): string {
-  const name = payload.schedule === "daily" ? "Daily digest" : payload.schedule === "weekly" ? "Weekly digest" : "Digest";
+function digestName(payload: DigestPayload): string {
+  return payload.schedule === "daily" ? "Daily digest" : payload.schedule === "weekly" ? "Weekly digest" : "Digest";
+}
+
+function digestCounts(payload: DigestPayload): string {
   const { counts } = payload;
   const parts = [plural(counts.reviews, "review")];
   if (counts.byVerdict.blocked) parts.push(`${counts.byVerdict.blocked} blocked`);
   if (counts.failed) parts.push(`${counts.failed} failed`);
   if (counts.resolved) parts.push(`${counts.resolved} resolved`);
   if (counts.byVerdict.pass) parts.push(`${counts.byVerdict.pass} passed`);
-  return `${name}: ${parts.join(", ")}`;
+  return parts.join(", ");
+}
+
+function digestHeadline(payload: DigestPayload): string {
+  return `${digestName(payload)}: ${digestCounts(payload)}`;
 }
 
 function digestPeriod(payload: DigestPayload): string {
@@ -579,6 +606,25 @@ function failedReviews(payload: DigestPayload): NotificationPayload[] {
   return payload.reviews.filter((review) => review.review.status === "failed");
 }
 
+// The lists every digest shows, capped per target: the still-blocked changes
+// and the failed reviews, each with how many more there are than shown. A
+// failed row's error is kept apart from its label so a target with a tight
+// limit can clip the two separately. All of it is forge text, unescaped.
+function digestSections(payload: DigestPayload, caps: { blocked: number; failed: number }) {
+  const blocked = payload.blocked.slice(0, caps.blocked).map((review) => ({ review, label: changeLabel(review) }));
+  const failed = failedReviews(payload)
+    .slice(0, caps.failed)
+    .map((review) => ({
+      review,
+      label: changeLabel(review),
+      error: oneLine(review.review.error ?? "no reason recorded"),
+    }));
+  return {
+    blocked: { rows: blocked, more: payload.blocked.length + payload.blockedTruncated - blocked.length },
+    failed: { rows: failed, more: payload.counts.failed - failed.length },
+  };
+}
+
 // Slack allows 50 blocks a message; these caps keep a digest well under it.
 const SLACK_DIGEST_BLOCKED = 20;
 const SLACK_DIGEST_FAILED = 5;
@@ -597,24 +643,131 @@ function slackDigest(payload: DigestPayload) {
     type: "context",
     elements: [plainText(label), { type: "mrkdwn", text: slackLink(review.review.url, "View review") }],
   });
-  if (payload.blocked.length) {
+  const { blocked, failed } = digestSections(payload, { blocked: SLACK_DIGEST_BLOCKED, failed: SLACK_DIGEST_FAILED });
+  if (blocked.rows.length) {
     blocks.push({ type: "section", text: plainText("Still blocked") });
-    for (const review of payload.blocked.slice(0, SLACK_DIGEST_BLOCKED)) blocks.push(item(review, changeLabel(review)));
-    const shown = Math.min(payload.blocked.length, SLACK_DIGEST_BLOCKED);
-    const more = payload.blocked.length + payload.blockedTruncated - shown;
-    if (more > 0) blocks.push({ type: "context", elements: [plainText(`and ${more} more`)] });
+    for (const row of blocked.rows) blocks.push(item(row.review, row.label));
+    if (blocked.more > 0) blocks.push({ type: "context", elements: [plainText(`and ${blocked.more} more`)] });
   }
-  const failed = failedReviews(payload);
-  if (failed.length) {
+  if (failed.rows.length) {
     blocks.push({ type: "section", text: plainText("Failed") });
-    for (const review of failed.slice(0, SLACK_DIGEST_FAILED)) {
-      blocks.push(item(review, `${changeLabel(review)}: ${oneLine(review.review.error ?? "no reason recorded")}`));
-    }
-    const more = payload.counts.failed - Math.min(failed.length, SLACK_DIGEST_FAILED);
-    if (more > 0) blocks.push({ type: "context", elements: [plainText(`and ${more} more`)] });
+    for (const row of failed.rows) blocks.push(item(row.review, `${row.label}: ${row.error}`));
+    if (failed.more > 0) blocks.push({ type: "context", elements: [plainText(`and ${failed.more} more`)] });
   }
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `<${env.CLIENT_ORIGIN}/reviews|All reviews>` }] });
   return { text: escapeSlack(headline), blocks };
+}
+
+// Google Chat refuses a message over 32,000 bytes. Forge text is clipped
+// before it is escaped (an escaped character is at most five), so one review's
+// card, and a digest with the caps below, stay well short of that.
+const CHAT_LABEL_LIMIT = 200;
+const CHAT_TITLE_LIMIT = 300;
+const CHAT_ERROR_LIMIT = 1000;
+const CHAT_TOP_LIMIT = 500;
+// A failed digest row shares CHAT_LABEL_LIMIT between its title and its error;
+// the title stops here so a long one cannot push the reason out.
+const CHAT_FAILED_LABEL_LIMIT = 100;
+const CHAT_DIGEST_BLOCKED = 10;
+const CHAT_DIGEST_FAILED = 5;
+
+// A card's text widget renders a subset of HTML. Only these three need
+// escaping: forge text never lands inside an attribute, and Chat is not known
+// to decode `&quot;` or `&#39;`, which would then show as written.
+const CHAT_ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+function escapeChat(value: string): string {
+  return value.replace(/[&<>]/g, (c) => CHAT_ENTITIES[c]!);
+}
+
+// Chat turns a bare URL in card text into a link whatever is escaped. A
+// zero-width space after `://` and after each dot inside a word keeps the text
+// looking the same while leaving nothing shaped like a URL or a domain to link.
+const ZERO_WIDTH_SPACE = "\u200B";
+function defangLinks(value: string): string {
+  return value.replace(/:\/\/|(?<=\w)\.(?=\w)/g, (match) => `${match}${ZERO_WIDTH_SPACE}`);
+}
+
+// Forge text for a card's text widget. Clipped first, so the limit counts what
+// is shown and the cut cannot land inside an entity.
+function chatText(value: string, limit: number): string {
+  return escapeChat(defangLinks(clipText(value, limit)));
+}
+
+function chatParagraph(text: string) {
+  return { textParagraph: { text } };
+}
+
+function chatButton(text: string, url: string) {
+  return { text, onClick: { openLink: { url } } };
+}
+
+// The rule for every Google Chat message: forge text only ever goes into the
+// `text` of a textParagraph or decoratedText widget, escaped so it cannot add
+// markup and with its URLs broken up so Chat does not link them (see
+// defangLinks). The card header, section headers and button labels carry our
+// own words only, and buttons only open our review URL or a checked change
+// URL. There is no message `text`: Chat would show it above the card,
+// repeating the header. `fallbackText` (what a notification shows in place of
+// the card) has no escape for `*`, `_`, `~`, backticks or `<url|label>`, so it
+// carries no forge text at all: not even the repository path, where an
+// underscore pair would already read as italics.
+function googleChatMessage(payload: NotificationPayload) {
+  const { title, error } = messageParts(payload);
+  const repository = `${oneLine(payload.repository.fullPath)} #${payload.change.number}`;
+  const widgets: object[] = [chatParagraph(chatText(repository, CHAT_LABEL_LIMIT))];
+  if (title) widgets.push(chatParagraph(`<b>${chatText(title, CHAT_TITLE_LIMIT)}</b>`));
+  const findings = error ? null : findingsDetail(payload);
+  if (error) widgets.push(chatParagraph(chatText(error, CHAT_ERROR_LIMIT)));
+  else if (findings) widgets.push(chatParagraph(findings));
+  const buttons = [chatButton("View review", payload.review.url)];
+  // Past the limit the button is left out rather than risk the whole message.
+  const changeUrl = boundedLinkUrl(payload.change.url);
+  if (changeUrl) buttons.push(chatButton(`Open ${changeNouns(payload.repository.provider).abbrev}`, changeUrl));
+  widgets.push({ buttonList: { buttons } });
+  return {
+    fallbackText: `${HEADLINES[payload.event]} #${payload.change.number}`,
+    cardsV2: [
+      {
+        cardId: "review",
+        card: { header: { title: `${EMOJI[payload.event]} ${HEADLINES[payload.event]}` }, sections: [{ widgets }] },
+      },
+    ],
+  };
+}
+
+// Same rule as googleChatMessage; one card, with fewer entries than Slack's
+// digest so the escaped worst case still fits the message size limit.
+function googleChatDigest(payload: DigestPayload) {
+  const summary: object[] = [chatParagraph(digestCounts(payload))];
+  const top = topRepositories(payload);
+  if (top) summary.push(chatParagraph(chatText(top, CHAT_TOP_LIMIT)));
+  const sections: object[] = [{ widgets: summary }];
+  const item = (review: NotificationPayload, text: string) => ({
+    decoratedText: { text, wrapText: true, button: chatButton("View review", review.review.url) },
+  });
+  const { blocked, failed } = digestSections(payload, { blocked: CHAT_DIGEST_BLOCKED, failed: CHAT_DIGEST_FAILED });
+  if (blocked.rows.length) {
+    const widgets: object[] = blocked.rows.map((row) => item(row.review, chatText(row.label, CHAT_LABEL_LIMIT)));
+    if (blocked.more > 0) widgets.push(chatParagraph(`and ${blocked.more} more`));
+    sections.push({ header: "Still blocked", widgets });
+  }
+  if (failed.rows.length) {
+    const widgets: object[] = failed.rows.map((row) => {
+      // Clipped apart, the error with whatever the label left of the limit.
+      const label = clipText(row.label, CHAT_FAILED_LABEL_LIMIT);
+      const error = clipText(row.error, CHAT_LABEL_LIMIT - label.length - 2);
+      return item(row.review, `${chatText(label, CHAT_FAILED_LABEL_LIMIT)}: ${chatText(error, CHAT_LABEL_LIMIT)}`);
+    });
+    if (failed.more > 0) widgets.push(chatParagraph(`and ${failed.more} more`));
+    sections.push({ header: "Failed", widgets });
+  }
+  sections.push({ widgets: [{ buttonList: { buttons: [chatButton("All reviews", `${env.CLIENT_ORIGIN}/reviews`)] } }] });
+  return {
+    fallbackText: digestHeadline(payload),
+    cardsV2: [
+      { cardId: "digest", card: { header: { title: digestName(payload), subtitle: digestPeriod(payload) }, sections } },
+    ],
+  };
 }
 
 // Plain text, so forge text needs no escaping; each entry is flattened to one
@@ -727,13 +880,20 @@ export function parseRetryAfter(value: string | null, now = new Date()): number 
 
 export type FailureKind = "retryable" | "permanent" | "gone";
 
+export const GOOGLE_CHAT_HOST = "chat.googleapis.com";
+
 // Whether a failed send is worth repeating. "gone" is an endpoint that says it
 // no longer exists: Slack answers 404 (no_service) or 410 for a deleted
-// incoming webhook, and nothing else uses 410 lightly.
-export function classifyFailure(err: unknown, kind: NotificationKind): FailureKind {
+// incoming webhook, and nothing else uses 410 lightly. Google Chat is taken to
+// answer 404 for a deleted webhook or space, but only when it is Google
+// answering: a google_chat target may point at a relay, whose 404 says nothing
+// about the space, so there it is an ordinary failure. `host` is the host of
+// the target's URL, null when there is none to read.
+export function classifyFailure(err: unknown, kind: NotificationKind, host: string | null = null): FailureKind {
   if (err instanceof DeliveryError) {
     const status = err.httpStatus;
-    if (status === 410 || (kind === "slack" && status === 404)) return "gone";
+    if (status === 410) return "gone";
+    if (status === 404 && (kind === "slack" || (kind === "google_chat" && host === GOOGLE_CHAT_HOST))) return "gone";
     if (status === 408 || status === 429 || status >= 500) return "retryable";
     return "permanent";
   }
@@ -815,6 +975,11 @@ export async function deliver(
     }
     case "slack": {
       const message = payload.event === "digest" ? slackDigest(payload) : slackMessage(payload);
+      await post(targetUrl(target), JSON.stringify(message));
+      return;
+    }
+    case "google_chat": {
+      const message = payload.event === "digest" ? googleChatDigest(payload) : googleChatMessage(payload);
       await post(targetUrl(target), JSON.stringify(message));
       return;
     }
@@ -918,6 +1083,17 @@ export function redactError(error: string, url: string | null): string {
 export function storedUrl(target: NotificationTarget): string | null {
   try {
     return targetUrl(target);
+  } catch {
+    return null;
+  }
+}
+
+// The host a target posts to, for classifyFailure; null for an email target.
+export function storedHost(target: NotificationTarget): string | null {
+  const url = storedUrl(target);
+  if (!url) return null;
+  try {
+    return new URL(url).host;
   } catch {
     return null;
   }
@@ -1461,7 +1637,8 @@ export function publicPersonal(target: NotificationTarget | null, forges: Person
 }
 
 // Only the host of a URL ever leaves the server: the full Slack URL is the
-// credential, and a webhook URL may carry one in its query.
+// credential, a Google Chat URL carries its key and token in the query, and a
+// webhook URL may carry one there too.
 export function publicTarget(
   target: NotificationTarget,
   lastDelivery: LastDelivery | null = null,
