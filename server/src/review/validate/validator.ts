@@ -31,7 +31,10 @@ export type DropReason =
   // Named a team rule the model was not given for its file: an unknown id, a
   // pattern rule, or one whose paths leave the file out. Its severity and
   // evidence were chosen for that rule, so it is not kept as anything else.
-  | "rule_mismatch";
+  | "rule_mismatch"
+  // The repository at the head contradicted the fact the finding rested on
+  // (claims.ts): the path exists, or the symbol or file is referenced.
+  | "claim_refuted";
 
 export interface ValidationResult {
   findings: Finding[];
@@ -226,6 +229,7 @@ export function validateFindings(
       verification: "not_checked",
       source: rule ? "rule" : "llm",
       ...(rule ? { ruleId: rule.id } : {}),
+      ...(config.review.checkClaims && candidate.claim ? { claim: candidate.claim } : {}),
       // Without the rule id: the model does not name the rule every time, and
       // a violation filed under the rule's category should still be the same
       // finding as one the model filed there on its own.

@@ -115,6 +115,11 @@ const reviewShape = {
   // ones are dropped, uncertain ones demoted like an unproven blocker.
   // "blocking" checks only those at or above blockOn, "all" every finding.
   verify: z.enum(VERIFY_MODES),
+  // Let a finding name a fact it rests on (a missing path, an unused symbol,
+  // an unreferenced file) and drop it when the repository at the head shows
+  // otherwise. No model call: a lookup or a capped code search. Only a
+  // positive contradiction drops; a failed or inconclusive check keeps it.
+  checkClaims: z.boolean(),
   // Report what static analyzers already found on the change (GitHub check
   // run annotations, GitLab Code Quality and SAST reports) as tool findings.
   toolFindings: z.boolean(),
@@ -413,6 +418,7 @@ export const DEFAULT_CONFIG: Config = {
     fileContext: true,
     impactDepth: 2,
     verify: "blocking",
+    checkClaims: true,
     toolFindings: true,
     toolFindingsBlock: false,
     context: "static",

@@ -9,6 +9,7 @@ import {
   evidenceSchema,
   severitySchema,
 } from "../core/severity.ts";
+import { CLAIM_KINDS } from "../core/models.ts";
 
 // What the model is asked to return. Numeric ranges and string lengths are
 // described rather than enforced in the schema, because providers' structured
@@ -41,6 +42,17 @@ export const modelFindingSchema = z.object({
     .describe("One sentence: the trigger and failure path, violated contract, or reproduction"),
   evidenceFiles: z.array(z.string()).describe("Other files the evidence relies on, if any"),
   ruleId: z.string().nullable().describe("The id of the repository rule this finding violates, or null"),
+  claim: z
+    .object({
+      kind: z
+        .enum(CLAIM_KINDS)
+        .describe(
+          "missing_path: the file or module at subject does not exist; unused_symbol: the identifier subject is never referenced; unreferenced_file: nothing imports or references the file at subject",
+        ),
+      subject: z.string().describe("An exact identifier, or a path relative to the repository root"),
+    })
+    .nullable()
+    .describe("The checkable fact the finding rests on, or null"),
 });
 export type ModelFinding = z.infer<typeof modelFindingSchema>;
 
@@ -180,7 +192,16 @@ function repairFinding(value: unknown): unknown {
     suggestion: typeof entry.suggestion === "string" && entry.suggestion.trim() ? entry.suggestion : null,
     confidence: numberValue(entry.confidence),
     ruleId,
+    claim: repairClaim(entry.claim),
   };
+}
+
+// A malformed claim is dropped rather than the finding: the claim only ever
+// lets the repository remove a finding, so losing one keeps the finding.
+function repairClaim(value: unknown): unknown {
+  const claim = camelKeys(record(value));
+  const kind = enumValue(claim.kind, CLAIM_KINDS);
+  return kind && typeof claim.subject === "string" && claim.subject.trim() ? { kind, subject: claim.subject.trim() } : null;
 }
 
 // One malformed finding must not cost the whole pass.

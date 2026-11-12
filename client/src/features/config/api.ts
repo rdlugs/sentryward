@@ -72,6 +72,7 @@ export interface ConfigOverride {
     fileContext?: boolean
     impactDepth?: number
     verify?: VerifyMode
+    checkClaims?: boolean
     toolFindings?: boolean
     toolFindingsBlock?: boolean
     context?: ContextMode
@@ -165,6 +166,7 @@ export interface EffectiveConfig {
     fileContext: boolean
     impactDepth: number
     verify: VerifyMode
+    checkClaims: boolean
     toolFindings: boolean
     toolFindingsBlock: boolean
     context: ContextMode

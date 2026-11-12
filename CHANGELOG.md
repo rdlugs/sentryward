@@ -10,6 +10,18 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Claim checks (`review.check_claims`, on by default). A finding may name the
+  fact it rests on: a path that does not exist, a symbol nothing references,
+  or a file nothing imports. Before verification, the claim is looked up at
+  the head revision (a file read, the change's own added lines, then at most
+  5 code searches and 15 reads per review) and the finding is dropped as
+  `claim_refuted` when the repository contradicts it. A search hit counts
+  only once it is confirmed by reading the file at the head, since GitHub
+  searches the default branch. Absence, errors and a spent budget never drop
+  anything. No model call is made; the claim is only requested in the prompt
+  while the setting is on. The dashboard's Accuracy section has the toggle,
+  and the review sidebar names the new drop reason. A new eval case,
+  `ts-clean-audit-import`, covers an import of an untouched module.
 - Discord and Microsoft Teams notification targets (#259). A new `discord`
   target kind takes a channel's webhook URL (the form labels it **Webhook
   URL**) and posts one embed: the headline

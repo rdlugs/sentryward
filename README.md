@@ -135,7 +135,10 @@ flowchart LR
    the global config, the profile, and built-in defaults.
 4. It sends the diff to the configured model in one or more passes, plus an
    optional walkthrough.
-5. It validates the findings and re-checks blocking ones with a second model
+5. It validates the findings, drops those whose stated fact the repository
+   contradicts (`review.check_claims`: a path that exists, a symbol or file
+   something references, found with a lookup or a capped code search and no
+   model call), and re-checks blocking ones with a second model
    call (`review.verify`). `llm.walkthrough_model` and `llm.verify_model` can
    point those two calls at a different model than the review passes.
 6. It [publishes](#publishing-to-the-forge) to the forge and stores the result
@@ -1422,6 +1425,8 @@ review:
   impact_depth: 2           # hops of callers to follow from changed code, 1-3 (fast profile: 1)
   verify: blocking          # off | blocking | all: re-check findings with a second model call;
                             # refuted ones are dropped, uncertain ones demoted (fast profile: off)
+  check_claims: true        # drop a finding whose "missing path" or "unused symbol/file" claim the
+                            # head revision contradicts; no model call, absence never drops
   tool_findings: true       # report static analysis results already on the forge as findings
   tool_findings_block: false  # let those findings reach block_on and fail the verdict
   context: static           # static | agentic: let passes read files and search code through tools

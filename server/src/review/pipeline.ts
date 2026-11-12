@@ -30,6 +30,7 @@ import { reviewChunk, type ChunkReview } from "./llm/review.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
 import { compareFindings, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
 import { verifies, verifyFindings } from "./validate/verify.ts";
+import { checkClaims } from "./validate/claims.ts";
 import { checkPatternRules } from "./rules.ts";
 
 export interface ReviewDeps {
@@ -340,11 +341,18 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     config,
     input.ignoredFingerprints,
   );
+  // Claims first: a lookup is cheaper than the verifier's model call, and a
+  // finding the repository contradicts is not worth one. Without a source
+  // (tests, an eval case without an after/ tree) there is nothing to check.
+  const claims =
+    config.review.checkClaims && deps.context
+      ? await checkClaims({ findings: validation.findings, changeSet, source: deps.context })
+      : { findings: validation.findings, dropped: {} };
   // After validation, so only findings that would be published are checked,
   // and before the verdict, so a refuted blocker cannot fail the status.
   if (verifies(config)) report({ stage: "verifying" });
   const verified = await verifyFindings({
-    findings: validation.findings,
+    findings: claims.findings,
     changeSet,
     chunks: outcomes.filter((outcome) => outcome.review).map((outcome) => outcome.chunk),
     config,
@@ -393,6 +401,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const findings = carried.length ? [...capped, ...carried].sort(compareFindings) : capped;
   const dropped: Partial<Record<DropReason, number>> = { ...validation.dropped };
   const extra: [DropReason, number][] = [
+    ...(Object.entries(claims.dropped) as [DropReason, number][]),
     ...(Object.entries(verified.dropped) as [DropReason, number][]),
     ...(Object.entries(tools?.dropped ?? {}) as [DropReason, number][]),
     ...(Object.entries(patternRules.dropped) as [DropReason, number][]),

@@ -35,6 +35,7 @@ const DROP_REASON_TEXT: Record<DropReason, string> = {
   previously_ignored: "Previously ignored on this change",
   refuted: "Refuted by verification",
   rule_mismatch: "Named a rule that does not apply",
+  claim_refuted: "The repository contradicted its claim",
 }
 
 // A reason added on the server before the client knows it still reads as text.

@@ -123,6 +123,11 @@ const FLAG_INFO: Record<FlagName, { label: string; description: ReactNode; cost?
     label: "Require evidence",
     description: "Critical and major findings without evidence are demoted instead of blocking.",
   },
+  checkClaims: {
+    label: "Check claims against the repository",
+    description:
+      "When a finding says a path is missing or a symbol or file is unused, look it up at the head revision and drop the finding if the repository shows otherwise. No extra model call.",
+  },
   suppressIgnored: {
     label: "Suppress dismissed findings",
     description:
@@ -2189,7 +2194,7 @@ export function ConfigFields(props: {
         </Section>
         <FieldSeparator />
         <Section title="Accuracy" description="How findings are checked before they count.">
-          <ToggleList>{toggles(["requireEvidence"])}</ToggleList>
+          <ToggleList>{toggles(["requireEvidence", "checkClaims"])}</ToggleList>
           <div className="grid gap-4 @md/field-group:grid-cols-2">
             {choiceField("verify")}
             {numberField("minConfidence", confidenceSlider)}
@@ -2514,6 +2519,7 @@ export function ConfigFields(props: {
   // The Finding Types fields, for the summary's override and file counts.
   const findingsFlags: FlagName[] = [
     "requireEvidence",
+    "checkClaims",
     "suppressIgnored",
     "fullFile",
     "fileContext",
