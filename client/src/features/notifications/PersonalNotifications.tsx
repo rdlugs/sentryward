@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link } from "react-router"
-import { AlertTriangle, Info } from "lucide-react"
+import { AlertTriangle, Circle, CircleCheck } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -7,6 +8,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Field, FieldContent, FieldDescription, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
+import { useAuth } from "@/features/auth/useAuth"
+import { forgeOrigin, PROVIDERS } from "@/features/forge/providers"
 import {
   errorMessage,
   EVENT_OPTIONS,
@@ -16,18 +19,54 @@ import {
   type PersonalForge,
 } from "./api"
 
-const FORGE_LABELS: Record<PersonalForge["provider"], string> = { github: "GitHub", gitlab: "GitLab" }
+// How long "Saved" stays next to the switch after a save.
+const SAVED_MS = 2000
+
+// "github.com" rather than "https://github.com/": a self-hosted forge stored
+// with its scheme reads like the rest.
+function displayHost(host: string): string {
+  try {
+    return new URL(forgeOrigin(host)).host
+  } catch {
+    return host
+  }
+}
+
+function forgeName(forge: PersonalForge): string {
+  return `${PROVIDERS[forge.provider].label} account (${displayHost(forge.host)})`
+}
+
+function Step({ done, children }: { done: boolean; children: ReactNode }) {
+  const Icon = done ? CircleCheck : Circle
+  return (
+    <li className="flex items-start gap-2">
+      <Icon className={done ? "mt-0.5 size-4 shrink-0 text-emerald-600" : "mt-0.5 size-4 shrink-0 text-muted-foreground"} />
+      <span className={done ? "text-muted-foreground" : undefined}>
+        <span className="sr-only">{done ? "Done: " : "To do: "}</span>
+        {children}
+      </span>
+    </li>
+  )
+}
 
 // Every member's own email about reviews of changes they opened. Each change
 // saves at once, like a target's Active switch. Changes are matched through a
-// linked sign-in account, so hosts without one are called out.
+// linked sign-in account, so hosts without one are listed as a step to take.
 export function PersonalNotifications() {
+  const { user } = useAuth()
   const { data, isPending } = usePersonalNotifications()
   const update = useUpdatePersonalNotifications()
+  const [saved, setSaved] = useState(false)
+  const savedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(savedTimer.current), [])
 
   async function save(input: { enabled: boolean; events: NotificationEvent[] }) {
+    clearTimeout(savedTimer.current)
+    setSaved(false)
     try {
       await update.mutateAsync(input)
+      setSaved(true)
+      savedTimer.current = setTimeout(() => setSaved(false), SAVED_MS)
     } catch (error) {
       toast.error(errorMessage(error, "Could not save your notifications"))
     }
@@ -35,52 +74,23 @@ export function PersonalNotifications() {
 
   // While a save is in flight, show what was asked for.
   const current = update.isPending ? update.variables : data
-  const unlinked = data?.forges.filter((forge) => !forge.linked) ?? []
+  // Mail is the one thing that blocks switching on; unlinked forges only mean
+  // changes there are not recognised.
   const disabled = !data || update.isPending || (!data.mailConfigured && !data.enabled)
+  const eventsDisabled = disabled || !current?.enabled
+  const missing = data ? !data.mailConfigured || data.forges.some((forge) => !forge.linked) : false
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Your pull requests</CardTitle>
-        <CardDescription>
-          Email me when a review of a pull or merge request I opened finishes. Only you see this setting.
-        </CardDescription>
+        <CardTitle>Email about my changes</CardTitle>
+        <CardDescription>When a review of a pull or merge request you opened finishes.</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {isPending || !data || !current ? (
           <Skeleton className="h-16 w-full" />
         ) : (
           <>
-            {!data.mailConfigured && (
-              <Alert>
-                <Info />
-                <AlertTitle>Mail is not configured</AlertTitle>
-                <AlertDescription>An administrator needs to set SMTP_URL before you can switch this on.</AlertDescription>
-              </Alert>
-            )}
-            {data.pausedReason && (
-              <Alert>
-                <AlertTriangle />
-                <AlertTitle>{data.pausedReason}</AlertTitle>
-                <AlertDescription>Switching it back on clears this notice.</AlertDescription>
-              </Alert>
-            )}
-            {unlinked.length > 0 && (
-              <Alert>
-                <Info />
-                <AlertTitle>Link your forge account</AlertTitle>
-                <AlertDescription>
-                  <p>
-                    Your changes are recognised through a linked sign-in account. Link{" "}
-                    {unlinked.map((forge) => `${FORGE_LABELS[forge.provider]} (${forge.host})`).join(", ")} under{" "}
-                    <Link to="/settings?tab=sign-in" className="underline underline-offset-4">
-                      Settings, Sign-in methods
-                    </Link>
-                    .
-                  </p>
-                </AlertDescription>
-              </Alert>
-            )}
             <Field orientation="horizontal">
               <Switch
                 id="personal-enabled"
@@ -91,10 +101,62 @@ export function PersonalNotifications() {
               <FieldLabel htmlFor="personal-enabled" className="font-normal">
                 Email me about reviews of my changes
               </FieldLabel>
+              <span role="status" className="ml-auto text-xs text-muted-foreground">
+                {update.isPending ? "Saving…" : saved ? "Saved" : null}
+              </span>
             </Field>
+
+            {data.pausedReason && (
+              <Alert>
+                <AlertTriangle />
+                <AlertTitle>{data.pausedReason}</AlertTitle>
+                <AlertDescription>Switching it back on clears this notice.</AlertDescription>
+              </Alert>
+            )}
+
+            {missing && (
+              <div className="rounded-md border p-3 text-sm">
+                <p className="mb-2 font-medium">Before this can email you</p>
+                <ul className="flex flex-col gap-1.5">
+                  <Step done={data.mailConfigured}>
+                    {data.mailConfigured ? (
+                      "Email is set up for Sentryward"
+                    ) : (
+                      <>
+                        Ask an administrator to set up email for Sentryward
+                        {user?.role === "admin" && (
+                          <>
+                            {" "}
+                            (set <code className="font-mono text-xs">SMTP_URL</code>)
+                          </>
+                        )}
+                      </>
+                    )}
+                  </Step>
+                  {data.forges.map((forge) => (
+                    <Step key={`${forge.provider}:${forge.host}`} done={forge.linked}>
+                      {forge.linked ? (
+                        `Linked your ${forgeName(forge)}`
+                      ) : (
+                        <>
+                          Link your {forgeName(forge)}.{" "}
+                          <Link to="/settings?tab=sign-in" className="underline underline-offset-4">
+                            Link account
+                          </Link>
+                        </>
+                      )}
+                    </Step>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <FieldSet>
               <FieldLegend variant="label">Events</FieldLegend>
-              <div className="flex flex-col gap-2">
+              {!current.enabled && (
+                <FieldDescription>Switch on to choose events.</FieldDescription>
+              )}
+              <div className="grid gap-x-6 gap-y-2 sm:grid-cols-2">
                 {EVENT_OPTIONS.map((option) => {
                   const id = `personal-event-${option.value}`
                   const checked = current.events.includes(option.value)
@@ -105,7 +167,7 @@ export function PersonalNotifications() {
                       <Checkbox
                         id={id}
                         checked={checked}
-                        disabled={update.isPending || last}
+                        disabled={eventsDisabled || last}
                         onCheckedChange={(on) =>
                           save({
                             enabled: current.enabled,
@@ -126,6 +188,13 @@ export function PersonalNotifications() {
                   )
                 })}
               </div>
+              {/* A blocked or resolved review is also a completed one (eventsFor
+                  on the server); a failed one is not. */}
+              {current.events.includes("completed") && (
+                <FieldDescription>
+                  Completed already covers blocked and resolved reviews. Failed reviews are separate.
+                </FieldDescription>
+              )}
             </FieldSet>
           </>
         )}

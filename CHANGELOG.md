@@ -11,8 +11,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 ### Added
 
 - Personal notifications (#258). Any member can switch on email about reviews
-  of the pull and merge requests they opened, from a **Your pull requests**
-  card on the Notifications page (`GET`/`PUT /api/notifications/personal`),
+  of the pull and merge requests they opened, from the **My email** tab on
+  the Notifications page (`?tab=personal`), which lists what is missing
+  (mail, a linked forge account) as steps
+  (`GET`/`PUT /api/notifications/personal`),
   choosing blocked, failed, resolved and completed. A change is matched to a
   member through the forge user id of its author, recorded on the review job
   (`author_id`) when a webhook queues the review and again when the worker

@@ -3,7 +3,7 @@ import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
-import { mockApi, personalWorkspace, testUser, testWorkspaces } from "@/test/apiRoutes"
+import { mockApi, personalWorkspace, teamWorkspace, testUser, testWorkspaces } from "@/test/apiRoutes"
 import { setViewportWidth } from "@/test/viewport"
 
 const settings = { autoPauseAfter: 5 }
@@ -715,7 +715,7 @@ describe("Notifications", () => {
 
     const tab = await screen.findByRole("tab", { name: /Failing targets/ })
     // Something is paused, so the count is in the urgent colour.
-    expect(within(tab).getByText("3")).toHaveAttribute("data-urgent", "true")
+    expect(await within(tab).findByText("3")).toHaveAttribute("data-urgent", "true")
     expect(screen.queryByLabelText("Auto-pause after")).not.toBeInTheDocument()
     await userEvent.click(tab)
 
@@ -800,7 +800,7 @@ describe("Notifications", () => {
     renderWithProviders(<App />, { route: "/notifications" })
 
     const tab = await screen.findByRole("tab", { name: /Failing targets/ })
-    expect(within(tab).getByText("1")).toHaveAttribute("data-urgent", "false")
+    expect(await within(tab).findByText("1")).toHaveAttribute("data-urgent", "false")
   })
 
   it("asks before resuming a paused target", async () => {
@@ -1069,7 +1069,7 @@ describe("Personal notifications", () => {
       },
       [MEMBERS_ROUTE]: members,
     })
-    renderWithProviders(<App />, { route: "/notifications" })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
 
     const toggle = await screen.findByRole("switch", { name: "Email me about reviews of my changes" })
     expect(toggle).not.toBeChecked()
@@ -1091,39 +1091,161 @@ describe("Personal notifications", () => {
       "GET /api/notifications/personal": { ...personal, enabled: true, events: ["blocked"] },
       [MEMBERS_ROUTE]: members,
     })
-    renderWithProviders(<App />, { route: "/notifications" })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
 
     expect(await screen.findByRole("checkbox", { name: "Blocked" })).toBeDisabled()
     expect(screen.getByRole("checkbox", { name: "Failed" })).toBeEnabled()
   })
 
-  it("points to Sign-in methods for a forge account that is not linked", async () => {
+  it("lists a forge account that is not linked as a step, linking to Sign-in methods", async () => {
     mockApi({
       "GET /api/notifications": { targets: [], mailConfigured: true, settings },
       "GET /api/notifications/personal": {
         ...personal,
         forges: [
           { provider: "github", host: "github.com", linked: true },
-          { provider: "gitlab", host: "gitlab.acme.com", linked: false },
+          { provider: "gitlab", host: "https://gitlab.acme.com/", linked: false },
         ],
       },
       [MEMBERS_ROUTE]: members,
     })
-    renderWithProviders(<App />, { route: "/notifications" })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
 
-    expect(await screen.findByText(/Link GitLab \(gitlab\.acme\.com\) under/)).toBeInTheDocument()
-    expect(screen.getByRole("link", { name: "Settings, Sign-in methods" })).toHaveAttribute("href", "/settings?tab=sign-in")
+    expect(await screen.findByText("Before this can email you")).toBeInTheDocument()
+    expect(screen.getByText(/Link your GitLab account \(gitlab\.acme\.com\)/)).toBeInTheDocument()
+    expect(screen.getByText("Linked your GitHub account (github.com)")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "Link account" })).toHaveAttribute("href", "/settings?tab=sign-in")
   })
 
-  it("cannot be switched on without mail", async () => {
+  it("shows no checklist once mail is set up and every forge account is linked", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: true, settings },
+      "GET /api/notifications/personal": personal,
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
+
+    expect(await screen.findByRole("switch", { name: "Email me about reviews of my changes" })).toBeEnabled()
+    expect(screen.queryByText("Before this can email you")).not.toBeInTheDocument()
+  })
+
+  it("cannot be switched on, nor its events changed, without mail", async () => {
     mockApi({
       "GET /api/notifications": { targets: [], mailConfigured: false, settings },
       "GET /api/notifications/personal": { ...personal, mailConfigured: false },
       [MEMBERS_ROUTE]: members,
     })
-    renderWithProviders(<App />, { route: "/notifications" })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
 
     expect(await screen.findByRole("switch", { name: "Email me about reviews of my changes" })).toBeDisabled()
-    expect(screen.getByText("Mail is not configured")).toBeInTheDocument()
+    for (const name of ["Blocked", "Resolved", "Failed", "Completed"]) {
+      expect(screen.getByRole("checkbox", { name })).toBeDisabled()
+    }
+    expect(screen.getByText("Ask an administrator to set up email for Sentryward")).toBeInTheDocument()
+    // Only an instance admin is told which setting that is.
+    expect(screen.queryByText("SMTP_URL")).not.toBeInTheDocument()
+  })
+
+  it("names the mail setting for an instance admin", async () => {
+    mockApi({
+      "GET /api/auth/me": { user: { ...testUser, role: "admin" }, workspaces: testWorkspaces },
+      "GET /api/notifications": { targets: [], mailConfigured: false, settings },
+      "GET /api/notifications/personal": { ...personal, mailConfigured: false },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
+
+    expect(await screen.findByText("SMTP_URL")).toBeInTheDocument()
+  })
+
+  it("lets events be chosen only once it is switched on, and says when a save went through", async () => {
+    let saved = personal
+    mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: true, settings },
+      "GET /api/notifications/personal": () => jsonResponse(200, saved),
+      "PUT /api/notifications/personal": (init?: RequestInit) => {
+        saved = { ...saved, ...JSON.parse(String(init?.body)) }
+        return jsonResponse(200, saved)
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
+
+    const toggle = await screen.findByRole("switch", { name: "Email me about reviews of my changes" })
+    expect(screen.getByRole("checkbox", { name: "Completed" })).toBeDisabled()
+    expect(screen.getByText("Switch on to choose events.")).toBeInTheDocument()
+
+    await userEvent.click(toggle)
+
+    expect(await screen.findByText("Saved")).toBeInTheDocument()
+    expect(screen.getByRole("checkbox", { name: "Completed" })).toBeEnabled()
+    expect(screen.queryByText("Switch on to choose events.")).not.toBeInTheDocument()
+  })
+
+  it("explains that Completed already covers blocked and resolved reviews", async () => {
+    mockApi({
+      "GET /api/notifications": { targets: [], mailConfigured: true, settings },
+      "GET /api/notifications/personal": { ...personal, enabled: true, events: ["completed"] },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications?tab=personal" })
+
+    expect(await screen.findByText(/Completed already covers blocked and resolved reviews/)).toBeInTheDocument()
+  })
+})
+
+describe("Notifications page tabs", () => {
+  const personal = { enabled: false, events: ["blocked"], pausedReason: null, forges: [], mailConfigured: true }
+
+  function render(role: "owner" | "member", workspaceId = personalWorkspace.id, targets: unknown = { targets: [], mailConfigured: true, settings }) {
+    const workspaces = testWorkspaces.map((workspace) => ({ ...workspace, role }))
+    localStorage.setItem("sentryward.workspace", workspaceId)
+    mockApi({
+      "GET /api/auth/me": { user: testUser, workspaces },
+      "GET /api/workspaces": { workspaces },
+      "GET /api/notifications": targets,
+      "GET /api/notifications/personal": personal,
+      [`GET /api/workspaces/${workspaceId}/members`]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+  }
+
+  it("opens on Targets and keeps the member's own email in its own tab", async () => {
+    render("owner")
+
+    expect(await screen.findByRole("tab", { name: "Targets" })).toHaveAttribute("aria-selected", "true")
+    expect(screen.queryByText("Email about my changes")).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole("tab", { name: "My email" }))
+
+    expect(await screen.findByText("Email about my changes")).toBeInTheDocument()
+    expect(screen.getByText("Only you see this.")).toBeInTheDocument()
+  })
+
+  it("names a team workspace on the My email tab", async () => {
+    render("owner", teamWorkspace.id)
+
+    await userEvent.click(await screen.findByRole("tab", { name: "My email" }))
+
+    expect(await screen.findByText(`Only you see this. Applies to ${teamWorkspace.name}.`)).toBeInTheDocument()
+  })
+
+  it("tells a member that only owners and admins change the targets", async () => {
+    render("member")
+    expect(await screen.findByText("Only owners and admins can change these.")).toBeInTheDocument()
+  })
+
+  it("does not tell an owner that", async () => {
+    render("owner")
+    expect(await screen.findByRole("tab", { name: "Targets" })).toBeInTheDocument()
+    expect(screen.queryByText("Only owners and admins can change these.")).not.toBeInTheDocument()
+  })
+
+  it("keeps the My email tab working when targets cannot be loaded", async () => {
+    render("owner", personalWorkspace.id, () => jsonResponse(500, { message: "boom" }))
+
+    expect(await screen.findByText("Could not load notification targets.")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("tab", { name: "My email" }))
+    expect(await screen.findByRole("switch", { name: "Email me about reviews of my changes" })).toBeEnabled()
   })
 })

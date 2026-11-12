@@ -1258,7 +1258,7 @@ export async function emailAboutPause(targetId: string, reason: string): Promise
       subject = oneLine(`Your review emails in ${target.workspace.name} were paused`);
       text =
         `${reason}.\n\nSentryward stopped emailing you about reviews of your changes. Switch them back on ` +
-        `under Notifications:\n${env.CLIENT_ORIGIN}/notifications\n`;
+        `under Notifications:\n${env.CLIENT_ORIGIN}/notifications?tab=personal\n`;
     } else {
       const admins = await prisma.membership.findMany({
         where: { workspaceId: target.workspace.id, role: { in: ["owner", "admin"] } },

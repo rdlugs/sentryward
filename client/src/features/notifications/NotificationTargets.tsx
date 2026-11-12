@@ -2,7 +2,7 @@ import { useMemo, useState } from "react"
 import { useSearchParams } from "react-router"
 import { Controller, useForm, useWatch, type Control, type FieldValues, type Path } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { AlertTriangle, BellRing, Copy, History, KeyRound, Loader2, MoreHorizontal, Pencil, Plus, Send, Trash2 } from "lucide-react"
+import { AlertTriangle, BellRing, Copy, History, KeyRound, Loader2, Mail, MoreHorizontal, Pencil, Plus, Send, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
 import { SortableHead } from "@/components/SortableHead"
@@ -91,6 +91,7 @@ import {
 import { DeliveriesSheet, LastDeliveryCell, TargetActiveSwitch, TargetName } from "./components"
 import { causeHint, failingTargets, hourLabel, WEEKDAYS } from "./delivery"
 import { FailingTargets } from "./FailingTargets"
+import { PersonalNotifications } from "./PersonalNotifications"
 
 const eventsSchema = z
   .array(z.enum(["blocked", "failed", "resolved", "completed"]))
@@ -1248,12 +1249,22 @@ function TargetList({
   )
 }
 
-const TABS = ["targets", "failing"] as const
+const TABS = ["targets", "failing", "personal"] as const
 type Tab = (typeof TABS)[number]
+
+function TargetsUnavailable({ isError }: { isError: boolean }) {
+  if (!isError) return <Skeleton className="h-40 w-full" />
+  return (
+    <Alert variant="destructive">
+      <AlertTriangle />
+      <AlertTitle>Could not load notification targets.</AlertTitle>
+    </Alert>
+  )
+}
 
 export function NotificationTargets() {
   const { workspace } = useAuth()
-  const { data, isPending, isError } = useNotificationTargets()
+  const { data, isError } = useNotificationTargets()
   // Members can see the targets; the server lets only admins change them.
   const canManage = workspace?.role === "owner" || workspace?.role === "admin"
   // Names for email recipients, and the picker when adding one.
@@ -1267,18 +1278,12 @@ export function NotificationTargets() {
   // Red when something was paused and needs an admin; neutral when targets are
   // only failing or retrying, which may sort themselves out.
   const urgent = failing.some((row) => row.status === "paused")
+  // The personal setting is per workspace, so a team workspace is named; in
+  // the personal one there is only one place it could apply.
+  const team = workspace && !workspace.personal ? workspace : null
 
-  if (isPending) return <Skeleton className="h-40 w-full" />
-
-  if (isError) {
-    return (
-      <Alert variant="destructive">
-        <AlertTriangle />
-        <AlertTitle>Could not load notification targets.</AlertTitle>
-      </Alert>
-    )
-  }
-
+  // The tabs render while targets load or fail: the personal tab does not
+  // depend on them.
   return (
     <Tabs className="flex-1" value={tab} onValueChange={(value) => setParams({ tab: value }, { replace: true })}>
       <TabsList>
@@ -1295,12 +1300,33 @@ export function NotificationTargets() {
             </Badge>
           )}
         </TabsTrigger>
+        <TabsTrigger value="personal">
+          <Mail />
+          <span>My email</span>
+        </TabsTrigger>
       </TabsList>
       <TabsContent value="targets" className="flex flex-col gap-4">
-        <TargetList targets={data.targets} mailConfigured={data.mailConfigured} members={members} canManage={canManage} />
+        {!canManage && <p className="text-sm text-muted-foreground">Only owners and admins can change these.</p>}
+        {data ? (
+          <TargetList targets={data.targets} mailConfigured={data.mailConfigured} members={members} canManage={canManage} />
+        ) : (
+          <TargetsUnavailable isError={isError} />
+        )}
       </TabsContent>
       <TabsContent value="failing">
-        <FailingTargets failing={failing} settings={data.settings} canManage={canManage} />
+        {data ? (
+          <FailingTargets failing={failing} settings={data.settings} canManage={canManage} />
+        ) : (
+          <TargetsUnavailable isError={isError} />
+        )}
+      </TabsContent>
+      <TabsContent value="personal" className="flex flex-col gap-4">
+        <p className="text-sm text-muted-foreground">
+          {team ? `Only you see this. Applies to ${team.name}.` : "Only you see this."}
+        </p>
+        <div className="max-w-3xl">
+          <PersonalNotifications />
+        </div>
       </TabsContent>
     </Tabs>
   )

@@ -1,6 +1,7 @@
 import request from "supertest";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
+import { env } from "../src/config/env.ts";
 import type { ReviewStatus, ReviewVerdict } from "../src/generated/prisma/client.ts";
 import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
@@ -304,5 +305,6 @@ describe("personal notification delivery", () => {
       subject: expect.stringContaining("Your review emails in"),
       text: expect.stringContaining(`${target.pausedReason}.\n\n`),
     });
+    expect(send.mock.calls[0]![0].text).toContain(`${env.CLIENT_ORIGIN}/notifications?tab=personal`);
   });
 });
