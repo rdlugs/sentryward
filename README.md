@@ -978,15 +978,18 @@ targets** tab, 5 by default, Never to turn it off) the target is paused. An endp
 longer exists, `410 Gone` from any target or `404` from Slack (a deleted
 incoming webhook answers `no_service`) or Google Chat (a deleted webhook or
 space; only when the target's URL is on `chat.googleapis.com`, since a relay's
-`404` says nothing about the space), pauses its target at once. The reason
+`404` says nothing about the space) or Discord (a deleted webhook, under the
+same condition for `discord.com` and `discordapp.com`), pauses its target at
+once. A Microsoft Teams workflow that was deleted or switched off has no such
+answer, so its target is paused by the failure count. The reason
 (for example "Auto-paused: HTTP 410 Gone" or "Auto-paused after 5 failed
 deliveries in a row (last: HTTP 503)") shows under the target's name and in its
 edit panel, and when mail is configured each owner and admin of the workspace
 is emailed once, with a link straight to that tab. The **Failing targets** tab
 (`/notifications?tab=failing`, open to members too) lists every target that
 needs a look, with a summary such as "1 paused · 1 failing · 1 retrying":
-**Paused** (auto-paused, with what to do about it: a deleted Slack or Google
-Chat webhook has to be added again, a target that kept failing can be tested and resumed),
+**Paused** (auto-paused, with what to do about it: a deleted Slack, Google
+Chat or Discord webhook has to be added again, a target that kept failing can be tested and resumed),
 **Failing** (on, with failures in a row shown against the limit) and
 **Retrying** (a delivery waiting for its next try, even when a newer one went
 through). Each row shows the last delivery's status or error and when the next
@@ -999,7 +1002,7 @@ pending. Resuming the target (or switching it back on or off in the Targets
 tab) clears the reason and the count. Failed test deliveries never count, so checking a broken target does not
 pause it.
 
-There are three kinds:
+There are six kinds:
 
 - **Webhook**: a `POST` with a JSON body and these headers:
 
@@ -1012,7 +1015,7 @@ There are three kinds:
   | `X-Sentryward-Signature` | Deprecated: `sha256=<hex>` of the raw body alone (two values during a rotation, like V2), removed in the next minor release |
 
   The signing secret is shown once when the target is added. Admins can change
-  a webhook's, Slack or Google Chat target's URL from **Edit** without losing its events,
+  a webhook's, Slack, Google Chat, Discord or Teams target's URL from **Edit** without losing its events,
   scope, secret or delivery history; the new URL is checked like a new
   target's, and deliveries already queued go to it. **Rotate secret** in a
   webhook's menu issues a new secret, shown once. For the next 24 hours the
@@ -1115,6 +1118,35 @@ There are three kinds:
   review, kept inside Google Chat's message size limit. The URL's `key` and
   `token` are the credential: the URL is stored encrypted, only its host is
   shown, and it is cut out of stored delivery errors.
+- **Discord**: a channel's webhook URL
+  (`https://discord.com/api/webhooks/<id>/<token>`, from the channel's
+  **Integrations** settings), posted one embed: the same headline and emoji
+  per event as its title, then the repository and number, the title in bold,
+  the findings by severity or a failed review's error, and **View review**
+  and **Open PR** (**Open MR** on GitLab) links, the second only when the
+  change has an http(s) URL short enough to send. Titles, repository names
+  and errors are escaped so they cannot add formatting, a link or a mention,
+  and the message allows no mentions, so `@everyone` in a title pings nobody.
+  There is no `content`, which would repeat the embed's title above it. A
+  digest is one embed with the counts, the most blocked repositories, up to
+  10 still-blocked changes and 5 failed reviews, each linking to its review;
+  when the rows are long, fewer are shown and the rest counted, so the embed
+  stays inside Discord's size limit. The URL ends in the webhook's token: it
+  is stored encrypted, only its host is shown, and it is cut out of stored
+  delivery errors.
+- **Microsoft Teams**: the URL of a Workflows webhook (in the channel's
+  menu, **Workflows**, then a template such as **Send webhook alerts to a
+  channel**; Office 365 connector webhooks were retired by Microsoft), posted
+  one Adaptive Card: the headline and emoji, the repository and number, the
+  title, the findings by severity or a failed review's error, and **View
+  review** and **Open PR** (**Open MR** on GitLab) actions, the second only
+  when the change has an http(s) URL. Titles, repository names and errors go
+  into text runs that Teams shows as written, never into markdown, and a URL
+  in them is broken up with zero-width spaces. A digest is one card with the
+  counts, the most blocked repositories, up to 10 still-blocked changes and
+  5 failed reviews, each linking to its review, kept inside Teams' message
+  size limit. The URL's `sig` is the credential: the URL is stored encrypted,
+  only its host is shown, and it is cut out of stored delivery errors.
 - **Email**: chosen members of the workspace, through the configured mail
   transport (`SMTP_URL`). Members who leave are no longer emailed. A review's
   email has a text and an HTML part with the same content: the headline,
@@ -1597,7 +1629,7 @@ that limit both.
   and the comments, statuses, labels and description updates Sentryward
   publishes.
 - **Elsewhere**: only the notification targets you configure (webhooks, Slack,
-  Google Chat, email), which receive the review summary.
+  Google Chat, Discord, Microsoft Teams, email), which receive the review summary.
 
 ### Retention
 
@@ -1955,8 +1987,8 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures`, `scope` or `null`), the scope (`repositoryIds`, empty for all; `minSeverity`, `minor`, `major`, `critical` or `null`; `onlyVerdictChanges`), `secretRotatedUntil` (a webhook's previous secret still signs until then, else `null`), `delivery` (`{ mode, hour, weekday, timeZone, nextDigestAt, held }`: `mode` `each`, `daily` or `weekly`, the schedule (kept after switching back to `each`), when the next digest is built (`null` for `each`) and how many reviews it holds), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
 | GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, including `test` and `digest`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
 | PATCH  | `/api/notifications/settings` | Workspace admins: `{ autoPauseAfter }`, 0 to 50 failed deliveries in a row before a target is paused (0 never); returns `{ settings }` |
-| POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack" \| "google_chat", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity`, `onlyVerdictChanges` and `delivery` (`{ mode: "each" }`, the default, `{ mode: "daily", hour, timeZone }` or `{ mode: "weekly", hour, weekday, timeZone }`, `hour` 0-23, `weekday` 0-6 from Sunday, `timeZone` an IANA name); events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
-| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, url?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent. `url` (webhook, Slack and Google Chat only, 400 on `url` for email) is checked like a new target's and keeps the secret |
+| POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack" \| "google_chat" \| "discord" \| "teams", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity`, `onlyVerdictChanges` and `delivery` (`{ mode: "each" }`, the default, `{ mode: "daily", hour, timeZone }` or `{ mode: "weekly", hour, weekday, timeZone }`, `hour` 0-23, `weekday` 0-6 from Sunday, `timeZone` an IANA name); events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
+| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, url?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent. `url` (every kind but email, 400 on `url` for email) is checked like a new target's and keeps the secret |
 | POST   | `/api/notifications/:id/rotate-secret` | Workspace admins, webhooks only: returns `{ target, secret }`, the new signing secret shown only here; the previous one also signs deliveries for 24 hours |
 | GET    | `/api/notifications/personal` | Any member: `{ enabled, events, pausedReason, forges, mailConfigured }`, the member's own email about reviews of changes they opened; `forges` is `[{ provider, host, linked }]` for each forge host of the workspace, `linked` when the member has a sign-in identity there |
 | PUT    | `/api/notifications/personal` | Any member: `{ enabled, events }` (at least one event); `enabled: true` needs mail configured (400). Saving clears an auto-pause; switching off drops what is queued. Returns the same shape as GET |

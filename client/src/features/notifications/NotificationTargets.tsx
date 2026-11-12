@@ -206,7 +206,7 @@ const HTTP_URL = /^https?:\/\/\S+$/
 
 const createSchema = z
   .object({
-    kind: z.enum(["webhook", "slack", "google_chat", "email"]),
+    kind: z.enum(["webhook", "slack", "google_chat", "discord", "teams", "email"]),
     name: z.string().trim().min(1, "Name is required").max(100),
     url: z.string().trim(),
     events: eventsSchema,
@@ -243,6 +243,8 @@ const URL_PLACEHOLDERS: Record<Exclude<NotificationKind, "email">, string> = {
   webhook: "https://ci.example.com/hooks/sentryward",
   slack: "https://hooks.slack.com/services/...",
   google_chat: "https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=...",
+  discord: "https://discord.com/api/webhooks/...",
+  teams: "https://....logic.azure.com/workflows/.../triggers/manual/paths/invoke?...",
 }
 
 const KIND_OPTIONS = (Object.keys(KIND_LABELS) as NotificationKind[]).map((kind) => ({
@@ -641,6 +643,8 @@ function AddTargetSheet({
                         <SelectItem value="webhook">Webhook</SelectItem>
                         <SelectItem value="slack">Slack</SelectItem>
                         <SelectItem value="google_chat">Google Chat</SelectItem>
+                        <SelectItem value="discord">Discord</SelectItem>
+                        <SelectItem value="teams">Microsoft Teams</SelectItem>
                         <SelectItem value="email" disabled={!mailConfigured}>
                           Email{!mailConfigured && " (mail is not configured)"}
                         </SelectItem>
@@ -1221,8 +1225,8 @@ function TargetList({
             <EmptyTitle>No notification targets</EmptyTitle>
             <EmptyDescription>
               {canManage
-                ? "Add a webhook, Slack channel, Google Chat space or email to hear about blocked and failed reviews."
-                : "A workspace admin can add a webhook, Slack channel, Google Chat space or email for review notifications."}
+                ? "Add a webhook, a Slack, Discord or Teams channel, a Google Chat space or email to hear about blocked and failed reviews."
+                : "A workspace admin can add a webhook, a Slack, Discord or Teams channel, a Google Chat space or email for review notifications."}
             </EmptyDescription>
           </EmptyHeader>
           {addButton && <EmptyContent>{addButton}</EmptyContent>}

@@ -83,6 +83,9 @@ export function causeHint(target: NotificationTarget) {
     if (target.kind === "google_chat") {
       return "The Google Chat webhook or its space was deleted. Remove this target and add a new webhook URL."
     }
+    if (target.kind === "discord") {
+      return "The Discord webhook or its channel was deleted. Remove this target and add a new webhook URL."
+    }
     return "The endpoint says it no longer exists. Check it, then remove and add the target again."
   }
   if (target.pauseCause === "failures") return "Check the delivery errors, send a test, then resume."

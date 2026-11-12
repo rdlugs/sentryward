@@ -88,7 +88,7 @@ function finishedJob(status: ReviewStatus = "failed", verdict: ReviewVerdict | n
 }
 
 function target(
-  kind: "webhook" | "slack" | "google_chat" = "webhook",
+  kind: "webhook" | "slack" | "google_chat" | "discord" | "teams" = "webhook",
   url = "https://hooks.example.com/sw",
   events: NotificationEvent[] = ["failed", "completed"],
 ) {
@@ -105,6 +105,7 @@ function target(
 }
 
 const CHAT_URL = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t";
+const DISCORD_URL = "https://discord.com/api/webhooks/1/token";
 
 function failWith(err: unknown): RunDeliveryDeps {
   return {
@@ -163,6 +164,16 @@ describe("retry policy", () => {
     [new DeliveryError(403), "google_chat", "permanent"],
     [new DeliveryError(429), "google_chat", "retryable"],
     [new DeliveryError(503), "google_chat", "retryable"],
+    [new DeliveryError(404), "discord", "permanent"],
+    [new DeliveryError(410), "discord", "gone"],
+    [new DeliveryError(401), "discord", "permanent"],
+    [new DeliveryError(429), "discord", "retryable"],
+    [new DeliveryError(502), "discord", "retryable"],
+    [new DeliveryError(404), "teams", "permanent"],
+    [new DeliveryError(410), "teams", "gone"],
+    [new DeliveryError(400), "teams", "permanent"],
+    [new DeliveryError(429), "teams", "retryable"],
+    [new DeliveryError(503), "teams", "retryable"],
     [new DeliveryError(410), "webhook", "gone"],
     [new PermanentDeliveryError("Mail is not configured"), "email", "permanent"],
     [new DecryptError(), "slack", "permanent"],
@@ -182,6 +193,24 @@ describe("retry policy", () => {
     expect(classifyFailure(new DeliveryError(404), "google_chat", host)).toBe(expected);
   });
 
+  // The same for Discord, on any of the hosts it serves webhooks from.
+  it.each([
+    ["discord.com", "gone"],
+    ["canary.discord.com", "gone"],
+    ["discordapp.com", "gone"],
+    ["discord.com.evil.example", "permanent"],
+    ["relay.example.com", "permanent"],
+    [null, "permanent"],
+  ] as const)("classifies a 404 for a discord target on %s as %s", (host, expected) => {
+    expect(classifyFailure(new DeliveryError(404), "discord", host)).toBe(expected);
+  });
+
+  // A workflow that is deleted or switched off has no answer to tell it by,
+  // so a Teams 404 is never "gone", whoever answers.
+  it("classifies a 404 for a teams target on Microsoft's host as permanent", () => {
+    expect(classifyFailure(new DeliveryError(404), "teams", "prod-12.westeurope.logic.azure.com")).toBe("permanent");
+  });
+
   it("backs off 1m, 5m, 30m then 2h, or as long as a 429 asks", () => {
     const err = new Error("timeout");
     expect([1, 2, 3, 4].map((attempts) => retryDelayMs(attempts, err))).toEqual([60_000, 300_000, 1_800_000, 7_200_000]);
@@ -192,6 +221,9 @@ describe("retry policy", () => {
   it("reads Retry-After as seconds or a date, within bounds", () => {
     const now = new Date("2026-11-10T00:00:00Z");
     expect(parseRetryAfter("120", now)).toBe(120_000);
+    // Discord may send a fraction of a second.
+    expect(parseRetryAfter("1.5", now)).toBe(1500);
+    expect(parseRetryAfter("0.0004", now)).toBe(1);
     expect(parseRetryAfter("Tue, 10 Nov 2026 00:05:00 GMT", now)).toBe(300_000);
     expect(parseRetryAfter("Mon, 09 Nov 2026 00:00:00 GMT", now)).toBe(0);
     expect(parseRetryAfter("999999", now)).toBe(6 * 60 * 60_000);
@@ -550,8 +582,9 @@ describe("auto-pause", () => {
     ["webhook", 410, "Auto-paused: HTTP 410 Gone"],
     ["slack", 410, "Auto-paused: HTTP 410 Gone"],
     ["google_chat", 404, "Auto-paused: HTTP 404 Not Found"],
+    ["discord", 404, "Auto-paused: HTTP 404 Not Found"],
   ] as const)("pauses a %s target at once when it answers %i", async (kind, status, reason) => {
-    const hook = await target(kind, kind === "google_chat" ? CHAT_URL : undefined);
+    const hook = await target(kind, kind === "google_chat" ? CHAT_URL : kind === "discord" ? DISCORD_URL : undefined);
 
     await deliverJob(failWith(new DeliveryError(status)));
 
@@ -560,6 +593,17 @@ describe("auto-pause", () => {
 
   it("counts a 404 from a google_chat target that is not on Google's host as an ordinary failure", async () => {
     const hook = await target("google_chat", "https://relay.example.com/chat");
+
+    await deliverJob(failWith(new DeliveryError(404)));
+
+    expect(await reload(hook)).toMatchObject({ active: true, consecutiveFailures: 1, pausedReason: null });
+  });
+
+  it.each([
+    ["discord", "https://relay.example.com/discord"],
+    ["teams", "https://prod-12.westeurope.logic.azure.com/workflows/1/triggers/manual/paths/invoke?sig=s"],
+  ] as const)("counts a 404 from a %s target that says nothing about the webhook as an ordinary failure", async (kind, url) => {
+    const hook = await target(kind, url);
 
     await deliverJob(failWith(new DeliveryError(404)));
 

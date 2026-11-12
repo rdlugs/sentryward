@@ -10,6 +10,27 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Discord and Microsoft Teams notification targets (#259). A new `discord`
+  target kind takes a channel's webhook URL and posts one embed: the headline
+  with its emoji, the repository and number, the title, the findings by
+  severity or a failed review's error, and **View review** and **Open PR/MR**
+  links (the second only for an http(s) change URL short enough to send).
+  Forge text is escaped so it cannot add formatting, a link or a mention, and
+  the message allows no mentions. A new `teams` kind takes a Workflows
+  webhook URL and posts one Adaptive Card with the same content and **View
+  review** and **Open PR/MR** actions; forge text goes only into text runs,
+  which render no markdown, with its URLs broken up. A digest is one embed or
+  card with the counts, the most blocked repositories, up to 10 still-blocked
+  changes and 5 failed reviews; Discord's shows fewer rows and counts the
+  rest when they would pass its embed limit, and both stay inside the
+  service's message size limit. A `404` from `discord.com` or
+  `discordapp.com` (a deleted webhook) pauses a Discord target at once; a
+  Teams workflow has no such answer, so its target pauses by the failure
+  count. `Retry-After` may be a fraction of a second, as Discord sends. Both
+  URLs are stored encrypted, only the host is shown, and the token or
+  signature is cut out of stored errors. Adds the `discord` and `teams`
+  values to the `notification_kind` enum (migration
+  `20261113090300_notification_kind_discord_teams`).
 - Google Chat notification targets (#283). A new `google_chat` target kind
   takes a space's incoming-webhook URL and posts a card: the headline with
   its emoji, the repository and number, the title, the findings by severity

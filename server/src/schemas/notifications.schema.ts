@@ -51,6 +51,8 @@ export const createNotificationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("webhook"), name, events, url, ...filters }),
   z.object({ kind: z.literal("slack"), name, events, url, ...filters }),
   z.object({ kind: z.literal("google_chat"), name, events, url, ...filters }),
+  z.object({ kind: z.literal("discord"), name, events, url, ...filters }),
+  z.object({ kind: z.literal("teams"), name, events, url, ...filters }),
   z.object({ kind: z.literal("email"), name, events, recipientIds, ...filters }),
 ]);
 
