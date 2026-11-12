@@ -1215,6 +1215,38 @@ describe("editing a target's URL and rotating its secret", () => {
     expect(list.body.targets[0].secretRotatedUntil).toBe(stored.previousSecretExpiresAt!.toISOString());
   });
 
+  it("starts the failure count again when the URL changes", async () => {
+    const hook = await target("webhook", ["failed"]);
+    await prisma.notificationTarget.update({ where: { id: hook.id }, data: { consecutiveFailures: 4 } });
+
+    const res = await request(app)
+      .patch(`/api/notifications/${hook.id}`)
+      .set("Cookie", cookie)
+      .send({ url: "https://new.example.com/hook" });
+
+    expect(res.status).toBe(200);
+    expect((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } })).consecutiveFailures).toBe(0);
+  });
+
+  it("refuses a rotation when another one lands between reading and writing the secret", async () => {
+    const hook = await target("webhook", ["failed"]);
+    const updateMany = prisma.notificationTarget.updateMany.bind(prisma.notificationTarget);
+    // The other rotation, committed after this request read the target.
+    const raced = (async (args: Parameters<typeof updateMany>[0]) => {
+      await prisma.notificationTarget.update({ where: { id: hook.id }, data: { encryptedSecret: encrypt("other") } });
+      return updateMany(args);
+    }) as unknown as typeof updateMany;
+    vi.spyOn(prisma.notificationTarget, "updateMany").mockImplementationOnce(raced);
+
+    const res = await request(app).post(`/api/notifications/${hook.id}/rotate-secret`).set("Cookie", cookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.secret).toBeUndefined();
+    expect(decrypt((await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } })).encryptedSecret!)).toBe(
+      "other",
+    );
+  });
+
   it("keeps only the secret just replaced when rotated twice", async () => {
     const hook = await target("webhook", ["failed"]);
     const first = await request(app).post(`/api/notifications/${hook.id}/rotate-secret`).set("Cookie", cookie);

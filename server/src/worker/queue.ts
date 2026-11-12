@@ -14,6 +14,10 @@ export interface EnqueueInput {
   trigger: ReviewTrigger;
   event?: "open" | "push";
   actor?: string;
+  // The change's author on the forge, when the webhook says. Stored at once so
+  // a review that fails before the change is fetched can still reach them
+  // (personal notifications); the worker refreshes it from the fetch.
+  authorId?: string;
 }
 
 // Every write that queues, supersedes or cancels a change's queued jobs takes

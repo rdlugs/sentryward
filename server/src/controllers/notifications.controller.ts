@@ -235,9 +235,12 @@ export async function updateNotification(req: Request, res: Response) {
   // again would get round the check above.
   const clearReason = input.active !== undefined ? !scopePaused : target.pausedReason === SCOPE_REASON && !scopePaused;
   const { delivery, url, ...fields } = input;
+  // A new URL is a new endpoint, so the old one's failures no longer count
+  // towards the auto-pause limit. A target paused for them stays off with its
+  // reason until an admin switches it on, which is the deliberate step.
   const data = {
     ...fields,
-    ...(url !== undefined ? { encryptedUrl: encrypt(url) } : {}),
+    ...(url !== undefined ? { encryptedUrl: encrypt(url), consecutiveFailures: 0 } : {}),
     ...(delivery ? deliveryData(delivery, target) : {}),
     ...(input.active !== undefined ? { consecutiveFailures: 0 } : {}),
     ...(clearReason ? { pausedReason: null } : {}),
@@ -265,14 +268,21 @@ export async function rotateNotificationSecret(req: Request, res: Response) {
     throw new HttpError(400, "Only webhook targets have a signing secret");
   }
   const secret = newWebhookSecret();
-  const updated = await prisma.notificationTarget.update({
-    where: { id: target.id },
+  // Only if the secret is still the one read above: two rotations at once
+  // would otherwise both keep it as the previous one, and the first caller
+  // would be shown a secret that is no longer stored anywhere.
+  const { count } = await prisma.notificationTarget.updateMany({
+    where: { id: target.id, encryptedSecret: target.encryptedSecret },
     data: {
       encryptedSecret: encrypt(secret),
       encryptedPreviousSecret: target.encryptedSecret,
       previousSecretExpiresAt: target.encryptedSecret ? new Date(Date.now() + SECRET_GRACE_MS) : null,
     },
   });
+  if (count === 0) {
+    throw new HttpError(409, "The secret was rotated by someone else at the same time; reload and try again");
+  }
+  const updated = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: target.id } });
   const states = await deliveryStates([updated.id]);
   res.json({
     target: publicTarget(updated, states.last(updated.id), states.pending(updated.id), states.held(updated.id)),
@@ -300,12 +310,17 @@ export async function deleteNotification(req: Request, res: Response) {
 // The forge hosts this workspace reviews on, and whether the member has
 // linked a sign-in identity on each: only changes opened from a linked
 // account can be matched to them.
-async function personalState(userId: string, workspaceId: string) {
-  const [membership, connections, identities] = await Promise.all([
-    prisma.membership.findUniqueOrThrow({
-      where: { userId_workspaceId: { userId, workspaceId } },
-      select: { personalNotifications: true },
-    }),
+// The target is passed when the caller has just written it, to save reading
+// the membership again.
+async function personalState(userId: string, workspaceId: string, saved?: NotificationTarget) {
+  const [target, connections, identities] = await Promise.all([
+    saved ??
+      prisma.membership
+        .findUniqueOrThrow({
+          where: { userId_workspaceId: { userId, workspaceId } },
+          select: { personalNotifications: true },
+        })
+        .then((membership) => membership.personalNotifications),
     prisma.forgeConnection.findMany({
       where: { workspaceId },
       distinct: ["provider", "host"],
@@ -319,7 +334,7 @@ async function personalState(userId: string, workspaceId: string) {
     host,
     linked: identities.some((identity) => identity.provider === provider && identity.host === host),
   }));
-  return publicPersonal(membership.personalNotifications, forges, mailer.configured());
+  return publicPersonal(target, forges, mailer.configured());
 }
 
 // Any member, for themselves: the personal target is created on first save.
@@ -327,8 +342,9 @@ export async function getPersonalNotifications(req: Request, res: Response) {
   res.json(await personalState(req.userId!, req.workspaceId!));
 }
 
-// Saving clears an auto-pause: the member has seen the reason and chose to
-// carry on, as an admin switching a workspace target does.
+// Switching it back on clears an auto-pause: the member has seen the reason
+// and chose to carry on, as an admin switching a workspace target does. Other
+// saves (events, or keeping it off) leave the reason showing.
 export async function updatePersonalNotifications(req: Request, res: Response) {
   const { enabled, events } = personalNotificationSchema.parse(req.body);
   const userId = req.userId!;
@@ -338,10 +354,11 @@ export async function updatePersonalNotifications(req: Request, res: Response) {
   }
   const membership = await prisma.membership.findUniqueOrThrow({
     where: { userId_workspaceId: { userId, workspaceId } },
-    select: { id: true },
+    select: { id: true, personalNotifications: { select: { active: true } } },
   });
-  const state = { events, active: enabled, consecutiveFailures: 0, pausedReason: null };
-  await prisma.$transaction(async (tx) => {
+  const resuming = enabled && !membership.personalNotifications?.active;
+  const state = { events, active: enabled, ...(resuming ? { consecutiveFailures: 0, pausedReason: null } : {}) };
+  const saved = await prisma.$transaction(async (tx) => {
     const target = await tx.notificationTarget.upsert({
       where: { membershipId: membership.id },
       create: {
@@ -355,6 +372,7 @@ export async function updatePersonalNotifications(req: Request, res: Response) {
       update: state,
     });
     if (!enabled) await dropPendingDeliveries(tx, target.id);
+    return target;
   });
-  res.json(await personalState(userId, workspaceId));
+  res.json(await personalState(userId, workspaceId, saved));
 }

@@ -984,20 +984,31 @@ async function personalTarget(
 ): Promise<{ target: NotificationTarget; userId: string } | null> {
   const provider = SIGN_IN_FOR_FORGE[connection.provider];
   if (!job.authorId || !provider) return null;
-  const identity = await tx.userIdentity.findUnique({
-    where: { provider_host_providerUserId: { provider, host: connection.host, providerUserId: job.authorId } },
-    select: { userId: true },
-  });
-  if (!identity) return null;
-  const target = await tx.notificationTarget.findFirst({
+  // One query, run for every finished job: it returns nothing cheaply in a
+  // workspace where nobody has a personal target.
+  const found = await tx.notificationTarget.findFirst({
     where: {
       workspaceId: connection.workspaceId,
       active: true,
       events: { hasSome: possibleEvents },
-      membership: { userId: identity.userId, workspaceId: connection.workspaceId },
+      membership: {
+        workspaceId: connection.workspaceId,
+        user: { identities: { some: { provider, host: connection.host, providerUserId: job.authorId } } },
+      },
     },
+    include: { membership: { select: { userId: true } } },
   });
-  return target ? { target, userId: identity.userId } : null;
+  if (!found?.membership) return null;
+  const { membership, ...target } = found;
+  return { target, userId: membership.userId };
+}
+
+// A digest target holds a review's row until its digest is built
+// (worker/digests.ts). One with no due time (a schedule left incomplete
+// outside the API) would never be picked up, so it gets each review instead
+// of holding rows nothing sends.
+function holdsForDigest(target: Pick<NotificationTarget, "deliveryMode" | "digestDueAt">): boolean {
+  return target.deliveryMode !== "each" && target.digestDueAt !== null;
 }
 
 // Queues the job's deliveries when it reaches its final status, whoever
@@ -1056,9 +1067,12 @@ export async function notifyJob(jobId: string): Promise<void> {
       if (personal) {
         const event = eventForTarget(events, personal.target, facts);
         // A member already mailed about this review by a workspace email
-        // target is not mailed a second time.
+        // target is not mailed a second time. A digest target does not count:
+        // it mails the review hours or days later, and the member asked to
+        // hear about their own change now.
         const mailed = targets.some(
-          ({ target }) => target.kind === "email" && target.recipientIds.includes(personal.userId),
+          ({ target }) =>
+            target.kind === "email" && target.recipientIds.includes(personal.userId) && !holdsForDigest(target),
         );
         if (event && !mailed) targets.push({ target: personal.target, event });
       }
@@ -1066,12 +1080,8 @@ export async function notifyJob(jobId: string): Promise<void> {
       const now = new Date();
       await tx.notificationDelivery.createMany({
         data: targets.map(({ target, event }) => {
-          // A digest target holds the row until its digest is built
-          // (worker/digests.ts); the filters above already chose it. One
-          // with no due time (a schedule left incomplete outside the API)
-          // would never be picked up, so it gets each review instead of
-          // holding rows nothing sends.
-          const digest = target.deliveryMode !== "each" && target.digestDueAt !== null;
+          // The filters above already chose it; a digest holds it.
+          const digest = holdsForDigest(target);
           return {
             targetId: target.id,
             jobId: job.id,
@@ -1222,31 +1232,49 @@ export async function recordTargetFailure(
   });
 }
 
-// Tells the workspace's owners and admins, one message each, that a target was
-// paused. Best effort: without mail, or when sending fails, the reason still
-// shows on the Notifications page.
-export async function emailAdminsAboutPause(targetId: string, reason: string): Promise<void> {
+// Tells whoever can switch a paused target back on: the workspace's owners
+// and admins, one message each, or the member for their personal target.
+// Best effort: without mail, or when sending fails, the reason still shows on
+// the Notifications page. A personal target only sends email, so its notice
+// often fails for the same reason the target paused; it gets through when the
+// failures were passing or specific to those messages.
+export async function emailAboutPause(targetId: string, reason: string): Promise<void> {
   if (!mailer.configured()) return;
   try {
     const target = await prisma.notificationTarget.findUnique({
       where: { id: targetId },
-      select: { name: true, membershipId: true, workspace: { select: { id: true, name: true } } },
+      select: {
+        name: true,
+        membership: { select: { user: { select: { email: true } } } },
+        workspace: { select: { id: true, name: true } },
+      },
     });
-    // A member's personal target is theirs to switch back on, not the admins'.
-    if (!target || target.membershipId) return;
-    const admins = await prisma.membership.findMany({
-      where: { workspaceId: target.workspace.id, role: { in: ["owner", "admin"] } },
-      select: { user: { select: { email: true } } },
-    });
-    const subject = oneLine(`Notification target "${target.name}" was paused in ${target.workspace.name}`);
-    const text =
-      `${reason}.\n\nSentryward stopped sending to this target. Fix the endpoint, then switch the target ` +
-      `back on under Notifications:\n${env.CLIENT_ORIGIN}/notifications?tab=failing\n`;
-    const results = await Promise.allSettled(admins.map(({ user }) => mailer.send({ to: user.email, subject, text })));
+    if (!target) return;
+    let recipients: string[];
+    let subject: string;
+    let text: string;
+    if (target.membership) {
+      recipients = [target.membership.user.email];
+      subject = oneLine(`Your review emails in ${target.workspace.name} were paused`);
+      text =
+        `${reason}.\n\nSentryward stopped emailing you about reviews of your changes. Switch them back on ` +
+        `under Notifications:\n${env.CLIENT_ORIGIN}/notifications\n`;
+    } else {
+      const admins = await prisma.membership.findMany({
+        where: { workspaceId: target.workspace.id, role: { in: ["owner", "admin"] } },
+        select: { user: { select: { email: true } } },
+      });
+      recipients = admins.map(({ user }) => user.email);
+      subject = oneLine(`Notification target "${target.name}" was paused in ${target.workspace.name}`);
+      text =
+        `${reason}.\n\nSentryward stopped sending to this target. Fix the endpoint, then switch the target ` +
+        `back on under Notifications:\n${env.CLIENT_ORIGIN}/notifications?tab=failing\n`;
+    }
+    const results = await Promise.allSettled(recipients.map((to) => mailer.send({ to, subject, text })));
     const failed = results.filter((result) => result.status === "rejected").length;
-    if (failed) console.error(`[notify] ${failed} of ${admins.length} pause emails for target ${targetId} failed`);
+    if (failed) console.error(`[notify] ${failed} of ${recipients.length} pause emails for target ${targetId} failed`);
   } catch (err) {
-    console.error(`[notify] could not email admins about pausing target ${targetId}`, err);
+    console.error(`[notify] could not email about pausing target ${targetId}`, err);
   }
 }
 

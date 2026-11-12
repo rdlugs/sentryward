@@ -18,6 +18,7 @@ interface GitLabPayload {
     id?: number;
     action?: string;
     iid?: number;
+    author_id?: number;
     oldrev?: string;
     noteable_type?: string;
     note?: string;
@@ -96,6 +97,7 @@ export const gitlabProvider: ProviderDefinition = {
           trigger: "webhook",
           event: opened ? "open" : "push",
           actor: payload.user?.username,
+          authorId: attrs.author_id === undefined ? undefined : String(attrs.author_id),
         });
         return { body: result.queued ? { outcome: "queued", reviewId: result.job.id } : { outcome: result.reason } };
       }

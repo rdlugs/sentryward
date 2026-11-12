@@ -141,6 +141,14 @@ describe("POST /api/webhooks/github", () => {
     ]);
   });
 
+  it("stores the pull request's author with the queued job", async () => {
+    await githubRepo();
+    const event = prEvent("opened");
+    await sendGithub("pull_request", { ...event, pull_request: { ...event.pull_request, user: { id: 4242 } } });
+
+    expect(await prisma.reviewJob.findMany({ select: { authorId: true } })).toEqual([{ authorId: "4242" }]);
+  });
+
   it("does not re-review a head that was already reviewed", async () => {
     const repo = await githubRepo();
     await prisma.reviewJob.create({
@@ -452,6 +460,13 @@ describe("POST /api/webhooks/gitlab/:repoId", () => {
         .outcome,
     ).toBe("queued");
     expect(await prisma.reviewJob.count({ where: { status: { not: "superseded" } } })).toBe(1);
+  });
+
+  it("stores the merge request's author with the queued job", async () => {
+    const repo = await gitlabRepo();
+    await sendGitlab(repo.id, "Merge Request Hook", mrEvent("open", { author_id: 77 }));
+
+    expect(await prisma.reviewJob.findMany({ select: { authorId: true } })).toEqual([{ authorId: "77" }]);
   });
 
   it("cancels queued reviews when the MR is merged or closed", async () => {

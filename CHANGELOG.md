@@ -15,19 +15,24 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   card on the Notifications page (`GET`/`PUT /api/notifications/personal`),
   choosing blocked, failed, resolved and completed. A change is matched to a
   member through the forge user id of its author, recorded on the review job
-  (`author_id`) when the worker fetches the change, against a GitHub or
+  (`author_id`) when a webhook queues the review and again when the worker
+  fetches the change, against a GitHub or
   GitLab sign-in identity the member linked on the same host; the card points
   to Sign-in methods for any host without one. Personal targets go through
   the same outbox, are hidden from the workspace's targets and from admins,
   are deleted when the member leaves the workspace, and are skipped for a
-  review a workspace email target already sends that member. Reviews where
-  the member is a requested reviewer are not covered yet.
+  review a workspace email target already sends that member right away (a
+  digest does not count). An auto-paused personal target emails its member,
+  not the admins, and only switching it back on clears the pause notice.
+  Reviews where the member is a requested reviewer are not covered yet.
 - Notification URLs can be edited and webhook secrets rotated in place
   (#257). `PATCH /api/notifications/:id` accepts `url` for webhook and Slack
   targets, checked like a new target's, keeping events, scope, secret and
-  history; the edit panel has a URL field showing the current host. `POST
+  history and starting the failure count again; the edit panel has a URL
+  field showing the current host. `POST
   /api/notifications/:id/rotate-secret` (admins, webhooks) returns a new
-  secret once, from **Rotate secret** in the target's menu. For 24 hours the
+  secret once, from **Rotate secret** in the target's menu (a rotation that
+  races another is refused with `409`). For 24 hours the
   previous secret keeps signing too: `X-Sentryward-Signature-V2` and
   `X-Sentryward-Signature` carry `sha256=<new>,sha256=<old>`, so receivers
   should accept any listed value (the README's verification example does).

@@ -4,7 +4,7 @@ import { app } from "../src/app.ts";
 import type { ReviewStatus, ReviewVerdict } from "../src/generated/prisma/client.ts";
 import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
-import { notifyJob } from "../src/services/notifications.ts";
+import { notifyJob, PermanentDeliveryError } from "../src/services/notifications.ts";
 import { claimDueDeliveries, runDelivery } from "../src/worker/deliveryQueue.ts";
 import { addMember, createUser, inWorkspace } from "./helpers/users.ts";
 
@@ -147,6 +147,26 @@ describe("/api/notifications/personal", () => {
     expect(await prisma.notificationTarget.count()).toBe(1);
   });
 
+  it("keeps an auto-pause notice until the member switches it back on", async () => {
+    vi.spyOn(mailer, "configured").mockReturnValue(true);
+    await savePersonal({ enabled: true, events: ["blocked", "failed"] });
+    const reason = "Auto-paused after 3 failed deliveries in a row";
+    await prisma.notificationTarget.updateMany({
+      where: { membershipId: { not: null } },
+      data: { active: false, consecutiveFailures: 3, pausedReason: reason },
+    });
+
+    const edited = await savePersonal({ enabled: false, events: ["blocked"] });
+    expect(edited.body).toMatchObject({ enabled: false, events: ["blocked"], pausedReason: reason });
+    const kept = await prisma.notificationTarget.findFirstOrThrow({ where: { membershipId: { not: null } } });
+    expect(kept).toMatchObject({ consecutiveFailures: 3, pausedReason: reason });
+
+    const resumed = await savePersonal({ enabled: true, events: ["blocked"] });
+    expect(resumed.body).toMatchObject({ enabled: true, pausedReason: null });
+    const cleared = await prisma.notificationTarget.findFirstOrThrow({ where: { membershipId: { not: null } } });
+    expect(cleared).toMatchObject({ active: true, consecutiveFailures: 0, pausedReason: null });
+  });
+
   it("is deleted when the member leaves the workspace", async () => {
     vi.spyOn(mailer, "configured").mockReturnValue(true);
     await savePersonal({ enabled: true, events: ["blocked"] });
@@ -232,5 +252,57 @@ describe("personal notification delivery", () => {
     await notifyAndSend((await finishedJob("completed", "blocked")).id);
 
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("still emails the member at once when a workspace email target only sends them a digest", async () => {
+    const send = vi.spyOn(mailer, "send").mockResolvedValue();
+    await linkIdentity(member.id);
+    await savePersonal({ enabled: true, events: ["blocked"] });
+    await prisma.notificationTarget.create({
+      data: {
+        workspaceId,
+        kind: "email",
+        name: "Weekly",
+        events: ["blocked"],
+        recipientIds: [member.id],
+        deliveryMode: "weekly",
+        digestHour: 9,
+        digestWeekday: 1,
+        digestTimeZone: "UTC",
+        digestDueAt: new Date(Date.now() + 86_400_000),
+      },
+    });
+
+    await notifyAndSend((await finishedJob("completed", "blocked")).id);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const deliveries = await prisma.notificationDelivery.findMany({ include: { target: true } });
+    const byName = Object.fromEntries(deliveries.map((delivery) => [delivery.target.name, delivery.status]));
+    expect(byName).toEqual({ Weekly: "held", "Reviews of my changes": "sent" });
+  });
+
+  it("tells the member, not the admins, when their personal email is auto-paused", async () => {
+    const send = vi.spyOn(mailer, "send").mockResolvedValue();
+    await prisma.workspace.update({ where: { id: workspaceId }, data: { notifyAutoPauseAfter: 1 } });
+    await linkIdentity(member.id);
+    await savePersonal({ enabled: true, events: ["blocked"] });
+    await notifyJob((await finishedJob("completed", "blocked")).id);
+
+    const deps = {
+      deliver: vi.fn(async () => {
+        throw new PermanentDeliveryError("mailbox rejected");
+      }),
+      now: () => new Date(),
+    };
+    for (const id of await claimDueDeliveries(100)) await runDelivery(id, deps);
+
+    const target = await prisma.notificationTarget.findFirstOrThrow({ where: { membershipId: { not: null } } });
+    expect(target.active).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      to: "member@example.com",
+      subject: expect.stringContaining("Your review emails in"),
+      text: expect.stringContaining(`${target.pausedReason}.\n\n`),
+    });
   });
 });

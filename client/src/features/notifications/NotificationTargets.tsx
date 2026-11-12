@@ -813,8 +813,9 @@ function RotateSecretSheet({
     }
   }
 
+  // Not while the request runs: the new secret is shown only in its response.
   return (
-    <Sheet open onOpenChange={onOpenChange}>
+    <Sheet open onOpenChange={(open) => !rotate.isPending && onOpenChange(open)}>
       <SheetContent className="data-[side=right]:sm:max-w-lg">
         {rotated ? (
           <CreatedSecretView secret={rotated.secret} title="Secret rotated" previousUntil={rotated.previousUntil} />
@@ -829,7 +830,7 @@ function RotateSecretSheet({
             </SheetHeader>
             <SheetFooter className={FOOTER_CLASS}>
               <SheetClose asChild>
-                <Button type="button" variant="outline">
+                <Button type="button" variant="outline" disabled={rotate.isPending}>
                   Cancel
                 </Button>
               </SheetClose>

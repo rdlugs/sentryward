@@ -1019,6 +1019,31 @@ describe("Notifications", () => {
     expect(within(sheet).getByText(/also carries a signature made with the previous secret/)).toBeInTheDocument()
     expect(calls(fetchSpy, "POST", "/api/notifications/n1/rotate-secret")).toHaveLength(1)
   })
+
+  it("keeps the rotate sheet open while the rotation runs, so the new secret is not lost", async () => {
+    let finish: (response: Response) => void = () => {}
+    mockApi({
+      "GET /api/notifications": { targets: [webhook], mailConfigured: false, settings },
+      "POST /api/notifications/n1/rotate-secret": () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve
+        }),
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for CI alerts" }))
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rotate secret" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.click(within(sheet).getByRole("button", { name: "Rotate secret" }))
+
+    expect(within(sheet).getByRole("button", { name: "Cancel" })).toBeDisabled()
+    await userEvent.keyboard("{Escape}")
+    expect(screen.getByRole("dialog")).toBeInTheDocument()
+
+    finish(jsonResponse(200, { target: webhook, secret: "fresh-secret" }))
+    expect(await within(sheet).findByLabelText("Signing secret")).toHaveValue("fresh-secret")
+  })
 })
 
 describe("Personal notifications", () => {

@@ -42,7 +42,7 @@ export interface GitHubPayload {
   // installation_repositories events only.
   repositories_added?: { id: number }[];
   repositories_removed?: { id: number }[];
-  pull_request?: { number: number; head: { sha: string } };
+  pull_request?: { number: number; head: { sha: string }; user?: { id: number } };
   issue?: { number: number; pull_request?: unknown };
   comment?: {
     id?: number;
@@ -154,6 +154,7 @@ export async function handleGithubEvent(
       trigger: "webhook",
       event: payload.action === "synchronize" ? "push" : "open",
       actor: payload.sender?.login,
+      authorId: pull.user?.id === undefined ? undefined : String(pull.user.id),
     });
     return { body: result.queued ? { outcome: "queued", reviewId: result.job.id } : { outcome: result.reason } };
   }
