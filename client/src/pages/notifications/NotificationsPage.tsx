@@ -7,7 +7,7 @@ export function NotificationsPage() {
     <PageShell>
       <PageHeader
         title="Notifications"
-        description="Webhooks, Slack channels and email that hear about blocked, failed or completed reviews."
+        description="Email about your own changes, and the webhooks, Slack channels and email your workspace sends review results to."
       />
       <NotificationTargets />
     </PageShell>

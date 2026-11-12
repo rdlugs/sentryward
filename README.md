@@ -894,8 +894,10 @@ never count.
 ## Notifications
 
 Under **Notifications**, workspace admins add targets that hear about finished
-reviews. Members can see them; only admins add, edit, test or remove them. Each
-target picks its events:
+reviews. Members can see them; only admins add, edit, test or remove them.
+Every member can also switch on email about their own pull and merge requests
+(see [Personal notifications](#personal-notifications)). Each target picks its
+events:
 
 | Event | Sent when |
 | --- | --- |
@@ -1004,11 +1006,20 @@ There are three kinds:
   | `X-Sentryward-Event` | The `event` of the body |
   | `X-Sentryward-Delivery` | The `deliveryId` of the body, the same on every retry of a delivery |
   | `X-Sentryward-Timestamp` | When this attempt was sent, in unix seconds |
-  | `X-Sentryward-Signature-V2` | `sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<raw body>` keyed with the signing secret |
-  | `X-Sentryward-Signature` | Deprecated: `sha256=<hex>` of the raw body alone, removed in the next minor release |
+  | `X-Sentryward-Signature-V2` | `sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<raw body>` keyed with the signing secret; during a secret rotation, two comma-separated values |
+  | `X-Sentryward-Signature` | Deprecated: `sha256=<hex>` of the raw body alone (two values during a rotation, like V2), removed in the next minor release |
 
-  The signing secret is shown once when the target is added. Remove the target
-  and add it again to change the URL or rotate the secret.
+  The signing secret is shown once when the target is added. Admins can change
+  a webhook's or Slack target's URL from **Edit** without losing its events,
+  scope, secret or delivery history; the new URL is checked like a new
+  target's, and deliveries already queued go to it. **Rotate secret** in a
+  webhook's menu issues a new secret, shown once. For the next 24 hours the
+  previous secret keeps working: each signature header carries
+  `sha256=<new>,sha256=<old>` (new first), so a receiver still holding the old
+  secret accepts deliveries while it is updated. After that only the new
+  secret signs. Rotating again within the 24 hours replaces the older of the
+  two. A receiver that compares the whole header as one string (rather than
+  checking each value, as below) rejects deliveries during that window.
 
   ```json
   {
@@ -1031,9 +1042,10 @@ There are three kinds:
   body, so receivers should ignore keys they do not know.
 
   To verify a delivery, recompute the signature over the timestamp header, a
-  dot and the raw body exactly as received, compare in constant time, and
-  reject timestamps more than about 5 minutes from your clock, so a captured
-  delivery cannot be replayed later:
+  dot and the raw body exactly as received, compare it in constant time with
+  each comma-separated value of the header (accept if any matches), and reject
+  timestamps more than about 5 minutes from your clock, so a captured delivery
+  cannot be replayed later:
 
   ```js
   import { createHmac, timingSafeEqual } from "node:crypto";
@@ -1043,8 +1055,12 @@ There are three kinds:
     const received = headers["x-sentryward-signature-v2"] ?? "";
     if (!/^\d+$/.test(timestamp ?? "")) return false;
     if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false;
-    const expected = `sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`;
-    return received.length === expected.length && timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+    const expected = Buffer.from(`sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`);
+    // Two values while the secret is being rotated; either may be yours.
+    return received.split(",").some((value) => {
+      const candidate = Buffer.from(value.trim());
+      return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+    });
   }
   ```
 
@@ -1130,6 +1146,33 @@ can be the credential. The worker's retention pass keeps the last 30 days (or
 the workspace's privacy retention, when that is shorter), and at most the 100
 newest deliveries per target, never removing one still pending; removing a
 target removes its log.
+
+### Personal notifications
+
+Any member, admin or not, can switch on email about reviews of the pull and
+merge requests they opened, in the **Your pull requests** card at the top of
+the Notifications page, and pick which events (blocked, failed, resolved,
+completed; failed, blocked and resolved by default). It needs mail configured.
+The setting is per workspace and visible only to that member: personal
+targets never appear among the workspace's targets, admins cannot edit or
+test them, and leaving the workspace deletes them.
+
+A change is recognised as yours through a linked sign-in account: the forge's
+user id of whoever opened it (recorded when the worker fetches the change)
+must match a GitHub or GitLab identity you linked under **Settings, Sign-in
+methods** on the same host as the connection the repository came through.
+Ids survive renames, and the provider verified the account when you linked
+it, so nobody can claim someone else's changes. The card lists any forge host
+in the workspace you have no linked identity for. Reviews of changes fetched
+before this was added, or that failed before the change was fetched, carry no
+author and are not sent.
+
+Personal email goes through the same outbox as targets (retries, delivery
+log, auto-pause), one email per review. When a workspace email target that
+lists you already sends you a review, the personal email for it is skipped,
+so nobody gets the same review twice. An auto-paused personal target shows
+its reason in the card, and switching it back on clears it. Only changes you
+opened count; reviews where you are a requested reviewer do not.
 
 ## Review configuration
 
@@ -1890,11 +1933,14 @@ rate limited (20 requests per 15 minutes per IP).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures`, `scope` or `null`), the scope (`repositoryIds`, empty for all; `minSeverity`, `minor`, `major`, `critical` or `null`; `onlyVerdictChanges`), `delivery` (`{ mode, hour, weekday, timeZone, nextDigestAt, held }`: `mode` `each`, `daily` or `weekly`, the schedule (kept after switching back to `each`), when the next digest is built (`null` for `each`) and how many reviews it holds), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
+| GET    | `/api/notifications` | `{ targets, mailConfigured, settings }`: the workspace's notification targets with their events, whether each is `active`, `pausedReason` (set when the worker auto-paused it), `pauseCause` (`gone`, `failures`, `scope` or `null`), the scope (`repositoryIds`, empty for all; `minSeverity`, `minor`, `major`, `critical` or `null`; `onlyVerdictChanges`), `secretRotatedUntil` (a webhook's previous secret still signs until then, else `null`), `delivery` (`{ mode, hour, weekday, timeZone, nextDigestAt, held }`: `mode` `each`, `daily` or `weekly`, the schedule (kept after switching back to `each`), when the next digest is built (`null` for `each`) and how many reviews it holds), `consecutiveFailures`, a URL's host only, email recipients' user ids, `lastDelivery` (`{ status, event, httpStatus, error, attempts, nextAttemptAt, createdAt }` or `null`) and `pending` (`{ count, retry }`: how many deliveries are queued, and the retry due soonest as `{ attempts, httpStatus, error, nextAttemptAt }` or `null`); `settings` is `{ autoPauseAfter }` |
 | GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, including `test` and `digest`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
 | PATCH  | `/api/notifications/settings` | Workspace admins: `{ autoPauseAfter }`, 0 to 50 failed deliveries in a row before a target is paused (0 never); returns `{ settings }` |
 | POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity`, `onlyVerdictChanges` and `delivery` (`{ mode: "each" }`, the default, `{ mode: "daily", hour, timeZone }` or `{ mode: "weekly", hour, weekday, timeZone }`, `hour` 0-23, `weekday` 0-6 from Sunday, `timeZone` an IANA name); events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
-| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent |
+| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, url?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent. `url` (webhook and Slack only, 400 on `url` for email) is checked like a new target's and keeps the secret |
+| POST   | `/api/notifications/:id/rotate-secret` | Workspace admins, webhooks only: returns `{ target, secret }`, the new signing secret shown only here; the previous one also signs deliveries for 24 hours |
+| GET    | `/api/notifications/personal` | Any member: `{ enabled, events, pausedReason, forges, mailConfigured }`, the member's own email about reviews of changes they opened; `forges` is `[{ provider, host, linked }]` for each forge host of the workspace, `linked` when the member has a sign-in identity there |
+| PUT    | `/api/notifications/personal` | Any member: `{ enabled, events }` (at least one event); `enabled: true` needs mail configured (400). Saving clears an auto-pause; switching off drops what is queued. Returns the same shape as GET |
 | POST   | `/api/notifications/:id/test` | Workspace admins: sends a sample delivery; returns `{ result }`, `{ ok: true }` or `{ ok: false, error }` |
 | DELETE | `/api/notifications/:id` | Workspace admins: removes a target |
 

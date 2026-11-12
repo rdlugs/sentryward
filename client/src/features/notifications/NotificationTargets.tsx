@@ -2,7 +2,7 @@ import { useMemo, useState } from "react"
 import { useSearchParams } from "react-router"
 import { Controller, useForm, useWatch, type Control, type FieldValues, type Path } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { AlertTriangle, BellRing, Copy, History, Loader2, MoreHorizontal, Pencil, Plus, Send, Trash2 } from "lucide-react"
+import { AlertTriangle, BellRing, Copy, History, KeyRound, Loader2, Mail, MoreHorizontal, Pencil, Plus, Send, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
 import { SortableHead } from "@/components/SortableHead"
@@ -78,6 +78,7 @@ import {
   useCreateNotificationTarget,
   useDeleteNotificationTarget,
   useNotificationTargets,
+  useRotateNotificationSecret,
   useTestNotificationTarget,
   useUpdateNotificationTarget,
   type NotificationEvent,
@@ -90,6 +91,7 @@ import {
 import { DeliveriesSheet, LastDeliveryCell, TargetActiveSwitch, TargetName } from "./components"
 import { causeHint, failingTargets, hourLabel, WEEKDAYS } from "./delivery"
 import { FailingTargets } from "./FailingTargets"
+import { PersonalNotifications } from "./PersonalNotifications"
 
 const eventsSchema = z
   .array(z.enum(["blocked", "failed", "resolved", "completed"]))
@@ -200,6 +202,8 @@ const SEVERITY_OPTIONS: { value: "any" | MinSeverity; label: string }[] = [
   })),
 ]
 
+const HTTP_URL = /^https?:\/\/\S+$/
+
 const createSchema = z
   .object({
     kind: z.enum(["webhook", "slack", "email"]),
@@ -216,7 +220,7 @@ const createSchema = z
       if (data.recipientIds.length === 0) {
         ctx.addIssue({ code: "custom", path: ["recipientIds"], message: "Choose at least one member" })
       }
-    } else if (!/^https?:\/\/\S+$/.test(data.url)) {
+    } else if (!HTTP_URL.test(data.url)) {
       ctx.addIssue({ code: "custom", path: ["url"], message: "Enter an http or https URL" })
     }
   })
@@ -225,6 +229,8 @@ type CreateInput = z.infer<typeof createSchema>
 const editSchema = z
   .object({
     name: z.string().trim().min(1, "Name is required").max(100),
+    // Empty keeps the current URL, which the server never sends back.
+    url: z.string().trim().refine((url) => url === "" || HTTP_URL.test(url), "Enter an http or https URL"),
     events: eventsSchema,
     recipientIds: z.array(z.string()),
     ...scopeFields,
@@ -502,17 +508,33 @@ const FORM_CLASS = "flex min-h-0 flex-1 flex-col"
 const BODY_CLASS = "flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4"
 const FOOTER_CLASS = "flex-row justify-end border-t"
 
-// The secret appears only here: the server never returns it again.
-function CreatedSecretView({ secret }: { secret: string }) {
+// The secret appears only here: the server never returns it again. After a
+// rotation, previousUntil says how long the old secret keeps signing too.
+function CreatedSecretView({
+  secret,
+  title = "Webhook added",
+  previousUntil = null,
+}: {
+  secret: string
+  title?: string
+  previousUntil?: string | null
+}) {
   return (
     <>
       <SheetHeader>
-        <SheetTitle>Webhook added</SheetTitle>
+        <SheetTitle>{title}</SheetTitle>
         <SheetDescription>
           Each delivery carries an <code className="font-mono text-xs">X-Sentryward-Signature-V2</code> header: the
           HMAC-SHA256 of <code className="font-mono text-xs">{"<timestamp>.<body>"}</code> with this secret, where the
           timestamp is the <code className="font-mono text-xs">X-Sentryward-Timestamp</code> header. Copy it now; it's
           shown only once.
+          {previousUntil && (
+            <>
+              {" "}
+              Until {new Date(previousUntil).toLocaleString()}, the header also carries a signature made with the
+              previous secret, separated by a comma, so your receiver keeps working while you update it.
+            </>
+          )}
         </SheetDescription>
       </SheetHeader>
       <div className="flex gap-2 px-4">
@@ -674,6 +696,7 @@ function EditTargetSheet({
     resolver: zodResolver(editSchema),
     defaultValues: {
       name: target.name,
+      url: "",
       events: target.events,
       recipientIds: target.recipientIds,
       ...scopeDefaults(target),
@@ -682,7 +705,7 @@ function EditTargetSheet({
   })
 
   async function onSubmit(input: EditInput) {
-    const { name, events, recipientIds } = input
+    const { name, url, events, recipientIds } = input
     const delivery = toDelivery(input)
     if (target.kind === "email" && recipientIds.length === 0) {
       form.setError("recipientIds", { message: "Choose at least one member" })
@@ -694,6 +717,7 @@ function EditTargetSheet({
         name,
         events,
         ...(target.kind === "email" ? { recipientIds } : {}),
+        ...(target.kind !== "email" && url ? { url } : {}),
         ...toFilters(input),
         ...(sameDelivery(delivery, target) ? {} : { delivery }),
       })
@@ -713,7 +737,7 @@ function EditTargetSheet({
             <SheetDescription>
               {target.kind === "email"
                 ? "Change who is emailed and about which reviews."
-                : "To change the URL, remove this target and add it again."}
+                : "Change where reviews are sent and which ones. Settings and history are kept."}
             </SheetDescription>
           </SheetHeader>
           <div className={BODY_CLASS}>
@@ -730,6 +754,21 @@ function EditTargetSheet({
               </Alert>
             )}
             <TextField control={form.control} name="name" label="Name" autoComplete="off" />
+            {target.kind !== "email" && (
+              <div className="flex flex-col gap-1.5">
+                <TextField
+                  control={form.control}
+                  name="url"
+                  label={target.kind === "slack" ? "New incoming webhook URL" : "New URL"}
+                  type="url"
+                  autoComplete="off"
+                  placeholder={target.host ? `https://${target.host}/...` : URL_PLACEHOLDERS[target.kind]}
+                />
+                <p className="text-muted-foreground text-sm">
+                  {target.host ? `Sending to ${target.host}. ` : ""}Leave empty to keep the current URL.
+                </p>
+              </div>
+            )}
             {target.kind === "email" && (
               <CheckboxList control={form.control} name="recipientIds" legend="Recipients" options={memberOptions(members)} />
             )}
@@ -749,6 +788,60 @@ function EditTargetSheet({
             </Button>
           </SheetFooter>
         </form>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+// Confirms first: the new secret takes over at once, with the old one still
+// signing for a grace period, so the receiver has time to switch.
+function RotateSecretSheet({
+  target,
+  onOpenChange,
+}: {
+  target: NotificationTarget
+  onOpenChange: (open: boolean) => void
+}) {
+  const rotate = useRotateNotificationSecret()
+  const [rotated, setRotated] = useState<{ secret: string; previousUntil: string | null } | null>(null)
+
+  async function confirm() {
+    try {
+      const result = await rotate.mutateAsync(target.id)
+      setRotated({ secret: result.secret, previousUntil: result.target.secretRotatedUntil })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not rotate the secret")
+    }
+  }
+
+  // Not while the request runs: the new secret is shown only in its response.
+  return (
+    <Sheet open onOpenChange={(open) => !rotate.isPending && onOpenChange(open)}>
+      <SheetContent className="data-[side=right]:sm:max-w-lg">
+        {rotated ? (
+          <CreatedSecretView secret={rotated.secret} title="Secret rotated" previousUntil={rotated.previousUntil} />
+        ) : (
+          <>
+            <SheetHeader>
+              <SheetTitle>Rotate the secret for {target.name}?</SheetTitle>
+              <SheetDescription>
+                Deliveries are signed with a new secret from now on. For the next 24 hours they are also signed with
+                the current one, so your receiver keeps accepting them while you update it.
+              </SheetDescription>
+            </SheetHeader>
+            <SheetFooter className={FOOTER_CLASS}>
+              <SheetClose asChild>
+                <Button type="button" variant="outline" disabled={rotate.isPending}>
+                  Cancel
+                </Button>
+              </SheetClose>
+              <Button type="button" onClick={confirm} disabled={rotate.isPending}>
+                {rotate.isPending && <Loader2 className="animate-spin" />}
+                Rotate secret
+              </Button>
+            </SheetFooter>
+          </>
+        )}
       </SheetContent>
     </Sheet>
   )
@@ -825,12 +918,14 @@ function TargetActions({
   canManage,
   onViewDeliveries,
   onEdit,
+  onRotateSecret,
   onRemove,
 }: {
   target: NotificationTarget
   canManage: boolean
   onViewDeliveries: () => void
   onEdit: () => void
+  onRotateSecret: () => void
   onRemove: () => void
 }) {
   const testTarget = useTestNotificationTarget()
@@ -868,6 +963,12 @@ function TargetActions({
               <Pencil />
               Edit
             </DropdownMenuItem>
+            {target.kind === "webhook" && (
+              <DropdownMenuItem onSelect={onRotateSecret}>
+                <KeyRound />
+                Rotate secret
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onSelect={onRemove}>
               <Trash2 />
@@ -895,6 +996,7 @@ function TargetTable({
   const { sort, onSort } = useSort<SortKey>()
   const [editing, setEditing] = useState<NotificationTarget | null>(null)
   const [removing, setRemoving] = useState<NotificationTarget | null>(null)
+  const [rotating, setRotating] = useState<NotificationTarget | null>(null)
   // Kept by id so the sheet follows the target through list refetches.
   const [viewingId, setViewingId] = useState<string | null>(null)
   const viewing = targets.find((target) => target.id === viewingId) ?? null
@@ -956,6 +1058,7 @@ function TargetTable({
                   canManage={canManage}
                   onViewDeliveries={() => setViewingId(target.id)}
                   onEdit={() => setEditing(target)}
+                  onRotateSecret={() => setRotating(target)}
                   onRemove={() => setRemoving(target)}
                 />
               </TableCell>
@@ -979,6 +1082,9 @@ function TargetTable({
           members={members}
           onOpenChange={(open) => !open && setEditing(null)}
         />
+      )}
+      {rotating && (
+        <RotateSecretSheet key={rotating.id} target={rotating} onOpenChange={(open) => !open && setRotating(null)} />
       )}
       <RemoveTargetDialog target={removing} onOpenChange={(open) => !open && setRemoving(null)} />
       {viewing && (
@@ -1143,12 +1249,22 @@ function TargetList({
   )
 }
 
-const TABS = ["targets", "failing"] as const
+const TABS = ["targets", "failing", "personal"] as const
 type Tab = (typeof TABS)[number]
+
+function TargetsUnavailable({ isError }: { isError: boolean }) {
+  if (!isError) return <Skeleton className="h-40 w-full" />
+  return (
+    <Alert variant="destructive">
+      <AlertTriangle />
+      <AlertTitle>Could not load notification targets.</AlertTitle>
+    </Alert>
+  )
+}
 
 export function NotificationTargets() {
   const { workspace } = useAuth()
-  const { data, isPending, isError } = useNotificationTargets()
+  const { data, isError } = useNotificationTargets()
   // Members can see the targets; the server lets only admins change them.
   const canManage = workspace?.role === "owner" || workspace?.role === "admin"
   // Names for email recipients, and the picker when adding one.
@@ -1162,18 +1278,12 @@ export function NotificationTargets() {
   // Red when something was paused and needs an admin; neutral when targets are
   // only failing or retrying, which may sort themselves out.
   const urgent = failing.some((row) => row.status === "paused")
+  // The personal setting is per workspace, so a team workspace is named; in
+  // the personal one there is only one place it could apply.
+  const team = workspace && !workspace.personal ? workspace : null
 
-  if (isPending) return <Skeleton className="h-40 w-full" />
-
-  if (isError) {
-    return (
-      <Alert variant="destructive">
-        <AlertTriangle />
-        <AlertTitle>Could not load notification targets.</AlertTitle>
-      </Alert>
-    )
-  }
-
+  // The tabs render while targets load or fail: the personal tab does not
+  // depend on them.
   return (
     <Tabs className="flex-1" value={tab} onValueChange={(value) => setParams({ tab: value }, { replace: true })}>
       <TabsList>
@@ -1190,12 +1300,33 @@ export function NotificationTargets() {
             </Badge>
           )}
         </TabsTrigger>
+        <TabsTrigger value="personal">
+          <Mail />
+          <span>My email</span>
+        </TabsTrigger>
       </TabsList>
       <TabsContent value="targets" className="flex flex-col gap-4">
-        <TargetList targets={data.targets} mailConfigured={data.mailConfigured} members={members} canManage={canManage} />
+        {!canManage && <p className="text-sm text-muted-foreground">Only owners and admins can change these.</p>}
+        {data ? (
+          <TargetList targets={data.targets} mailConfigured={data.mailConfigured} members={members} canManage={canManage} />
+        ) : (
+          <TargetsUnavailable isError={isError} />
+        )}
       </TabsContent>
       <TabsContent value="failing">
-        <FailingTargets failing={failing} settings={data.settings} canManage={canManage} />
+        {data ? (
+          <FailingTargets failing={failing} settings={data.settings} canManage={canManage} />
+        ) : (
+          <TargetsUnavailable isError={isError} />
+        )}
+      </TabsContent>
+      <TabsContent value="personal" className="flex flex-col gap-4">
+        <p className="text-sm text-muted-foreground">
+          {team ? `Only you see this. Applies to ${team.name}.` : "Only you see this."}
+        </p>
+        <div className="max-w-3xl">
+          <PersonalNotifications />
+        </div>
       </TabsContent>
     </Tabs>
   )

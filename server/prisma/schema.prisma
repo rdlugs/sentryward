@@ -117,6 +117,7 @@ model Membership {
 
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  personalNotifications NotificationTarget?
 
   @@unique([userId, workspaceId])
   @@index([workspaceId])
@@ -444,6 +445,10 @@ model ReviewJob {
   event           String?
   // Forge login of whoever opened, pushed or commented, for the author skip list.
   actor           String?
+  // Forge user id of whoever opened the change, recorded when the worker
+  // fetches it. Matched against linked sign-in identities for personal
+  // notifications: an id survives a rename, a login does not.
+  authorId        String?        @map("author_id")
   status          ReviewStatus   @default(queued)
   verdict         ReviewVerdict?
   resolvedConfig  Json?          @map("resolved_config")
@@ -736,6 +741,16 @@ model NotificationTarget {
   events          NotificationEvent[]
   encryptedUrl    String?             @map("encrypted_url")
   encryptedSecret String?             @map("encrypted_secret")
+  // The secret a rotation replaced. Deliveries are signed with it as well as
+  // the new one until previousSecretExpiresAt, so a receiver can be moved to
+  // the new secret without missing anything; after that it is ignored, and
+  // the next rotation overwrites it.
+  encryptedPreviousSecret String?     @map("encrypted_previous_secret")
+  previousSecretExpiresAt DateTime?   @map("previous_secret_expires_at") @db.Timestamptz
+  // Set on a member's personal target: email to that member about reviews of
+  // changes they opened. Personal targets never show among the workspace's
+  // targets, and leaving the workspace deletes them.
+  membershipId    String?             @unique @map("membership_id") @db.Uuid
   recipientIds    String[]            @default([]) @map("recipient_ids") @db.Uuid
   // Repositories the target hears about; empty means all of them. Deleting a
   // repository takes it out of every list, and a target whose last repository
@@ -773,6 +788,7 @@ model NotificationTarget {
   updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz
 
   workspace  Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  membership Membership?            @relation(fields: [membershipId], references: [id], onDelete: Cascade)
   deliveries NotificationDelivery[]
 
   @@index([workspaceId])

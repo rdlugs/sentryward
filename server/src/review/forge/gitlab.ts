@@ -66,7 +66,7 @@ interface GlMergeRequest {
   draft?: boolean;
   work_in_progress?: boolean;
   web_url: string;
-  author?: { username: string };
+  author?: { username: string; id?: number };
   labels?: string[];
   source_branch: string;
   target_branch: string;
@@ -280,6 +280,7 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       headRef: mr.source_branch,
       isDraft: mr.draft ?? mr.work_in_progress ?? false,
       author: mr.author?.username,
+      authorId: mr.author?.id === undefined ? undefined : String(mr.author.id),
       labels: mr.labels ?? [],
       files: diffs.map((diff) =>
         toChangedFile({

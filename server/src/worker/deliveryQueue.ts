@@ -5,7 +5,7 @@ import {
   classifyFailure,
   DeliveryError,
   deliver,
-  emailAdminsAboutPause,
+  emailAboutPause,
   MAX_DELIVERY_ATTEMPTS,
   message,
   type DeliveryPayload,
@@ -178,7 +178,7 @@ export async function runDelivery(id: string, deps: RunDeliveryDeps = defaultDep
     const reason = await recordTargetFailure(target.id, { httpStatus, gone: failure === "gone" });
     if (reason) {
       console.error(`[notify] target ${target.id} paused: ${reason}`);
-      await emailAdminsAboutPause(target.id, reason);
+      await emailAboutPause(target.id, reason);
     }
   } catch (err) {
     // Left locked; stale recovery makes it due again.

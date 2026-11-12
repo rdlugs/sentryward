@@ -79,6 +79,9 @@ export const changeSetSchema = z.object({
   isDraft: z.boolean(),
   // Login of whoever opened the change, and its labels, for the skip lists.
   author: z.string().optional(),
+  // The author's forge user id, which survives a rename; matched against
+  // linked sign-in identities for personal notifications.
+  authorId: z.string().optional(),
   labels: z.array(z.string()).optional(),
   files: z.array(changedFileSchema),
 });

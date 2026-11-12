@@ -310,6 +310,17 @@ describe("complete and fail", () => {
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: claimed.id } });
     expect(stored).toMatchObject({ status: "cancelled", title: "Fix login redirect" });
   });
+
+  it("records the author's forge id with the title, and keeps it when a cached change has none", async () => {
+    await job("aaa");
+    const claimed = (await claimNext())!;
+
+    await recordTitle(claimed.id, "Fix login redirect", "583231");
+    await recordTitle(claimed.id, "Fix login redirect again");
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: claimed.id } });
+    expect(stored).toMatchObject({ title: "Fix login redirect again", authorId: "583231" });
+  });
 });
 
 describe("cancelForDisabledRepositories", () => {
