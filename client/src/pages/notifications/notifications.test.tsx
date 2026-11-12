@@ -131,6 +131,39 @@ describe("Notifications", () => {
     })
   })
 
+  it("adds a Google Chat target with its incoming webhook URL and no secret", async () => {
+    const chatTarget = { ...webhook, id: "n4", kind: "google_chat", name: "Review space", host: "chat.googleapis.com" }
+    const url = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t"
+    let created = false
+    const fetchSpy = mockApi({
+      "GET /api/notifications": () =>
+        jsonResponse(200, { targets: created ? [chatTarget] : [], mailConfigured: false, settings }),
+      "POST /api/notifications": () => {
+        created = true
+        return jsonResponse(201, { target: chatTarget })
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    expect(await screen.findByText("No notification targets")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Type" }))
+    await userEvent.click(await screen.findByRole("option", { name: "Google Chat" }))
+    await userEvent.type(within(sheet).getByLabelText("Name"), "Review space")
+    await userEvent.type(within(sheet).getByLabelText("Incoming webhook URL"), url)
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
+
+    const row = (await screen.findByRole("cell", { name: "Review space" })).closest("tr")!
+    expect(within(row).getByText("Google Chat")).toBeInTheDocument()
+    // Only the host comes back; the key and token never do.
+    expect(within(row).getByText("chat.googleapis.com")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Signing secret")).not.toBeInTheDocument()
+    const [, init] = calls(fetchSpy, "POST", "/api/notifications")[0]!
+    expect(JSON.parse(String(init?.body))).toMatchObject({ kind: "google_chat", name: "Review space", url })
+  })
+
   it("adds a target limited to chosen repositories, a severity and verdict changes", async () => {
     const fetchSpy = mockApi({
       "GET /api/notifications": { targets: [], mailConfigured: false, settings },

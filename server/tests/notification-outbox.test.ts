@@ -88,7 +88,7 @@ function finishedJob(status: ReviewStatus = "failed", verdict: ReviewVerdict | n
 }
 
 function target(
-  kind: "webhook" | "slack" = "webhook",
+  kind: "webhook" | "slack" | "google_chat" = "webhook",
   url = "https://hooks.example.com/sw",
   events: NotificationEvent[] = ["failed", "completed"],
 ) {
@@ -156,6 +156,11 @@ describe("retry policy", () => {
     [new DeliveryError(401), "slack", "permanent"],
     [new DeliveryError(404), "webhook", "permanent"],
     [new DeliveryError(404), "slack", "gone"],
+    [new DeliveryError(404), "google_chat", "gone"],
+    [new DeliveryError(410), "google_chat", "gone"],
+    [new DeliveryError(403), "google_chat", "permanent"],
+    [new DeliveryError(429), "google_chat", "retryable"],
+    [new DeliveryError(503), "google_chat", "retryable"],
     [new DeliveryError(410), "webhook", "gone"],
     [new PermanentDeliveryError("Mail is not configured"), "email", "permanent"],
     [new DecryptError(), "slack", "permanent"],
@@ -532,6 +537,7 @@ describe("auto-pause", () => {
     ["slack", 404, "Auto-paused: HTTP 404 Not Found"],
     ["webhook", 410, "Auto-paused: HTTP 410 Gone"],
     ["slack", 410, "Auto-paused: HTTP 410 Gone"],
+    ["google_chat", 404, "Auto-paused: HTTP 404 Not Found"],
   ] as const)("pauses a %s target at once when it answers %i", async (kind, status, reason) => {
     const hook = await target(kind);
 

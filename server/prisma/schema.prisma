@@ -695,6 +695,7 @@ model ModelPrice {
 enum NotificationKind {
   webhook
   slack
+  google_chat
   email
 
   @@map("notification_kind")

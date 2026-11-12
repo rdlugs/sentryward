@@ -91,7 +91,7 @@ function finishedJob(status: ReviewStatus, verdict: ReviewVerdict | null, error:
   });
 }
 
-function target(kind: "webhook" | "slack", events: NotificationEvent[], url = "https://hooks.example.com/sw") {
+function target(kind: "webhook" | "slack" | "google_chat", events: NotificationEvent[], url = "https://hooks.example.com/sw") {
   return prisma.notificationTarget.create({
     data: {
       workspaceId,
@@ -463,6 +463,177 @@ describe("notifyJob", () => {
   it("escapes Slack's control characters in one pass", () => {
     expect(escapeSlack("<!channel> & <a|b>")).toBe("&lt;!channel&gt; &amp; &lt;a|b&gt;");
     expect(escapeSlack("&amp;")).toBe("&amp;amp;");
+  });
+
+  const CHAT_URL = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=chat-key-value&token=chat-token-value";
+  const chatStub = () => fetchStub([{ method: "POST", url: /chat\.googleapis\.com/ }]);
+  const paragraph = (text: string) => ({ textParagraph: { text } });
+  const button = (text: string, url: string) => ({ text, onClick: { openLink: { url } } });
+  const reviewButton = (id: string) => button("View review", `${env.CLIENT_ORIGIN}/reviews/${id}`);
+  const prButton = button("Open PR", "https://github.com/acme/web/pull/7");
+  const card = (title: string, widgets: unknown[]) => [{ cardId: "review", card: { header: { title }, sections: [{ widgets }] } }];
+
+  it("posts a failed review to Google Chat as a card with its error and a review button", async () => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["failed"], CHAT_URL);
+    const job = await finishedJob("failed", "error", "No API key for anthropic");
+
+    await notifyAndSend(job.id);
+
+    expect(stub.calls[0]!.url).toBe(CHAT_URL);
+    // No signature headers: the URL is the credential.
+    expect(Object.keys(stub.calls[0]!.headers).filter((name) => name.startsWith("x-sentryward"))).toEqual([]);
+    // A failed review has no summary, so no change URL and no PR button.
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
+      text: "Review failed #7",
+      cardsV2: card("⚠️ Review failed", [
+        paragraph("acme/web #7"),
+        paragraph("No API key for anthropic"),
+        { buttonList: { buttons: [reviewButton(job.id)] } },
+      ]),
+    });
+  });
+
+  it("posts a blocked review to Google Chat with its title, the severities and a PR button", async () => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["blocked"], CHAT_URL);
+    const job = await finishedJob("completed", "blocked");
+
+    await notifyAndSend(job.id);
+
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
+      text: "Review blocked #7",
+      cardsV2: card("\u{1F534} Review blocked", [
+        paragraph("acme/web #7"),
+        paragraph("<b>Add login</b>"),
+        paragraph("3 findings (1 major · 2 minor)"),
+        { buttonList: { buttons: [reviewButton(job.id), prButton] } },
+      ]),
+    });
+  });
+
+  it.each([
+    ["no change URL", undefined],
+    ["a change URL that is not http(s)", "javascript:alert(1)"],
+    ["a change URL too long to send", `https://github.com/acme/web/pull/7?${"x".repeat(4000)}`],
+  ])("leaves the Google Chat PR button out with %s", async (_label, webUrl) => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["blocked"], CHAT_URL);
+    const job = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 7,
+        headSha: "aaa",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, webUrl },
+        finishedAt: new Date(),
+      },
+    });
+
+    await notifyAndSend(job.id);
+
+    const widgets = JSON.parse(stub.calls[0]!.body!).cardsV2[0].card.sections[0].widgets;
+    expect(widgets.at(-1)).toEqual({ buttonList: { buttons: [reviewButton(job.id)] } });
+  });
+
+  it("sends a test notification to Google Chat", async () => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    const chat = await target("google_chat", ["failed"], CHAT_URL);
+
+    expect(await testTarget(chat)).toEqual({ ok: true });
+
+    expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
+      text: "Test notification #1",
+      cardsV2: card("\u{1F514} Test notification", [
+        paragraph("example/repository #1"),
+        paragraph("<b>Test notification from Sentryward</b>"),
+        paragraph("0 findings"),
+        { buttonList: { buttons: [button("View review", `${env.CLIENT_ORIGIN}/reviews`)] } },
+      ]),
+    });
+  });
+
+  // Card text renders a subset of HTML, so markup is added to the Slack list.
+  const CHAT_HOSTILE = [...HOSTILE, '<a href="https://evil.example">Approve</a> <b>ok</b> &amp; <font color="#ff0000">x</font>'];
+
+  it.each(CHAT_HOSTILE)("escapes forge text in Google Chat cards and keeps it out of the text: %j", async (hostile) => {
+    const stub = fetchStub([
+      { method: "POST", url: /chat\.googleapis\.com/ },
+      { method: "POST", url: /chat\.googleapis\.com/ },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["failed", "blocked"], CHAT_URL);
+    const blocked = await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 8,
+        headSha: "bbb",
+        trigger: "manual",
+        status: "completed",
+        verdict: "blocked",
+        summary: { ...summary, title: hostile },
+        finishedAt: new Date(),
+      },
+    });
+    const failed = await finishedJob("failed", "error", hostile);
+
+    await notifyAndSend(blocked.id);
+    await notifyAndSend(failed.id);
+
+    const escaped = escapeHtml(hostile.replace(/\s+/g, " ").trim());
+    const jobs = [blocked, failed];
+    stub.calls.forEach((call, i) => {
+      const body = JSON.parse(call.body!);
+      // Chat formats `text` and has no escape for it: our words and the number only.
+      expect(body.text).toBe(i === 0 ? "Review blocked #8" : "Review failed #7");
+      const { header, sections } = body.cardsV2[0].card;
+      expect(header).toEqual({ title: i === 0 ? "\u{1F534} Review blocked" : "⚠️ Review failed" });
+      const widgets = sections[0].widgets as { textParagraph?: { text: string }; buttonList?: unknown }[];
+      const texts = widgets.flatMap((widget) => (widget.textParagraph ? [widget.textParagraph.text] : []));
+      expect(texts).toContain(i === 0 ? `<b>${escaped}</b>` : escaped);
+      // The only markup in the card is our own bold around the title.
+      for (const text of texts) {
+        expect(text.replace(/^<b>(.*)<\/b>$/, "$1")).not.toMatch(/[<>"\n]/);
+      }
+      // Links are buttons to our review and the checked change URL, nothing else.
+      expect(widgets.at(-1)).toEqual({
+        buttonList: { buttons: i === 0 ? [reviewButton(jobs[i]!.id), prButton] : [reviewButton(jobs[i]!.id)] },
+      });
+    });
+  });
+
+  it("clips long forge text in a Google Chat card", async () => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["failed"], CHAT_URL);
+    await notifyAndSend((await finishedJob("failed", "error", '"'.repeat(5000))).id);
+
+    const body = stub.calls[0]!.body!;
+    // 1000 characters kept, each six once escaped.
+    expect(JSON.parse(body).cardsV2[0].card.sections[0].widgets[1].textParagraph.text).toHaveLength(6000 - 6 + 1);
+    expect(Buffer.byteLength(body)).toBeLessThan(32_000);
+  });
+
+  it("never stores a Google Chat URL's key or token in an error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error(`request to ${CHAT_URL} failed; key=chat-key-value token=chat-token-value`);
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await target("google_chat", ["completed"], CHAT_URL);
+
+    await notifyAndSend((await finishedJob("completed", "pass")).id);
+
+    const row = await prisma.notificationDelivery.findFirstOrThrow();
+    expect(row.error).not.toMatch(/chat-key-value|chat-token-value|AAAA/);
   });
 
   it("does not notify skipped or cancelled jobs", async () => {
@@ -991,6 +1162,34 @@ describe("/api/notifications", () => {
       env.NODE_ENV = original;
     }
     expect(await prisma.notificationTarget.count()).toBe(0);
+  });
+
+  it("adds a Google Chat target, showing only its host and no secret", async () => {
+    const url = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=chat-key-value&token=chat-token-value";
+    const res = await request(app)
+      .post("/api/notifications")
+      .set("Cookie", cookie)
+      .send({ kind: "google_chat", name: "Space", events: ["blocked"], url });
+
+    expect(res.status).toBe(201);
+    expect(res.body.secret).toBeUndefined();
+    expect(res.body.target).toMatchObject({ kind: "google_chat", name: "Space", host: "chat.googleapis.com" });
+    expect(JSON.stringify(res.body)).not.toMatch(/chat-key-value|chat-token-value|AAAA/);
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: res.body.target.id } });
+    expect(stored.encryptedUrl).not.toContain("chat-token-value");
+    expect(decrypt(stored.encryptedUrl!)).toBe(url);
+    expect(stored.encryptedSecret).toBeNull();
+
+    const list = await request(app).get("/api/notifications").set("Cookie", cookie);
+    expect(JSON.stringify(list.body)).not.toMatch(/chat-key-value|chat-token-value|AAAA/);
+
+    const edited = await request(app)
+      .patch(`/api/notifications/${stored.id}`)
+      .set("Cookie", cookie)
+      .send({ url: url.replace("AAAA", "BBBB") });
+    expect(edited.status).toBe(200);
+    const removed = await request(app).delete(`/api/notifications/${stored.id}`).set("Cookie", cookie);
+    expect(removed.status).toBeLessThan(300);
   });
 
   it("adds email targets only for members, and only with mail configured", async () => {

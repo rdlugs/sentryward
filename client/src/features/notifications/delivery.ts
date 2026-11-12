@@ -79,9 +79,11 @@ export function failingStatus(target: NotificationTarget): FailingStatus | null 
 // What to do about a paused target, in plain words.
 export function causeHint(target: NotificationTarget) {
   if (target.pauseCause === "gone") {
-    return target.kind === "slack"
-      ? "The Slack webhook was deleted. Remove this target and add a new webhook URL."
-      : "The endpoint says it no longer exists. Check it, then remove and add the target again."
+    if (target.kind === "slack") return "The Slack webhook was deleted. Remove this target and add a new webhook URL."
+    if (target.kind === "google_chat") {
+      return "The Google Chat webhook or its space was deleted. Remove this target and add a new webhook URL."
+    }
+    return "The endpoint says it no longer exists. Check it, then remove and add the target again."
   }
   if (target.pauseCause === "failures") return "Check the delivery errors, send a test, then resume."
   if (target.pauseCause === "scope") {

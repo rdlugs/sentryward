@@ -10,6 +10,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Google Chat notification targets (#283). A new `google_chat` target kind
+  takes a space's incoming-webhook URL and posts a card: the headline with
+  its emoji, the repository and number, the title, the findings by severity
+  or a failed review's error, and **View review** and **Open PR/MR** buttons
+  (the second only for an http(s) change URL). A digest is one card with the
+  counts, the most blocked repositories, up to 10 still-blocked changes and 5
+  failed reviews, kept inside Google Chat's message size limit. Forge text is
+  escaped in the card and kept out of the message's plain `text`. A `404` (a
+  deleted webhook or space) pauses the target at once, like Slack's; retries
+  and auto-pause otherwise work as for any target. The URL is stored
+  encrypted, only its host is shown, and its `key` and `token` are cut out of
+  stored errors. Adds the `google_chat` value to the `notification_kind`
+  enum (migration `20261113090200_notification_kind_google_chat`).
 - Personal notifications (#258). Any member can switch on email about reviews
   of the pull and merge requests they opened, from the **My email** tab on
   the Notifications page (`?tab=personal`), which lists what is missing

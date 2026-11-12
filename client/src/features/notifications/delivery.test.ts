@@ -147,6 +147,9 @@ describe("failingTargets", () => {
 describe("causeHint", () => {
   it("tells a deleted Slack webhook from a gone endpoint and a failing one", () => {
     expect(causeHint(target({ kind: "slack", pauseCause: "gone" }))).toMatch(/Slack webhook was deleted/)
+    expect(causeHint(target({ kind: "google_chat", pauseCause: "gone" }))).toMatch(
+      /Google Chat webhook or its space was deleted/,
+    )
     expect(causeHint(target({ pauseCause: "gone" }))).toMatch(/no longer exists/)
     expect(causeHint(target({ pauseCause: "failures" }))).toBe("Check the delivery errors, send a test, then resume.")
     expect(causeHint(target({ pauseCause: "scope" }))).toMatch(/repository it was limited to was removed/)

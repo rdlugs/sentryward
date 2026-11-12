@@ -1,6 +1,7 @@
 import request from "supertest";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
+import { env } from "../src/config/env.ts";
 import type { NotificationEvent, ReviewStatus, ReviewVerdict } from "../src/generated/prisma/client.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { mailer } from "../src/lib/mailer.ts";
@@ -435,6 +436,8 @@ describe("building digests", () => {
 });
 
 describe("rendering digests", () => {
+  const failedOf = (payload: DigestPayload) => payload.reviews.find((review) => review.review.status === "failed")!;
+
   async function builtDigest() {
     await digestTarget({ dueAt: FUTURE });
     await finish("completed", "blocked");
@@ -461,6 +464,100 @@ describe("rendering digests", () => {
     expect(mrkdwn.length).toBeGreaterThan(0);
     for (const element of mrkdwn) expect(element).not.toContain("acme/");
     expect(JSON.stringify(body.blocks)).toContain("acme/web#");
+  });
+
+  async function chatDigest(payload: DigestPayload) {
+    const target = await prisma.notificationTarget.update({
+      where: { id: (await prisma.notificationTarget.findFirstOrThrow()).id },
+      data: {
+        kind: "google_chat",
+        encryptedUrl: encrypt("https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t"),
+        encryptedSecret: null,
+      },
+    });
+    const stub = fetchStub([{ method: "POST", url: /chat\.googleapis\.com/ }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    await deliver(target, workspaceId, payload);
+    expect(stub.calls).toHaveLength(1);
+    return stub.calls[0]!.body!;
+  }
+
+  it("posts one Google Chat card summarising the period", async () => {
+    const payload = await builtDigest();
+    const body = JSON.parse(await chatDigest(payload));
+
+    expect(body.text).toBe("Daily digest: 2 reviews, 1 blocked, 1 failed");
+    expect(body.cardsV2).toHaveLength(1);
+    const { header, sections } = body.cardsV2[0].card;
+    expect(header.title).toBe("Daily digest");
+    expect(header.subtitle).toContain("Europe/Berlin");
+    expect(sections[0].widgets).toEqual([
+      { textParagraph: { text: "2 reviews, 1 blocked, 1 failed" } },
+      { textParagraph: { text: "Most blocked: acme/web (1)" } },
+    ]);
+    expect(sections.map((section: { header?: string }) => section.header)).toEqual([
+      undefined,
+      "Still blocked",
+      "Failed",
+      undefined,
+    ]);
+    const review = (url: string) => ({ text: "View review", onClick: { openLink: { url } } });
+    expect(sections[1].widgets).toEqual([
+      {
+        decoratedText: {
+          text: expect.stringContaining("acme/web#"),
+          wrapText: true,
+          button: review(payload.blocked[0]!.review.url),
+        },
+      },
+    ]);
+    expect(sections[2].widgets).toHaveLength(1);
+    expect(sections[2].widgets[0].decoratedText.button).toEqual(review(failedOf(payload).review.url));
+    expect(sections[3].widgets).toEqual([
+      { buttonList: { buttons: [{ text: "All reviews", onClick: { openLink: { url: `${env.CLIENT_ORIGIN}/reviews` } } }] } },
+    ]);
+  });
+
+  it("escapes forge text in a Google Chat digest and stays inside the message size limit", async () => {
+    const payload = await builtDigest();
+    // Every character grows sixfold when escaped: the worst a title can do.
+    const hostile = '"'.repeat(3000);
+    const entry = (base: DigestPayload["reviews"][number], i: number) => ({
+      ...base,
+      repository: { ...base.repository, fullPath: `<b>acme</b>/${hostile}` },
+      change: { ...base.change, number: i, title: `<a href="https://evil.example">x</a> ${hostile}` },
+      review: { ...base.review, error: base.review.error === null ? null : `<i>boom</i> ${hostile}` },
+    });
+    const failed = failedOf(payload);
+    const worst: DigestPayload = {
+      ...payload,
+      counts: { ...payload.counts, failed: 60 },
+      topBlockedRepositories: Array.from({ length: 5 }, (_, i) => ({
+        provider: "github",
+        fullPath: `<b>${i}</b>${hostile}`,
+        blocked: 9,
+      })),
+      blocked: Array.from({ length: 50 }, (_, i) => entry(payload.blocked[0]!, i)),
+      blockedTruncated: 7,
+      reviews: Array.from({ length: 60 }, (_, i) => entry(failed, i)),
+    };
+
+    const raw = await chatDigest(worst);
+
+    expect(Buffer.byteLength(raw)).toBeLessThan(32_000);
+    const { sections } = JSON.parse(raw).cardsV2[0].card;
+    // 10 of 57 blocked changes and 5 of 60 failed reviews, then the rest counted.
+    expect(sections[1].widgets).toHaveLength(11);
+    expect(sections[1].widgets.at(-1)).toEqual({ textParagraph: { text: "and 47 more" } });
+    expect(sections[2].widgets).toHaveLength(6);
+    expect(sections[2].widgets.at(-1)).toEqual({ textParagraph: { text: "and 55 more" } });
+    const texts = [sections[0].widgets[1].textParagraph.text, ...sections.slice(1, 3).flatMap(
+      (section: { widgets: { decoratedText?: { text: string } }[] }) =>
+        section.widgets.flatMap((widget) => (widget.decoratedText ? [widget.decoratedText.text] : [])),
+    )];
+    expect(texts).toHaveLength(16);
+    for (const text of texts) expect(text).not.toMatch(/[<>"]/);
+    expect(texts[1]).toContain("&lt;b&gt;acme&lt;/b&gt;/");
   });
 
   it("emails a plain-text summary", async () => {
