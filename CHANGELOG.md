@@ -189,6 +189,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- The Models, Best model and Repositories tables on the Benchmarks page are
+  paginated (#276), each with its own page and page size in the URL
+  (`?modelsPage=`, `?bestPage=`, `?reposPage=`). Best model pages by whole
+  language or category, so a group's models are never split across pages.
+  Changing the period or repository starts every table over at page 1, and
+  switching between languages and categories does the same for Best model.
 - Slack notifications for a review are richer (#254): an emoji per event in
   the headline ("🔴 Review blocked · acme/api #42"), the findings broken down
   by severity in `critical`/`major`/`minor`/`info` order, a failed review's

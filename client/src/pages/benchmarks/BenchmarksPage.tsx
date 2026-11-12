@@ -8,10 +8,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton"
 import { useBenchmarks } from "@/features/benchmarks/api"
 import { BenchmarkCards } from "@/features/benchmarks/BenchmarkCards"
-import { BreakdownTable, ModelTable, RepositoryTable } from "@/features/benchmarks/BenchmarkTables"
+import {
+  BEST_PAGINATION,
+  BreakdownTable,
+  MODELS_PAGINATION,
+  ModelTable,
+  REPOS_PAGINATION,
+  RepositoryTable,
+} from "@/features/benchmarks/BenchmarkTables"
 import { useRepos } from "@/features/forge/api"
 import { Segmented } from "@/features/usage/Segmented"
 import { USAGE_PERIODS, type UsagePeriod } from "@/features/usage/types"
+import { paginationKeys } from "@/hooks/use-pagination"
 import { ALL } from "@/lib/filters"
 
 const PERIOD_OPTIONS: { value: UsagePeriod; label: string }[] = [
@@ -41,6 +49,8 @@ export function BenchmarksPage() {
       const next = new URLSearchParams(current)
       if (key === "repo" && value === ALL) next.delete("repo")
       else next.set(key, value)
+      // Another period or repository is other rows, so every table starts over at page 1.
+      for (const prefix of [MODELS_PAGINATION, BEST_PAGINATION, REPOS_PAGINATION]) next.delete(paginationKeys(prefix).page)
       return next
     })
   }

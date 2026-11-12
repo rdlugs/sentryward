@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react"
+import { TablePagination } from "@/components/TablePagination"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -6,12 +7,35 @@ import { CATEGORY_LABEL } from "@/features/findings/options"
 import type { FindingCategory } from "@/features/findings/types"
 import { formatCount } from "@/features/usage/format"
 import { Segmented } from "@/features/usage/Segmented"
+import { paginate, usePagination } from "@/hooks/use-pagination"
 import { formatDuration } from "@/lib/time"
 import { cn } from "@/lib/utils"
 import { Cost, Dash, Rate } from "./format"
 import type { BenchmarkReport, Breakdown } from "./types"
 
 const numeric = "text-right tabular-nums"
+
+// One prefix per table (?modelsPage=, ?bestPage=, ?reposPage=), so the three
+// keep their page and size apart in the URL.
+export const MODELS_PAGINATION = "models"
+export const BEST_PAGINATION = "best"
+export const REPOS_PAGINATION = "repos"
+
+type Pagination = ReturnType<typeof usePagination>
+
+// Under a table, and only when it has rows: the empty state stands alone.
+function Pager({ page, pagination }: { page: { page: number; total: number }; pagination: Pagination }) {
+  if (page.total === 0) return null
+  return (
+    <TablePagination
+      page={page.page}
+      size={pagination.size}
+      total={page.total}
+      onPageChange={pagination.setPage}
+      onSizeChange={pagination.setSize}
+    />
+  )
+}
 
 function Empty({ colSpan, children }: { colSpan: number; children: string }) {
   return (
@@ -24,6 +48,8 @@ function Empty({ colSpan, children }: { colSpan: number; children: string }) {
 }
 
 export function ModelTable({ report }: { report: BenchmarkReport }) {
+  const pagination = usePagination(MODELS_PAGINATION)
+  const page = paginate(report.byModel, pagination.page, pagination.size)
   return (
     <Card>
       <CardHeader>
@@ -46,7 +72,7 @@ export function ModelTable({ report }: { report: BenchmarkReport }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {report.byModel.map((row) => (
+            {page.rows.map((row) => (
               <TableRow key={row.model}>
                 <TableCell className="font-mono text-xs">{row.model}</TableCell>
                 <TableCell className={numeric}>{formatCount(row.reviews)}</TableCell>
@@ -66,12 +92,15 @@ export function ModelTable({ report }: { report: BenchmarkReport }) {
             {report.byModel.length === 0 && <Empty colSpan={9}>No model calls in this period.</Empty>}
           </TableBody>
         </Table>
+        <Pager page={page} pagination={pagination} />
       </CardContent>
     </Card>
   )
 }
 
 export function RepositoryTable({ report }: { report: BenchmarkReport }) {
+  const pagination = usePagination(REPOS_PAGINATION)
+  const page = paginate(report.byRepository, pagination.page, pagination.size)
   return (
     <Card>
       <CardHeader>
@@ -94,7 +123,7 @@ export function RepositoryTable({ report }: { report: BenchmarkReport }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {report.byRepository.map((row) => (
+            {page.rows.map((row) => (
               <TableRow key={row.repositoryId}>
                 <TableCell>{row.fullPath}</TableCell>
                 <TableCell className={numeric}>{formatCount(row.reviews)}</TableCell>
@@ -114,6 +143,7 @@ export function RepositoryTable({ report }: { report: BenchmarkReport }) {
             {report.byRepository.length === 0 && <Empty colSpan={9}>No reviews in this period.</Empty>}
           </TableBody>
         </Table>
+        <Pager page={page} pagination={pagination} />
       </CardContent>
     </Card>
   )
@@ -138,6 +168,15 @@ export function BreakdownTable({ report }: { report: BenchmarkReport }) {
   const [group, setGroup] = useState<Group>("language")
   const rows: Breakdown[] = group === "language" ? report.byLanguage : report.byCategory
   const label = group === "language" ? "Language" : "Category"
+  const pagination = usePagination(BEST_PAGINATION)
+  // Paged by language or category, not by model row: a group's label is only
+  // on its first row, so splitting one across pages would leave rows unnamed.
+  const page = paginate(rows, pagination.page, pagination.size)
+  // The other grouping is a different list, so it starts over at page 1.
+  function onGroupChange(next: Group) {
+    setGroup(next)
+    pagination.setPage(1)
+  }
   return (
     <Card>
       <CardHeader className="flex flex-wrap items-start justify-between gap-2">
@@ -148,7 +187,7 @@ export function BreakdownTable({ report }: { report: BenchmarkReport }) {
             confirmed rate among models with at least {report.minSample} such findings.
           </CardDescription>
         </div>
-        <Segmented label="Break down findings" options={GROUPS} value={group} onChange={setGroup} />
+        <Segmented label="Break down findings" options={GROUPS} value={group} onChange={onGroupChange} />
       </CardHeader>
       <CardContent>
         <Table aria-label={`Findings by ${label.toLowerCase()} and model`}>
@@ -162,7 +201,7 @@ export function BreakdownTable({ report }: { report: BenchmarkReport }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((row) => (
+            {page.rows.map((row) => (
               <Fragment key={row.key}>
                 {row.models.map((model, index) => {
                   const few = model.decided < report.minSample
@@ -191,6 +230,7 @@ export function BreakdownTable({ report }: { report: BenchmarkReport }) {
             {rows.length === 0 && <Empty colSpan={5}>No findings in this period.</Empty>}
           </TableBody>
         </Table>
+        <Pager page={page} pagination={pagination} />
       </CardContent>
     </Card>
   )
