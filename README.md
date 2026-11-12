@@ -977,7 +977,8 @@ limit (**Auto-pause after** at the top of the Notifications page's **Failing
 targets** tab, 5 by default, Never to turn it off) the target is paused. An endpoint that says it no
 longer exists, `410 Gone` from any target or `404` from Slack (a deleted
 incoming webhook answers `no_service`) or Google Chat (a deleted webhook or
-space), pauses its target at once. The reason
+space; only when the target's URL is on `chat.googleapis.com`, since a relay's
+`404` says nothing about the space), pauses its target at once. The reason
 (for example "Auto-paused: HTTP 410 Gone" or "Auto-paused after 5 failed
 deliveries in a row (last: HTTP 503)") shows under the target's name and in its
 edit panel, and when mail is configured each owner and admin of the workspace
@@ -1104,7 +1105,9 @@ There are three kinds:
   minor)") or a failed review's error, and **View review** and **Open PR**
   (**Open MR** on GitLab) buttons, the second only when the change has an
   http(s) URL. Titles, repository names and errors are escaped in the card,
-  and the message's plain `text` (shown above the card and in notifications)
+  and a URL in them is broken up with zero-width spaces so Google Chat does
+  not turn it into a link. The message has no `text` (it would repeat the
+  card's header above the card); its `fallbackText`, shown in notifications,
   carries only the headline and the number, for example "Review blocked #42",
   because Google Chat formats that text and has no way to escape it. A digest
   is one card with the counts, the most blocked repositories, up to 10
@@ -1953,7 +1956,7 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/notifications/:id/deliveries` | `?page&limit` (default 20, max 100): `{ deliveries, total, page, limit }`, the target's delivery log newest first (`event`, including `test` and `digest`, `status` `pending`, `sent` or `failed`, `httpStatus`, `error`, `attempts`, `nextAttemptAt`, `jobId`, `createdAt`, `finishedAt`, null while pending); members can read it |
 | PATCH  | `/api/notifications/settings` | Workspace admins: `{ autoPauseAfter }`, 0 to 50 failed deliveries in a row before a target is paused (0 never); returns `{ settings }` |
 | POST   | `/api/notifications` | Workspace admins: `{ kind: "webhook" \| "slack" \| "google_chat", name, events, url }` or `{ kind: "email", name, events, recipientIds }`, each optionally with `repositoryIds` (repositories of the workspace, default all), `minSeverity`, `onlyVerdictChanges` and `delivery` (`{ mode: "each" }`, the default, `{ mode: "daily", hour, timeZone }` or `{ mode: "weekly", hour, weekday, timeZone }`, `hour` 0-23, `weekday` 0-6 from Sunday, `timeZone` an IANA name); events are `failed`, `blocked`, `resolved` and `completed`; returns `{ target, secret? }`, a webhook's signing secret shown only here |
-| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, url?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent. `url` (webhook and Slack only, 400 on `url` for email) is checked like a new target's and keeps the secret |
+| PATCH  | `/api/notifications/:id` | Workspace admins: `{ name?, url?, events?, recipientIds?, repositoryIds?, minSeverity?, onlyVerdictChanges?, delivery?, active? }`; a new digest schedule counts from now (held reviews carry over), and `delivery: { mode: "each" }` on a digest target sends what it held as a final digest; `active: false` pauses deliveries and drops the ones queued, and any `active` clears `pausedReason` and the failure count. A target paused because its repositories were removed keeps that reason, and refuses `active: true` (400 on `repositoryIds`), until `repositoryIds` is sent. `url` (webhook, Slack and Google Chat only, 400 on `url` for email) is checked like a new target's and keeps the secret |
 | POST   | `/api/notifications/:id/rotate-secret` | Workspace admins, webhooks only: returns `{ target, secret }`, the new signing secret shown only here; the previous one also signs deliveries for 24 hours |
 | GET    | `/api/notifications/personal` | Any member: `{ enabled, events, pausedReason, forges, mailConfigured }`, the member's own email about reviews of changes they opened; `forges` is `[{ provider, host, linked }]` for each forge host of the workspace, `linked` when the member has a sign-in identity there |
 | PUT    | `/api/notifications/personal` | Any member: `{ enabled, events }` (at least one event); `enabled: true` needs mail configured (400). Saving clears an auto-pause; switching off drops what is queued. Returns the same shape as GET |

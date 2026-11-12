@@ -104,6 +104,8 @@ function target(
   });
 }
 
+const CHAT_URL = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t";
+
 function failWith(err: unknown): RunDeliveryDeps {
   return {
     deliver: vi.fn(async () => {
@@ -156,7 +158,7 @@ describe("retry policy", () => {
     [new DeliveryError(401), "slack", "permanent"],
     [new DeliveryError(404), "webhook", "permanent"],
     [new DeliveryError(404), "slack", "gone"],
-    [new DeliveryError(404), "google_chat", "gone"],
+    [new DeliveryError(404), "google_chat", "permanent"],
     [new DeliveryError(410), "google_chat", "gone"],
     [new DeliveryError(403), "google_chat", "permanent"],
     [new DeliveryError(429), "google_chat", "retryable"],
@@ -167,7 +169,17 @@ describe("retry policy", () => {
     [new Error("getaddrinfo ENOTFOUND"), "webhook", "retryable"],
     [new DOMException("The operation was aborted due to timeout", "TimeoutError"), "webhook", "retryable"],
   ] as const)("classifies %s for a %s target as %s", (err, kind, expected) => {
-    expect(classifyFailure(err, kind)).toBe(expected);
+    expect(classifyFailure(err, kind, "hooks.example.com")).toBe(expected);
+  });
+
+  // Only Google answering 404 says the webhook or space is gone; a relay's
+  // 404 (or a target with no readable URL) is an ordinary failure.
+  it.each([
+    ["chat.googleapis.com", "gone"],
+    ["relay.example.com", "permanent"],
+    [null, "permanent"],
+  ] as const)("classifies a 404 for a google_chat target on %s as %s", (host, expected) => {
+    expect(classifyFailure(new DeliveryError(404), "google_chat", host)).toBe(expected);
   });
 
   it("backs off 1m, 5m, 30m then 2h, or as long as a 429 asks", () => {
@@ -539,11 +551,19 @@ describe("auto-pause", () => {
     ["slack", 410, "Auto-paused: HTTP 410 Gone"],
     ["google_chat", 404, "Auto-paused: HTTP 404 Not Found"],
   ] as const)("pauses a %s target at once when it answers %i", async (kind, status, reason) => {
-    const hook = await target(kind);
+    const hook = await target(kind, kind === "google_chat" ? CHAT_URL : undefined);
 
     await deliverJob(failWith(new DeliveryError(status)));
 
     expect(await reload(hook)).toMatchObject({ active: false, consecutiveFailures: 1, pausedReason: reason });
+  });
+
+  it("counts a 404 from a google_chat target that is not on Google's host as an ordinary failure", async () => {
+    const hook = await target("google_chat", "https://relay.example.com/chat");
+
+    await deliverJob(failWith(new DeliveryError(404)));
+
+    expect(await reload(hook)).toMatchObject({ active: true, consecutiveFailures: 1, pausedReason: null });
   });
 
   it("drops a paused target's other queued deliveries", async () => {

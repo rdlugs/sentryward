@@ -486,7 +486,7 @@ describe("notifyJob", () => {
     expect(Object.keys(stub.calls[0]!.headers).filter((name) => name.startsWith("x-sentryward"))).toEqual([]);
     // A failed review has no summary, so no change URL and no PR button.
     expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
-      text: "Review failed #7",
+      fallbackText: "Review failed #7",
       cardsV2: card("⚠️ Review failed", [
         paragraph("acme/web #7"),
         paragraph("No API key for anthropic"),
@@ -504,7 +504,7 @@ describe("notifyJob", () => {
     await notifyAndSend(job.id);
 
     expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
-      text: "Review blocked #7",
+      fallbackText: "Review blocked #7",
       cardsV2: card("\u{1F534} Review blocked", [
         paragraph("acme/web #7"),
         paragraph("<b>Add login</b>"),
@@ -549,7 +549,7 @@ describe("notifyJob", () => {
     expect(await testTarget(chat)).toEqual({ ok: true });
 
     expect(JSON.parse(stub.calls[0]!.body!)).toEqual({
-      text: "Test notification #1",
+      fallbackText: "Test notification #1",
       cardsV2: card("\u{1F514} Test notification", [
         paragraph("example/repository #1"),
         paragraph("<b>Test notification from Sentryward</b>"),
@@ -586,20 +586,29 @@ describe("notifyJob", () => {
     await notifyAndSend(blocked.id);
     await notifyAndSend(failed.id);
 
-    const escaped = escapeHtml(hostile.replace(/\s+/g, " ").trim());
+    const flat = hostile.replace(/\s+/g, " ").trim();
+    // What the card shows once Chat decodes it, without the zero-width breaks.
+    const shown = (text: string) =>
+      text.replaceAll("\u200B", "").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
     const jobs = [blocked, failed];
     stub.calls.forEach((call, i) => {
       const body = JSON.parse(call.body!);
-      // Chat formats `text` and has no escape for it: our words and the number only.
-      expect(body.text).toBe(i === 0 ? "Review blocked #8" : "Review failed #7");
+      // No `text`, which Chat would show above the card. It formats the
+      // fallback and has no escape for it: our words and the number only.
+      expect(body.text).toBeUndefined();
+      expect(body.fallbackText).toBe(i === 0 ? "Review blocked #8" : "Review failed #7");
       const { header, sections } = body.cardsV2[0].card;
       expect(header).toEqual({ title: i === 0 ? "\u{1F534} Review blocked" : "⚠️ Review failed" });
       const widgets = sections[0].widgets as { textParagraph?: { text: string }; buttonList?: unknown }[];
       const texts = widgets.flatMap((widget) => (widget.textParagraph ? [widget.textParagraph.text] : []));
-      expect(texts).toContain(i === 0 ? `<b>${escaped}</b>` : escaped);
-      // The only markup in the card is our own bold around the title.
-      for (const text of texts) {
-        expect(text.replace(/^<b>(.*)<\/b>$/, "$1")).not.toMatch(/[<>"\n]/);
+      const inner = texts.map((text) => text.replace(/^<b>(.*)<\/b>$/, "$1"));
+      expect(texts.some((text) => text.startsWith("<b>"))).toBe(i === 0);
+      expect(inner.map(shown)).toContain(flat);
+      for (const text of inner) {
+        // The only markup in the card is our own bold around the title.
+        expect(text).not.toMatch(/[<>\n]/);
+        // Nothing left that Chat would link: no scheme and no dotted name.
+        expect(text).not.toMatch(/:\/\/(?!\u200B)|\w\.\w/);
       }
       // Links are buttons to our review and the checked change URL, nothing else.
       expect(widgets.at(-1)).toEqual({
@@ -612,12 +621,34 @@ describe("notifyJob", () => {
     const stub = chatStub();
     vi.stubGlobal("fetch", stub.fetch);
     await target("google_chat", ["failed"], CHAT_URL);
-    await notifyAndSend((await finishedJob("failed", "error", '"'.repeat(5000))).id);
+    await notifyAndSend((await finishedJob("failed", "error", "&".repeat(5000))).id);
 
     const body = stub.calls[0]!.body!;
-    // 1000 characters kept, each six once escaped.
-    expect(JSON.parse(body).cardsV2[0].card.sections[0].widgets[1].textParagraph.text).toHaveLength(6000 - 6 + 1);
+    // 1000 characters kept, each five once escaped.
+    expect(JSON.parse(body).cardsV2[0].card.sections[0].widgets[1].textParagraph.text).toHaveLength(5000 - 5 + 1);
     expect(Buffer.byteLength(body)).toBeLessThan(32_000);
+  });
+
+  it("keeps a URL in forge text from becoming a link in a Google Chat card, and leaves quotes as written", async () => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["failed"], CHAT_URL);
+    await notifyAndSend((await finishedJob("failed", "error", `Don't retry "flaky" https://evil.example/reset or www.evil.example`)).id);
+
+    const { text } = JSON.parse(stub.calls[0]!.body!).cardsV2[0].card.sections[0].widgets[1].textParagraph;
+    expect(text).toBe(`Don't retry "flaky" https://\u200Bevil.\u200Bexample/reset or www.\u200Bevil.\u200Bexample`);
+  });
+
+  it("does not cut an emoji in half when clipping Google Chat card text", async () => {
+    const stub = chatStub();
+    vi.stubGlobal("fetch", stub.fetch);
+    await target("google_chat", ["failed"], CHAT_URL);
+    // The emoji's two code units sit either side of the 1000-character cut.
+    await notifyAndSend((await finishedJob("failed", "error", `${"x".repeat(998)}\u{1F600}${"y".repeat(50)}`)).id);
+
+    const raw = stub.calls[0]!.body!;
+    expect(raw).not.toMatch(/\\ud[89ab][0-9a-f]{2}/i);
+    expect(JSON.parse(raw).cardsV2[0].card.sections[0].widgets[1].textParagraph.text).toBe(`${"x".repeat(998)}…`);
   });
 
   it("never stores a Google Chat URL's key or token in an error", async () => {

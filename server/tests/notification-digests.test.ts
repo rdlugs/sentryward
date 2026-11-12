@@ -486,7 +486,8 @@ describe("rendering digests", () => {
     const payload = await builtDigest();
     const body = JSON.parse(await chatDigest(payload));
 
-    expect(body.text).toBe("Daily digest: 2 reviews, 1 blocked, 1 failed");
+    expect(body.text).toBeUndefined();
+    expect(body.fallbackText).toBe("Daily digest: 2 reviews, 1 blocked, 1 failed");
     expect(body.cardsV2).toHaveLength(1);
     const { header, sections } = body.cardsV2[0].card;
     expect(header.title).toBe("Daily digest");
@@ -520,8 +521,8 @@ describe("rendering digests", () => {
 
   it("escapes forge text in a Google Chat digest and stays inside the message size limit", async () => {
     const payload = await builtDigest();
-    // Every character grows sixfold when escaped: the worst a title can do.
-    const hostile = '"'.repeat(3000);
+    // Every character grows fivefold when escaped: the worst a title can do.
+    const hostile = "&".repeat(3000);
     const entry = (base: DigestPayload["reviews"][number], i: number) => ({
       ...base,
       repository: { ...base.repository, fullPath: `<b>acme</b>/${hostile}` },
@@ -556,8 +557,11 @@ describe("rendering digests", () => {
         section.widgets.flatMap((widget) => (widget.decoratedText ? [widget.decoratedText.text] : [])),
     )];
     expect(texts).toHaveLength(16);
-    for (const text of texts) expect(text).not.toMatch(/[<>"]/);
+    for (const text of texts) expect(text).not.toMatch(/[<>]/);
     expect(texts[1]).toContain("&lt;b&gt;acme&lt;/b&gt;/");
+    // A failed row's title is clipped apart from its error, so however long
+    // the title, the reason is still there.
+    for (const text of texts.slice(11)) expect(text).toContain(": &lt;i&gt;boom&lt;/i&gt;");
   });
 
   it("emails a plain-text summary", async () => {

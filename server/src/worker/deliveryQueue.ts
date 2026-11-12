@@ -13,6 +13,7 @@ import {
   recordTargetFailure,
   redactError,
   retryDelayMs,
+  storedHost,
   storedUrl,
 } from "../services/notifications.ts";
 
@@ -134,7 +135,7 @@ export async function runDelivery(id: string, deps: RunDeliveryDeps = defaultDep
     const httpStatus = err instanceof DeliveryError ? err.httpStatus : null;
     // An HTTP failure is fully described by its status, as in the test log.
     const error = httpStatus !== null ? null : redactError(message(err), storedUrl(target));
-    const failure = classifyFailure(err, target.kind);
+    const failure = classifyFailure(err, target.kind, storedHost(target));
     const detail = error ?? `HTTP ${httpStatus}`;
 
     if (failure === "retryable" && row.attempts < MAX_DELIVERY_ATTEMPTS) {
