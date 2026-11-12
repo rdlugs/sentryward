@@ -193,16 +193,21 @@ describe("retry policy", () => {
     expect(classifyFailure(new DeliveryError(404), "google_chat", host)).toBe(expected);
   });
 
-  // The same for Discord, on any of the hosts it serves webhooks from.
+  // The same for Discord, on any of the hosts it serves webhooks from, and
+  // only for Unknown Webhook (10015): a deleted thread is Unknown Channel
+  // (10003), and a 404 with no code says nothing either.
   it.each([
-    ["discord.com", "gone"],
-    ["canary.discord.com", "gone"],
-    ["discordapp.com", "gone"],
-    ["discord.com.evil.example", "permanent"],
-    ["relay.example.com", "permanent"],
-    [null, "permanent"],
-  ] as const)("classifies a 404 for a discord target on %s as %s", (host, expected) => {
-    expect(classifyFailure(new DeliveryError(404), "discord", host)).toBe(expected);
+    ["discord.com", 10015, "gone"],
+    ["canary.discord.com", 10015, "gone"],
+    ["discordapp.com", 10015, "gone"],
+    ["discord.com.", 10015, "gone"],
+    ["discord.com", 10003, "permanent"],
+    ["discord.com", null, "permanent"],
+    ["discord.com.evil.example", 10015, "permanent"],
+    ["relay.example.com", 10015, "permanent"],
+    [null, 10015, "permanent"],
+  ] as const)("classifies a 404 for a discord target on %s with code %s as %s", (host, code, expected) => {
+    expect(classifyFailure(new DeliveryError(404, null, code), "discord", host)).toBe(expected);
   });
 
   // A workflow that is deleted or switched off has no answer to tell it by,
@@ -216,6 +221,14 @@ describe("retry policy", () => {
     expect([1, 2, 3, 4].map((attempts) => retryDelayMs(attempts, err))).toEqual([60_000, 300_000, 1_800_000, 7_200_000]);
     expect(retryDelayMs(1, new DeliveryError(429, 90_000))).toBe(90_000);
     expect(retryDelayMs(2, new DeliveryError(429, null))).toBe(300_000);
+  });
+
+  // A sub-second Retry-After (as Discord sends) would be re-claimed on the
+  // next poll, still inside the burst that was refused.
+  it("waits at least 5 seconds however short a 429 asks", () => {
+    expect(retryDelayMs(1, new DeliveryError(429, 300))).toBe(5_000);
+    expect(retryDelayMs(1, new DeliveryError(429, 0))).toBe(5_000);
+    expect(retryDelayMs(1, new DeliveryError(429, 5_001))).toBe(5_001);
   });
 
   it("reads Retry-After as seconds or a date, within bounds", () => {
@@ -586,9 +599,17 @@ describe("auto-pause", () => {
   ] as const)("pauses a %s target at once when it answers %i", async (kind, status, reason) => {
     const hook = await target(kind, kind === "google_chat" ? CHAT_URL : kind === "discord" ? DISCORD_URL : undefined);
 
-    await deliverJob(failWith(new DeliveryError(status)));
+    await deliverJob(failWith(new DeliveryError(status, null, kind === "discord" ? 10015 : null)));
 
     expect(await reload(hook)).toMatchObject({ active: false, consecutiveFailures: 1, pausedReason: reason });
+  });
+
+  it("counts a 404 for a deleted Discord thread as an ordinary failure", async () => {
+    const hook = await target("discord", `${DISCORD_URL}?thread_id=42`);
+
+    await deliverJob(failWith(new DeliveryError(404, null, 10003)));
+
+    expect(await reload(hook)).toMatchObject({ active: true, consecutiveFailures: 1, pausedReason: null });
   });
 
   it("counts a 404 from a google_chat target that is not on Google's host as an ordinary failure", async () => {

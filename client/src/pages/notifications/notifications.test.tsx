@@ -165,14 +165,15 @@ describe("Notifications", () => {
   })
 
   it.each([
-    ["discord", "Discord", "https://discord.com/api/webhooks/123/token", "discord.com"],
+    ["discord", "Discord", "Webhook URL", "https://discord.com/api/webhooks/123/token", "discord.com"],
     [
       "teams",
       "Microsoft Teams",
+      "Workflows webhook URL",
       "https://prod-12.westeurope.logic.azure.com/workflows/1/triggers/manual/paths/invoke?sig=s",
       "prod-12.westeurope.logic.azure.com",
     ],
-  ])("adds a %s target with its incoming webhook URL and no secret", async (kind, label, url, host) => {
+  ])("adds a %s target with its webhook URL and no secret", async (kind, label, urlLabel, url, host) => {
     const added = { ...webhook, id: "n5", kind, name: "Review channel", host }
     let created = false
     const fetchSpy = mockApi({
@@ -191,7 +192,7 @@ describe("Notifications", () => {
     await userEvent.click(within(sheet).getByRole("combobox", { name: "Type" }))
     await userEvent.click(await screen.findByRole("option", { name: label }))
     await userEvent.type(within(sheet).getByLabelText("Name"), "Review channel")
-    await userEvent.type(within(sheet).getByLabelText("Incoming webhook URL"), url)
+    await userEvent.type(within(sheet).getByLabelText(urlLabel), url)
     await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
 
     const row = (await screen.findByRole("cell", { name: "Review channel" })).closest("tr")!

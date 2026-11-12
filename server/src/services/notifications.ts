@@ -630,6 +630,14 @@ function digestSections(payload: DigestPayload, caps: { blocked: number; failed:
   };
 }
 
+// A failed digest row's label and error clipped apart: the label to its own
+// limit, so a long one cannot push the reason out, and the error to whatever
+// the label left of the row (less the ": " between them). Unescaped.
+function clipFailedRow(row: { label: string; error: string }, labelLimit: number, rowLimit: number) {
+  const label = clipText(row.label, labelLimit);
+  return { label, error: clipText(row.error, rowLimit - label.length - 2) };
+}
+
 // Slack allows 50 blocks a message; these caps keep a digest well under it.
 const SLACK_DIGEST_BLOCKED = 20;
 const SLACK_DIGEST_FAILED = 5;
@@ -758,9 +766,7 @@ function googleChatDigest(payload: DigestPayload) {
   }
   if (failed.rows.length) {
     const widgets: object[] = failed.rows.map((row) => {
-      // Clipped apart, the error with whatever the label left of the limit.
-      const label = clipText(row.label, CHAT_FAILED_LABEL_LIMIT);
-      const error = clipText(row.error, CHAT_LABEL_LIMIT - label.length - 2);
+      const { label, error } = clipFailedRow(row, CHAT_FAILED_LABEL_LIMIT, CHAT_LABEL_LIMIT);
       return item(row.review, `${chatText(label, CHAT_FAILED_LABEL_LIMIT)}: ${chatText(error, CHAT_LABEL_LIMIT)}`);
     });
     if (failed.more > 0) widgets.push(chatParagraph(`and ${failed.more} more`));
@@ -900,9 +906,7 @@ function discordDigest(payload: DigestPayload) {
   section(
     "Failed",
     failed.rows.map((row) => {
-      // Clipped apart, the error with whatever the label left of the limit.
-      const label = clipText(row.label, DISCORD_FAILED_LABEL_LIMIT);
-      const error = clipText(row.error, DISCORD_ROW_LIMIT - label.length - 2);
+      const { label, error } = clipFailedRow(row, DISCORD_FAILED_LABEL_LIMIT, DISCORD_ROW_LIMIT);
       return { review: row.review, text: `${escapeDiscord(label)}: ${escapeDiscord(error)}` };
     }),
     failed.more,
@@ -1005,8 +1009,9 @@ function teamsMessage(payload: NotificationPayload) {
   return teamsCard(body, actions);
 }
 
-// Same rule as teamsMessage; one card. Each row ends in a run of our own that
-// opens its review, so a row needs no button of its own.
+// Same rule as teamsMessage; one card. Each row is the forge text beside a
+// "View review" button: a run's selectAction is not honoured by every Teams
+// client, an Action.OpenUrl in an ActionSet is.
 function teamsDigest(payload: DigestPayload) {
   const body: object[] = [
     teamsHeading(digestName(payload), "Medium"),
@@ -1015,8 +1020,17 @@ function teamsDigest(payload: DigestPayload) {
   ];
   const top = topRepositories(payload);
   if (top) body.push(teamsRich(teamsText(top, TEAMS_TOP_LIMIT)));
-  const item = (review: NotificationPayload, ...runs: object[]) =>
-    teamsRich(...runs, teamsRun(" · "), teamsRun("View review", { selectAction: teamsOpenUrl("View review", review.review.url) }));
+  const item = (review: NotificationPayload, ...runs: object[]) => ({
+    type: "ColumnSet",
+    columns: [
+      { type: "Column", width: "stretch", verticalContentAlignment: "Center", items: [teamsRich(...runs)] },
+      {
+        type: "Column",
+        width: "auto",
+        items: [{ type: "ActionSet", actions: [teamsOpenUrl("View review", review.review.url)] }],
+      },
+    ],
+  });
   const { blocked, failed } = digestSections(payload, { blocked: TEAMS_DIGEST_BLOCKED, failed: TEAMS_DIGEST_FAILED });
   if (blocked.rows.length) {
     body.push(teamsHeading("Still blocked"));
@@ -1026,9 +1040,7 @@ function teamsDigest(payload: DigestPayload) {
   if (failed.rows.length) {
     body.push(teamsHeading("Failed"));
     for (const row of failed.rows) {
-      // Clipped apart, the error with whatever the label left of the limit.
-      const label = clipText(row.label, TEAMS_FAILED_LABEL_LIMIT);
-      const error = clipText(row.error, TEAMS_LABEL_LIMIT - label.length - 2);
+      const { label, error } = clipFailedRow(row, TEAMS_FAILED_LABEL_LIMIT, TEAMS_LABEL_LIMIT);
       body.push(item(row.review, teamsText(`${label}: ${error}`, TEAMS_LABEL_LIMIT)));
     }
     if (failed.more > 0) body.push(teamsLine(`and ${failed.more} more`));
@@ -1119,6 +1131,9 @@ export class DeliveryError extends Error {
   constructor(
     readonly httpStatus: number,
     readonly retryAfterMs: number | null = null,
+    // The service's own error code from the response body, when it gives one
+    // (Discord's JSON `code`); read only for a 404, where it tells why.
+    readonly serviceCode: number | null = null,
   ) {
     super(`Responded with ${httpStatus}`);
   }
@@ -1134,6 +1149,10 @@ export const MAX_DELIVERY_ATTEMPTS = 5;
 export const RETRY_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
 // A Retry-After past this is a misconfigured endpoint, not a plan to follow.
 const MAX_RETRY_AFTER_MS = 6 * 60 * 60_000;
+// And one short of this is not followed as written: a delivery re-claimed on
+// the next poll lands in the same burst that was refused (Discord asks for a
+// fraction of a second), and a few of those use up every attempt.
+const MIN_RETRY_AFTER_MS = 5_000;
 
 // Retry-After is either delay-seconds or an HTTP date. Whole seconds by the
 // standard; Discord may send a fraction, which is taken as written.
@@ -1159,13 +1178,22 @@ export const DISCORD_HOSTS: ReadonlySet<string> = new Set([
   "canary.discordapp.com",
 ]);
 
+// Discord's code for a webhook that no longer exists. A deleted thread named
+// by `?thread_id=` is also a 404, but Unknown Channel (10003): the webhook is
+// fine and only the URL needs changing, so that is not "gone".
+const DISCORD_UNKNOWN_WEBHOOK = 10015;
+
 // A 404 that means the target itself is gone. Only when the service answers:
 // a google_chat or discord target may point at a relay, whose 404 says nothing
-// about the space or the webhook.
-function goneOn404(kind: NotificationKind, host: string | null): boolean {
+// about the space or the webhook. A fully qualified host (`discord.com.`) is
+// the same host.
+function goneOn404(kind: NotificationKind, host: string | null, err: DeliveryError): boolean {
+  const name = host?.replace(/\.$/, "") ?? null;
   if (kind === "slack") return true;
-  if (kind === "google_chat") return host === GOOGLE_CHAT_HOST;
-  if (kind === "discord") return host !== null && DISCORD_HOSTS.has(host);
+  if (kind === "google_chat") return name === GOOGLE_CHAT_HOST;
+  if (kind === "discord") {
+    return name !== null && DISCORD_HOSTS.has(name) && err.serviceCode === DISCORD_UNKNOWN_WEBHOOK;
+  }
   return false;
 }
 
@@ -1174,8 +1202,9 @@ function goneOn404(kind: NotificationKind, host: string | null): boolean {
 // incoming webhook, and nothing else uses 410 lightly. Google Chat is taken to
 // answer 404 for a deleted webhook or space, but only when it is Google
 // answering: a google_chat target may point at a relay, whose 404 says nothing
-// about the space, so there it is an ordinary failure. Discord answers 404
-// (Unknown Webhook) for a deleted webhook, under the same condition. A Teams
+// about the space, so there it is an ordinary failure. Discord answers 404 with
+// code 10015 (Unknown Webhook) for a deleted webhook, under the same
+// condition; any other 404 from it is an ordinary failure. A Teams
 // workflow has no such answer to rely on: one that is switched off or deleted
 // counts as an ordinary failure. `host` is the host of the target's URL, null
 // when there is none to read.
@@ -1183,7 +1212,7 @@ export function classifyFailure(err: unknown, kind: NotificationKind, host: stri
   if (err instanceof DeliveryError) {
     const status = err.httpStatus;
     if (status === 410) return "gone";
-    if (status === 404 && goneOn404(kind, host)) return "gone";
+    if (status === 404 && goneOn404(kind, host, err)) return "gone";
     if (status === 408 || status === 429 || status >= 500) return "retryable";
     return "permanent";
   }
@@ -1195,7 +1224,7 @@ export function classifyFailure(err: unknown, kind: NotificationKind, host: stri
 // How long to wait after the nth failed send (attempts = n) before the next.
 export function retryDelayMs(attempts: number, err: unknown): number {
   const backoff = RETRY_BACKOFF_MS[Math.min(attempts, RETRY_BACKOFF_MS.length) - 1]!;
-  if (err instanceof DeliveryError && err.retryAfterMs !== null) return err.retryAfterMs;
+  if (err instanceof DeliveryError && err.retryAfterMs !== null) return Math.max(err.retryAfterMs, MIN_RETRY_AFTER_MS);
   return backoff;
 }
 
@@ -1219,7 +1248,23 @@ async function post(url: string, body: string, headers: Record<string, string> =
     signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
   });
   if (!res.ok) {
-    throw new DeliveryError(res.status, res.status === 429 ? parseRetryAfter(res.headers.get("retry-after")) : null);
+    const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get("retry-after")) : null;
+    throw new DeliveryError(res.status, retryAfter, res.status === 404 ? await serviceCode(res) : null);
+  }
+}
+
+// The numeric `code` of a JSON error body. Read with a cap, since the body is
+// whoever answers; anything unexpected is no code at all.
+const SERVICE_CODE_BODY_LIMIT = 4096;
+
+async function serviceCode(res: Response): Promise<number | null> {
+  try {
+    const text = await res.text();
+    if (text.length > SERVICE_CODE_BODY_LIMIT) return null;
+    const code = (JSON.parse(text) as { code?: unknown } | null)?.code;
+    return typeof code === "number" ? code : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1317,6 +1362,20 @@ export function message(err: unknown): string {
 
 const STORED_ERROR_LIMIT = 500;
 const MIN_REDACTED_PART = 8;
+// Fixed path segments of the services' webhook URLs. Taken on their own they
+// are ordinary words a message may use ("workflows endpoint"), so they are not
+// cut out alone; the paths and URLs that contain them still are.
+const STATIC_URL_SEGMENTS: ReadonlySet<string> = new Set([
+  "webhooks",
+  "workflows",
+  "triggers",
+  "messages",
+  "services",
+  "invoke",
+  "manual",
+  "paths",
+  "spaces",
+]);
 
 // Members can read stored errors, and the URL (or its query) may be the
 // credential, so it is cut out of whatever a library put in the message
@@ -1344,6 +1403,7 @@ export function redactError(error: string, url: string | null): string {
         parts.add(parsed.pathname);
         parts.add(decoded(parsed.pathname));
         for (const segment of parsed.pathname.split("/")) {
+          if (STATIC_URL_SEGMENTS.has(segment)) continue;
           parts.add(segment);
           parts.add(decoded(segment));
         }

@@ -673,12 +673,21 @@ describe("rendering digests", () => {
     expect(body.attachments[0].contentType).toBe("application/vnd.microsoft.card.adaptive");
     const card = body.attachments[0].content;
     const run = (text: string) => ({ type: "TextRun", text });
+    // The forge text beside a button of its own, which every client honours.
     const row = (text: unknown, url: string) => ({
-      type: "RichTextBlock",
-      inlines: [
-        { type: "TextRun", text },
-        run(" · "),
-        { type: "TextRun", text: "View review", selectAction: { type: "Action.OpenUrl", title: "View review", url } },
+      type: "ColumnSet",
+      columns: [
+        {
+          type: "Column",
+          width: "stretch",
+          verticalContentAlignment: "Center",
+          items: [{ type: "RichTextBlock", inlines: [{ type: "TextRun", text }] }],
+        },
+        {
+          type: "Column",
+          width: "auto",
+          items: [{ type: "ActionSet", actions: [{ type: "Action.OpenUrl", title: "View review", url }] }],
+        },
       ],
     });
     expect(card.body).toEqual([
@@ -702,9 +711,12 @@ describe("rendering digests", () => {
     const raw = await teamsDigest(worst);
 
     expect(Buffer.byteLength(raw)).toBeLessThan(28_000);
-    const { body } = JSON.parse(raw).attachments[0].content as {
-      body: { type: string; text?: string; inlines?: { text: string }[] }[];
-    };
+    type Element = { type: string; text?: string; inlines?: { text: string }[]; columns?: { items: Element[] }[] };
+    const content = JSON.parse(raw).attachments[0].content as { body: Element[] };
+    // A row's text sits in the first column of its ColumnSet.
+    const body = content.body.flatMap((element) =>
+      element.type === "ColumnSet" ? element.columns!.flatMap((column) => column.items) : [element],
+    );
     // Every TextBlock, which renders markdown, is one of our own lines.
     const blocks = body.flatMap((element) => (element.type === "TextBlock" ? [element.text] : []));
     expect(blocks).toEqual([

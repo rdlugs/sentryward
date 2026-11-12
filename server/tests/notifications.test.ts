@@ -680,6 +680,23 @@ describe("notifyJob", () => {
     allowed_mentions: { parse: [] },
   });
 
+  // The code comes from Discord's JSON error body: only Unknown Webhook says
+  // the webhook is gone, Unknown Channel is a deleted thread.
+  it.each([
+    [10015, false],
+    [10003, true],
+  ])("reads Discord's code %i from a 404 (active afterwards: %s)", async (code, active) => {
+    const stub = fetchStub([{ method: "POST", url: /discord\.com\/api\/webhooks/, status: 404, body: { code } }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const hook = await target("discord", ["failed"], DISCORD_URL);
+    const job = await finishedJob("failed", "error", "boom");
+
+    await notifyAndSend(job.id);
+
+    const stored = await prisma.notificationTarget.findUniqueOrThrow({ where: { id: hook.id } });
+    expect(stored.active).toBe(active);
+  });
+
   it("posts a failed review to Discord as an embed with its error and a review link", async () => {
     const stub = discordStub();
     vi.stubGlobal("fetch", stub.fetch);
@@ -1417,6 +1434,21 @@ describe("delivery log", () => {
 
     const encoded = "https://hooks.example.com/in?sig=a%2Fb%2Bc%3Dd123";
     expect(redactError("bad signature a/b+c=d123", encoded)).toBe("bad signature [redacted]");
+  });
+
+  // The fixed words of a webhook URL are not a credential on their own.
+  it("keeps the fixed segments of a webhook URL as words", () => {
+    const url =
+      "https://prod-12.westeurope.logic.azure.com:443/workflows/0123456789abcdef/triggers/manual/paths/invoke?sig=teams-sig-value";
+    expect(redactError("request to workflows endpoint failed: triggers unavailable", url)).toBe(
+      "request to workflows endpoint failed: triggers unavailable",
+    );
+    expect(redactError("workflow 0123456789abcdef refused teams-sig-value", url)).toBe(
+      "workflow [redacted] refused [redacted]",
+    );
+    expect(redactError("no such path /workflows/0123456789abcdef/triggers/manual/paths/invoke", url)).toBe(
+      "no such path [redacted]",
+    );
   });
 
   it("flattens and clips stored errors", () => {

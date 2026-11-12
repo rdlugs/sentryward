@@ -247,6 +247,17 @@ const URL_PLACEHOLDERS: Record<Exclude<NotificationKind, "email">, string> = {
   teams: "https://....logic.azure.com/workflows/.../triggers/manual/paths/invoke?...",
 }
 
+// What each service calls the URL it hands out. Teams in particular: its old
+// "incoming webhook" connectors take a different message format and are being
+// retired, so the label names the Workflows webhook this kind expects.
+const URL_LABELS: Record<Exclude<NotificationKind, "email">, { add: string; edit: string }> = {
+  webhook: { add: "URL", edit: "New URL" },
+  slack: { add: "Incoming webhook URL", edit: "New incoming webhook URL" },
+  google_chat: { add: "Incoming webhook URL", edit: "New incoming webhook URL" },
+  discord: { add: "Webhook URL", edit: "New webhook URL" },
+  teams: { add: "Workflows webhook URL", edit: "New Workflows webhook URL" },
+}
+
 const KIND_OPTIONS = (Object.keys(KIND_LABELS) as NotificationKind[]).map((kind) => ({
   value: kind,
   label: KIND_LABELS[kind],
@@ -660,7 +671,7 @@ function AddTargetSheet({
                 <TextField
                   control={form.control}
                   name="url"
-                  label={kind === "webhook" ? "URL" : "Incoming webhook URL"}
+                  label={URL_LABELS[kind].add}
                   type="url"
                   autoComplete="off"
                   placeholder={URL_PLACEHOLDERS[kind]}
@@ -765,7 +776,7 @@ function EditTargetSheet({
                 <TextField
                   control={form.control}
                   name="url"
-                  label={target.kind === "webhook" ? "New URL" : "New incoming webhook URL"}
+                  label={URL_LABELS[target.kind].edit}
                   type="url"
                   autoComplete="off"
                   placeholder={target.host ? `https://${target.host}/...` : URL_PLACEHOLDERS[target.kind]}
