@@ -1,7 +1,7 @@
 import type { Config } from "../config/schema.ts";
 import { bucketFor } from "../core/buckets.ts";
 import { fingerprint } from "../core/fingerprint.ts";
-import { isAddedLine, newFileLines, type ChangedFile, type ChangeSet, type Finding, type ToolAnnotation } from "../core/models.ts";
+import { hunkAt, isAddedLine, newFileLines, type ChangedFile, type ChangeSet, type Finding, type ToolAnnotation } from "../core/models.ts";
 import { atLeast, severityRank } from "../core/severity.ts";
 import type { ModelFinding } from "../llm/schemas.ts";
 import { DEFAULT_RULE_CATEGORY, modelRuleFor, ruleFloor, ruleMinConfidence } from "../rules.ts";
@@ -40,22 +40,27 @@ export interface ValidationResult {
   findings: Finding[];
   dropped: Partial<Record<DropReason, number>>;
   demoted: number;
-  // Suggestions removed for repeating the lines they replace (findings kept).
-  noopSuggestions: number;
 }
 
-// Trailing whitespace and blank edges are formatting noise a model adds or
-// drops freely. Leading indentation is not: in Python or YAML it is the fix.
-function normalizeCode(lines: string[]): string {
-  const trimmed = lines.map((line) => line.trimEnd());
-  while (trimmed.length > 0 && trimmed[0] === "") trimmed.shift();
-  while (trimmed.length > 0 && trimmed.at(-1) === "") trimmed.pop();
-  return trimmed.join("\n");
+export interface ModelValidationResult extends ValidationResult {
+  // noopKey of each finding whose suggestion was removed for repeating the
+  // lines it replaces (the finding was kept). Keys, not a count: later stages
+  // still drop findings, and only published ones should be counted.
+  noopStripped: Set<string>;
+}
+
+// Survives demotion, which changes kind and so the fingerprint.
+export function noopKey(finding: Pick<Finding, "file" | "startLine" | "endLine" | "title">): string {
+  return `${finding.file}:${finding.startLine}:${finding.endLine}:${finding.title}`;
 }
 
 // An "apply" button that changes nothing reads as a reviewer bug, not a fix.
+// Compared as applied: the fence drops one trailing newline and the forge
+// replaces the lines with the rest, so blank lines, trailing whitespace and
+// indentation are all real edits. Line endings are not compared: parsePatch
+// already turned the hunk's \r\n into \n.
 export function isNoopSuggestion(suggestion: string, current: string[]): boolean {
-  return normalizeCode(suggestion.replace(/\r\n/g, "\n").split("\n")) === normalizeCode(current);
+  return suggestion.replace(/\r\n/g, "\n").replace(/\n$/, "") === current.join("\n");
 }
 
 function nearestAdded(file: ChangedFile, line: number): number | undefined {
@@ -75,7 +80,7 @@ function nearestAdded(file: ChangedFile, line: number): number | undefined {
 // forge rejects it. Collapse to the first line rather than lose the finding.
 function clampEnd(file: ChangedFile, start: number, end: number): number {
   if (end <= start) return start;
-  const hunk = file.hunks.find((h) => h.newLineToPosition[String(start)] !== undefined);
+  const hunk = hunkAt(file, start);
   return hunk && hunk.newLineToPosition[String(end)] !== undefined ? end : start;
 }
 
@@ -146,7 +151,7 @@ export function validateFindings(
   // cap: false leaves review.max_findings to the caller, for a pipeline that
   // drops more findings first (claim checks) and caps afterwards.
   options: { cap?: boolean } = {},
-): ValidationResult {
+): ModelValidationResult {
   const dropped: Partial<Record<DropReason, number>> = {};
   const drop = (reason: DropReason) => {
     dropped[reason] = (dropped[reason] ?? 0) + 1;
@@ -154,7 +159,7 @@ export function validateFindings(
   const files = new Map(reviewed.map((file) => [file.path, file]));
   const categories = new Set(config.review.categories);
   let demoted = 0;
-  let noopSuggestions = 0;
+  const noopStripped = new Set<string>();
   const kept = new Map<string, Finding>();
 
   for (const candidate of raw) {
@@ -226,10 +231,11 @@ export function validateFindings(
     let suggestion =
       config.review.committableSuggestions && candidate.suggestion?.trim() ? candidate.suggestion : undefined;
     if (suggestion !== undefined) {
-      const current = newFileLines(file, start, end);
+      const hunk = hunkAt(file, start);
+      const current = hunk && newFileLines(hunk, start, end);
       if (current && isNoopSuggestion(suggestion, current)) {
         suggestion = undefined;
-        noopSuggestions += 1;
+        noopStripped.add(noopKey({ file: file.path, startLine: start, endLine: end, title }));
       }
     }
     const impact = candidate.impact.trim();
@@ -279,10 +285,10 @@ export function validateFindings(
   }
 
   const sorted = [...kept.values()].sort(compareFindings);
-  if (options.cap === false) return { findings: sorted, dropped, demoted, noopSuggestions };
+  if (options.cap === false) return { findings: sorted, dropped, demoted, noopStripped };
   const capped = capFindings(sorted, config.review.maxFindings);
   if (capped.overLimit > 0) dropped.over_limit = capped.overLimit;
-  return { findings: capped.findings, dropped, demoted, noopSuggestions };
+  return { findings: capped.findings, dropped, demoted, noopStripped };
 }
 
 // The first `max` of findings already sorted by compareFindings.
@@ -292,9 +298,26 @@ export function capFindings(findings: Finding[], max: number): { findings: Findi
 
 // The stronger of two reports of one problem. Its claim survives only if both
 // made one: a claim can only remove a finding, so a report that rested on no
-// claim must not be dropped through its twin's.
+// claim must not be dropped through its twin's. A suggestion the kept report
+// lacks (none given, or removed as a no-op) comes from its twin, but only on
+// the same lines: the fingerprint leaves lines out, and a suggestion replaces
+// exactly the lines it was written for.
 function mergeDuplicate(existing: Finding, candidate: Finding): Finding {
-  const kept = stronger(existing, candidate);
+  let kept = stronger(existing, candidate);
+  const other = kept === existing ? candidate : existing;
+  if (
+    kept.suggestion === undefined &&
+    other.suggestion !== undefined &&
+    other.startLine === kept.startLine &&
+    other.endLine === kept.endLine
+  ) {
+    const { fixRationale: _fixRationale, ...rest } = kept;
+    kept = {
+      ...rest,
+      suggestion: other.suggestion,
+      ...(other.fixRationale ? { fixRationale: other.fixRationale } : {}),
+    };
+  }
   if (!kept.claim || (existing.claim && candidate.claim)) return kept;
   const { claim: _claim, ...rest } = kept;
   return rest;
@@ -387,5 +410,5 @@ export function validateToolFindings(
     kept.set(finding.fingerprint, existing ? stronger(existing, finding) : finding);
   }
 
-  return { findings: [...kept.values()].sort(compareFindings), dropped, demoted: 0, noopSuggestions: 0 };
+  return { findings: [...kept.values()].sort(compareFindings), dropped, demoted: 0 };
 }

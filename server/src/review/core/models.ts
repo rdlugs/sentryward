@@ -101,12 +101,15 @@ export function isAddedLine(file: ChangedFile, newLine: number): boolean {
   return file.hunks.some((hunk) => hunk.addedLines.includes(newLine));
 }
 
-// The new-file text of lines start..end, read from the one hunk that holds
-// them. Undefined when any of them is not in the diff (a full_file finding on
+// The hunk that shows new-file line `newLine`, as an added or context line.
+export function hunkAt(file: ChangedFile, newLine: number): Hunk | undefined {
+  return file.hunks.find((hunk) => hunk.newLineToPosition[String(newLine)] !== undefined);
+}
+
+// The new-file text of lines start..end, read from `hunk` (hunkAt(file,
+// start)). Undefined when any of them is not in it (a full_file finding on
 // unchanged code): then there is nothing to compare a suggestion against.
-export function newFileLines(file: ChangedFile, start: number, end: number): string[] | undefined {
-  const hunk = file.hunks.find((h) => h.newLineToPosition[String(start)] !== undefined);
-  if (!hunk) return undefined;
+export function newFileLines(hunk: Hunk, start: number, end: number): string[] | undefined {
   const found: string[] = [];
   let newLine = hunk.newStart;
   // The first line of content is the @@ header.

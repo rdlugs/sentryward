@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { diffPosition, isAddedLine, newFileLines, type ChangedFile } from "../src/review/core/models.ts";
+import { diffPosition, hunkAt, isAddedLine, newFileLines, type ChangedFile } from "../src/review/core/models.ts";
 import { parsePatch, parseUnifiedDiff, toChangedFile } from "../src/review/diff/parse.ts";
 
 const fixture = join(import.meta.dirname, "fixtures/diffs/basic");
@@ -117,15 +117,19 @@ describe("newFileLines", () => {
     patchUnavailable: false,
     hunks: parsePatch("@@ -5,4 +5,4 @@\n keep\n-gone\n+added\n tail\n-last\n\\ No newline at end of file\n+last\n"),
   };
+  const lines = (start: number, end: number) => {
+    const hunk = hunkAt(file, start);
+    return hunk && newFileLines(hunk, start, end);
+  };
 
   it("reads new-file text across removed lines and no-newline markers", () => {
-    expect(newFileLines(file, 5, 6)).toEqual(["keep", "added"]);
-    expect(newFileLines(file, 6, 8)).toEqual(["added", "tail", "last"]);
+    expect(lines(5, 6)).toEqual(["keep", "added"]);
+    expect(lines(6, 8)).toEqual(["added", "tail", "last"]);
   });
 
   it("is undefined for a line the diff does not hold", () => {
-    expect(newFileLines(file, 4, 4)).toBeUndefined();
-    expect(newFileLines(file, 8, 9)).toBeUndefined();
+    expect(hunkAt(file, 4)).toBeUndefined();
+    expect(lines(8, 9)).toBeUndefined();
   });
 });
 

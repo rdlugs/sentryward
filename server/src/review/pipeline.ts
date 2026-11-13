@@ -28,7 +28,7 @@ import { reviewChunkAgentic } from "./llm/agenticReview.ts";
 import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/providers.ts";
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
-import { capFindings, compareFindings, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
+import { capFindings, compareFindings, noopKey, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
 import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkClaims } from "./validate/claims.ts";
 import { checkPatternRules } from "./rules.ts";
@@ -393,6 +393,12 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   );
   const capped = overLimit > 0 ? reviewed.slice(0, config.review.maxFindings) : reviewed;
   const findings = carried.length ? [...capped, ...carried].sort(compareFindings) : capped;
+  // Counted on what is published: a no-op on a finding later dropped as a
+  // duplicate, dismissed, refuted or over the cap wasted no "apply" button.
+  // A merged twin may have given it a real suggestion back.
+  const noopSuggestions = capped.filter(
+    (finding) => finding.suggestion === undefined && validation.noopStripped.has(noopKey(finding)),
+  ).length;
   const dropped: Partial<Record<DropReason, number>> = { ...validation.dropped };
   const extra: [DropReason, number][] = [
     ...(Object.entries(claims.dropped) as [DropReason, number][]),
@@ -438,7 +444,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
         }
       : {}),
     coverage: { reviewedFiles, omissions, passes: plan.chunks.length },
-    validation: { dropped, demoted: validation.demoted + verified.demoted, noopSuggestions: validation.noopSuggestions },
+    validation: { dropped, demoted: validation.demoted + verified.demoted, noopSuggestions },
     usage,
     verdict: {
       verdict: verdictFor(status, findings, blockOn, config.review.toolFindingsBlock),

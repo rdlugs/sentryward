@@ -12,7 +12,7 @@ import { classifyFiles } from "../src/review/context/ignore.ts";
 import { MAX_MANIFEST_CHARS, reviewUserPrompt, threadAnswerUserPrompt } from "../src/review/llm/prompt.ts";
 import { generateWithFallback, ModelCallError } from "../src/review/llm/providers.ts";
 import { MAX_STORED_PATCH_CHARS, MAX_STORED_PATCHES_CHARS, runReview } from "../src/review/pipeline.ts";
-import { validateFindings } from "../src/review/validate/validator.ts";
+import { noopKey, validateFindings } from "../src/review/validate/validator.ts";
 import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { WALKTHROUGH, fakeModel, modelFinding } from "./helpers/model.ts";
 
@@ -201,16 +201,24 @@ describe("validateFindings", () => {
     expect(result.findings[0]!.suggestion).toBeUndefined();
     // The rationale explained a fix that is no longer shown.
     expect(result.findings[0]!.fixRationale).toBeUndefined();
-    expect(result.noopSuggestions).toBe(1);
+    expect(result.noopStripped).toEqual(new Set([noopKey(result.findings[0]!)]));
   });
 
-  it("ignores trailing whitespace and blank edges, but not indentation, when comparing a suggestion", () => {
+  it("compares a suggestion as applied: only the final newline and line endings are ignored", () => {
     const suggestionOf = (suggestion: string) => validate([modelFinding({ suggestion })]).findings[0]!.suggestion;
-    expect(suggestionOf("const b = a + 1;   \r\n")).toBeUndefined();
-    expect(suggestionOf("\nconst b = a + 1;\n\n")).toBeUndefined();
-    // Indentation is the fix in Python or YAML.
-    expect(suggestionOf("  const b = a + 1;")).toBe("  const b = a + 1;");
-    expect(suggestionOf("const b = a + 1n;")).toBe("const b = a + 1n;");
+    // The fence drops one trailing newline; parsePatch already dropped \r.
+    expect(suggestionOf("const b = a + 1;\n")).toBeUndefined();
+    expect(suggestionOf("const b = a + 1;\r\n")).toBeUndefined();
+    // Each of these changes the file when applied.
+    for (const changed of [
+      "\n\nconst b = a + 1;",
+      "const b = a + 1;\n\n",
+      "const b = a + 1;   ",
+      "  const b = a + 1;",
+      "const b = a + 1n;",
+    ]) {
+      expect(suggestionOf(changed)).toBe(changed);
+    }
   });
 
   it("compares a multi-line suggestion against the whole range", () => {
@@ -218,18 +226,34 @@ describe("validateFindings", () => {
       validate([modelFinding({ startLine: 11, endLine: 12, suggestion })]);
     const same = multi("const b = a + 1;\nconst c = b * 2;");
     expect(same.findings[0]!.suggestion).toBeUndefined();
-    expect(same.noopSuggestions).toBe(1);
+    expect(same.noopStripped.size).toBe(1);
     const changed = multi("const b = a + 1;\nconst c = b * 3;");
     expect(changed.findings[0]!.suggestion).toBe("const b = a + 1;\nconst c = b * 3;");
-    expect(changed.noopSuggestions).toBe(0);
+    expect(changed.noopStripped.size).toBe(0);
   });
 
   it("keeps a suggestion on lines outside the diff, where there is nothing to compare", () => {
-    const { findings, noopSuggestions } = validate([modelFinding({ startLine: 40, endLine: 40, suggestion: "x" })], {
+    const { findings, noopStripped } = validate([modelFinding({ startLine: 40, endLine: 40, suggestion: "x" })], {
       review: { fullFile: true },
     });
     expect(findings[0]!.suggestion).toBe("x");
-    expect(noopSuggestions).toBe(0);
+    expect(noopStripped.size).toBe(0);
+  });
+
+  it("gives a duplicate the suggestion its twin made for the same lines", () => {
+    const noop = modelFinding({ confidence: 0.9, suggestion: "const b = a + 1;", fixRationale: "Same line." });
+    const real = modelFinding({ confidence: 0.8, suggestion: "const b = BigInt(a) + 1n;", fixRationale: "BigInt cannot overflow." });
+    const { findings, dropped } = validate([noop, real]);
+    expect(dropped).toEqual({ duplicate: 1 });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ confidence: 0.9, suggestion: "const b = BigInt(a) + 1n;", fixRationale: "BigInt cannot overflow." });
+
+    // A suggestion replaces exactly the lines it was written for.
+    const elsewhere = modelFinding({ startLine: 11, endLine: 12, confidence: 0.8, suggestion: "const b = 0;\nconst c = 0;" });
+    const merged = validate([noop, elsewhere]).findings;
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ startLine: 11, endLine: 11, confidence: 0.9 });
+    expect(merged[0]!.suggestion).toBeUndefined();
   });
 
   it("drops a finding whose fingerprint this team dismissed, but not otherwise", () => {
