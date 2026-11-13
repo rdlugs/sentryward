@@ -1,7 +1,7 @@
 import type { Config } from "../review/config/schema.ts";
 import type { PipelineProgress, ReviewProgress, ReviewStep } from "../review/core/models.ts";
 import { publishes } from "../review/publish/publisher.ts";
-import { verifies } from "../review/validate/verify.ts";
+import { checksFindings } from "../review/validate/verify.ts";
 import { recordProgress } from "./queue.ts";
 
 export type WriteProgress = (id: string, attempts: number, progress: ReviewProgress) => Promise<void>;
@@ -16,12 +16,14 @@ export interface ProgressRecorder {
 
 // The steps a run with this config goes through, from the same checks that
 // decide whether the pipeline and runJob report verifying and publishing.
+// The worker always gives the pipeline a context source, so claim checks run
+// whenever they are on.
 export function reviewSteps(config: Config): ReviewStep[] {
   return [
     "fetching",
     "preparing",
     "reviewing",
-    ...(verifies(config) ? (["verifying"] as const) : []),
+    ...(checksFindings(config) ? (["verifying"] as const) : []),
     ...(publishes(config) ? (["publishing"] as const) : []),
   ];
 }

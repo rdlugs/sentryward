@@ -1,0 +1,10 @@
+title: Audit invoice refunds
+description: Records an audit event after each refund.
+language: typescript
+traps:
+  - file: src/billing/refunds.ts
+    lines: [2, 2]
+    note: src/lib/audit.ts exists at the head and exports audit, though the diff does not show it; with check_claims a missing_path claim on this import is refuted
+  - file: src/billing/refunds.ts
+    lines: [10, 10]
+    note: audit is defined in src/lib/audit.ts, which the change does not touch, and the event shape is what the log shipper expects

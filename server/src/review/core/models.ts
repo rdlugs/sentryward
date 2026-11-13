@@ -110,6 +110,16 @@ export const RESULT_SCHEMA_VERSION = 1;
 export const bucketSchema = z.enum(["actionable", "outside_diff", "nitpick", "requirement_gap"]);
 export type Bucket = z.infer<typeof bucketSchema>;
 
+// A fact a finding rests on that the repository can confirm or refute without
+// a model call (validate/claims.ts): a path that does not exist, a symbol or a
+// file nothing references.
+export const CLAIM_KINDS = ["missing_path", "unused_symbol", "unreferenced_file"] as const;
+export const claimSchema = z.object({
+  kind: z.enum(CLAIM_KINDS),
+  subject: z.string(),
+});
+export type Claim = z.infer<typeof claimSchema>;
+
 export const findingSchema = z.object({
   file: z.string(),
   startLine: z.number().int().positive(),
@@ -140,6 +150,9 @@ export const findingSchema = z.object({
   source: z.enum(["llm", "tool", "rule"]),
   tool: z.string().optional(),
   ruleId: z.string().optional(),
+  // What the model said the finding rests on; checked before publishing and
+  // never part of the fingerprint. Absent when it named none.
+  claim: claimSchema.optional(),
   fingerprint: z.string(),
   // The model of the review pass that raised it (not the verifier's). Absent
   // for tool and rule findings, and in results stored before it was recorded.

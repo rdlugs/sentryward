@@ -772,7 +772,10 @@ describe("runJob", () => {
     await prisma.repository.update({
       where: { id: repositoryId },
       data: {
-        settings: { review: { verify: "off" }, output: { postInline: false, postSummary: false, postCheck: false, walkthrough: false } },
+        settings: {
+          review: { verify: "off", checkClaims: false },
+          output: { postInline: false, postSummary: false, postCheck: false, walkthrough: false },
+        },
       },
     });
     const job = await claimedJob();
@@ -1357,9 +1360,9 @@ describe("walkthroughEnabled", () => {
 });
 
 describe("reviewSteps", () => {
-  const withSettings = (verify: "off" | "blocking", publish: boolean) => ({
+  const withSettings = (verify: "off" | "blocking", publish: boolean, checkClaims = false) => ({
     ...DEFAULT_CONFIG,
-    review: { ...DEFAULT_CONFIG.review, verify },
+    review: { ...DEFAULT_CONFIG.review, verify, checkClaims },
     output: publish
       ? DEFAULT_CONFIG.output
       : { ...DEFAULT_CONFIG.output, postInline: false, postSummary: false, postCheck: false, walkthrough: false, blastRadiusLabel: false, effortLabel: false },
@@ -1369,6 +1372,10 @@ describe("reviewSteps", () => {
     expect(reviewSteps(withSettings("blocking", true))).toEqual(["fetching", "preparing", "reviewing", "verifying", "publishing"]);
     expect(reviewSteps(withSettings("off", true))).toEqual(["fetching", "preparing", "reviewing", "publishing"]);
     expect(reviewSteps(withSettings("blocking", false))).toEqual(["fetching", "preparing", "reviewing", "verifying"]);
+  });
+
+  it("lists verifying for claim checks without the verifier", () => {
+    expect(reviewSteps(withSettings("off", true, true))).toEqual(["fetching", "preparing", "reviewing", "verifying", "publishing"]);
   });
 });
 

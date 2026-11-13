@@ -16,7 +16,7 @@ import {
   type SpentTokens,
 } from "./providers.ts";
 import type { ChunkReview } from "./review.ts";
-import { repairReviewOutput, reviewOutputSchema, type ReviewOutput } from "./schemas.ts";
+import { repairReviewOutput, reviewOutputSchemaFor, type ReviewOutput } from "./schemas.ts";
 
 export interface AgenticChunkReview extends ChunkReview {
   // What the pass read through its tools, as CONTEXT blocks for the verifier.
@@ -40,7 +40,8 @@ export async function reviewChunkAgentic(
   const models = modelChain(config.llm, "review");
   const errors: unknown[] = [];
   const failedAttempts: SpentTokens[] = [];
-  const system = agenticSystemPrompt(reviewSystemPrompt(config), reviewOutputSchema, "code_review");
+  const schema = reviewOutputSchemaFor(config);
+  const system = agenticSystemPrompt(reviewSystemPrompt(config), schema, "code_review");
   for (const model of models) {
     // Each model starts its own budget; the searches stay shared.
     const { tools, reads } = agentTools({ ...context, maxToolTokens: config.review.agent.maxToolTokens });
@@ -50,7 +51,7 @@ export async function reviewChunkAgentic(
         model,
         system,
         prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest),
-        schema: reviewOutputSchema,
+        schema,
         schemaName: "code_review",
         repair: repairReviewOutput,
         temperature: config.llm.temperature,

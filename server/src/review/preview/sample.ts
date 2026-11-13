@@ -78,6 +78,7 @@ function finding(overrides: Partial<ModelFinding> & Pick<ModelFinding, "file" | 
     evidenceNote: "",
     evidenceFiles: [],
     ruleId: null,
+    claim: null,
     ...overrides,
   };
 }

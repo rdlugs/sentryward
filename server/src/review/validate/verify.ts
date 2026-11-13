@@ -105,6 +105,12 @@ export function verifies(config: Config): boolean {
   return config.review.verify !== "off";
 }
 
+// Whether a run checks its findings at all, by claim lookups or the verifier.
+// The dashboard's "verifying" step covers both.
+export function checksFindings(config: Config): boolean {
+  return verifies(config) || config.review.checkClaims;
+}
+
 // A second, independent look at the findings that matter. Verification only
 // ever weakens a finding: a refuted one is dropped, an uncertain one demoted,
 // and a failed call keeps the finding as the review reported it.

@@ -20,6 +20,7 @@ export function modelFinding(overrides: Partial<ModelFinding> = {}): ModelFindin
     evidenceNote: "main() is called with Number.MAX_SAFE_INTEGER from the CLI.",
     evidenceFiles: [],
     ruleId: null,
+    claim: null,
     ...overrides,
   };
 }

@@ -5,6 +5,7 @@ export const INHERIT = "__inherit"
 // Every boolean the form edits, keyed by where it lives in a config.
 export const FLAGS = [
   { name: "requireEvidence", section: "review" },
+  { name: "checkClaims", section: "review" },
   { name: "suppressIgnored", section: "review" },
   { name: "fullFile", section: "review" },
   { name: "committableSuggestions", section: "review" },

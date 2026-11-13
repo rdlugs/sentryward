@@ -37,6 +37,7 @@ const effective = {
     fileContext: true,
     impactDepth: 2,
     verify: "blocking",
+    checkClaims: true,
     toolFindings: true,
     toolFindingsBlock: false,
     context: "static",
