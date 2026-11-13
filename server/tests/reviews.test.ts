@@ -833,3 +833,54 @@ describe("GET /api/reviews/:id/diff", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("GET /api/reviews/:id/change", () => {
+  const MR = /\/projects\/team%2Fweb\/merge_requests\/7$/;
+  const mr = {
+    iid: 7, title: "T", description: null, web_url: "u", state: "merged", sha: "h", source_branch: "f", target_branch: "main",
+    diff_refs: null, author: { username: "dev" }, created_at: "2026-11-01T10:00:00Z", updated_at: "2026-11-02T10:00:00Z",
+    merged_at: "2026-11-03T00:00:00Z", merge_user: { username: "lead" },
+  };
+
+  async function job() {
+    return prisma.reviewJob.create({ data: { repositoryId: repoId, number: 7, headSha: "h1", trigger: "manual", status: "completed" } });
+  }
+
+  it("reads who opened the change and what happened to it", async () => {
+    const created = await job();
+    vi.stubGlobal("fetch", fetchStub([{ url: MR, body: mr }]).fetch);
+
+    const res = await request(app).get(`/api/reviews/${created.id}/change`).set("Cookie", cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.change).toEqual({
+      state: "merged",
+      isDraft: false,
+      sourceBranch: "f",
+      targetBranch: "main",
+      author: { login: "dev" },
+      createdAt: "2026-11-01T10:00:00Z",
+      updatedAt: "2026-11-02T10:00:00Z",
+      mergedAt: "2026-11-03T00:00:00Z",
+      mergedBy: { login: "lead" },
+    });
+  });
+
+  it("reports rejected credentials as a broken connection", async () => {
+    const created = await job();
+    vi.stubGlobal("fetch", fetchStub([{ url: MR, status: 401, body: { message: "401 Unauthorized" } }]).fetch);
+
+    const res = await request(app).get(`/api/reviews/${created.id}/change`).set("Cookie", cookie);
+
+    expect(res.status).toBe(502);
+  });
+
+  it("does not serve another workspace's review", async () => {
+    const created = await job();
+    const other = await createUser("other@example.com");
+
+    const res = await request(app).get(`/api/reviews/${created.id}/change`).set("Cookie", other.cookie);
+
+    expect(res.status).toBe(404);
+  });
+});

@@ -422,12 +422,9 @@ export async function getReviewMarkdown(req: Request, res: Response) {
     .send(toMarkdown(result, { counts, stats, lifecycle, agentPrompt, rules, findingPrompts, ...walkthroughOptions(output) }));
 }
 
-// The change a review looked at, for the review page's file tree when the
-// result has no patches stored: results from before they were kept, and runs
-// that never stored one (queued, running, skipped, failed, expired). Read from
-// the forge on each view, pinned to the reviewed commits where they are known,
-// and never written back, so retention still decides what is kept.
-export async function getReviewDiff(req: Request, res: Response) {
+// A review the workspace owns, with an adapter for its repository's
+// connection, for the endpoints that read the change from the forge.
+async function loadReviewForge(req: Request) {
   const { id } = reviewIdParamSchema.parse(req.params);
   const job = await prisma.reviewJob.findFirst({
     where: { id, ...ownedBy(req.workspaceId!) },
@@ -436,8 +433,16 @@ export async function getReviewDiff(req: Request, res: Response) {
   if (!job) {
     throw new HttpError(404, "Review not found");
   }
-  const repo = job.repository;
-  const forge = adapterForConnection(repo.connection);
+  return { job, repo: job.repository, forge: adapterForConnection(job.repository.connection) };
+}
+
+// The change a review looked at, for the review page's file tree when the
+// result has no patches stored: results from before they were kept, and runs
+// that never stored one (queued, running, skipped, failed, expired). Read from
+// the forge on each view, pinned to the reviewed commits where they are known,
+// and never written back, so retention still decides what is kept.
+export async function getReviewDiff(req: Request, res: Response) {
+  const { job, repo, forge } = await loadReviewForge(req);
   try {
     let files: ChangedFile[] | null;
     if (job.baseSha) {
@@ -456,6 +461,18 @@ export async function getReviewDiff(req: Request, res: Response) {
       throw new HttpError(404, `The reviewed commits are no longer on ${forgeName(repo.provider)}`);
     }
     res.json({ files: storedFiles(files), headSha: job.headSha });
+  } catch (err) {
+    throw toHttpError(err, repo.provider);
+  }
+}
+
+// Who opened the change and what has happened to it since (merged, closed),
+// read live so a review shows a merge that came after it. Not cached: none of
+// it is fixed by a commit.
+export async function getReviewChange(req: Request, res: Response) {
+  const { job, repo, forge } = await loadReviewForge(req);
+  try {
+    res.json({ change: await forge.getChangeDetails(repo.fullPath, job.number) });
   } catch (err) {
     throw toHttpError(err, repo.provider);
   }

@@ -18,7 +18,9 @@ import {
   STATUS_CONTEXT,
   MAX_OPEN_CHANGE_PAGES,
   MAX_CODE_SEARCH_RESULTS,
+  type ChangeDetails,
   type ChangeHead,
+  type ForgeUser,
   type ChangeSummary,
   type CommitState,
   type CommitStatus,
@@ -56,9 +58,24 @@ interface GlProject {
   web_url: string;
 }
 
+interface GlUser {
+  username: string;
+  id?: number;
+  name?: string;
+  avatar_url?: string | null;
+  web_url?: string;
+}
+
 interface GlMergeRequest {
   iid: number;
+  created_at: string;
   updated_at: string;
+  merged_at?: string | null;
+  closed_at?: string | null;
+  // merge_user replaces the deprecated merged_by; older instances send only the latter.
+  merge_user?: GlUser | null;
+  merged_by?: GlUser | null;
+  closed_by?: GlUser | null;
   state: "opened" | "closed" | "merged" | "locked";
   sha: string;
   title: string;
@@ -66,7 +83,7 @@ interface GlMergeRequest {
   draft?: boolean;
   work_in_progress?: boolean;
   web_url: string;
-  author?: { username: string; id?: number };
+  author?: GlUser;
   labels?: string[];
   source_branch: string;
   target_branch: string;
@@ -140,6 +157,16 @@ function toChangedFileFromGl(diff: GlDiff) {
     // GitLab empties `diff` and flags it when a file is over its limits.
     patch: diff.too_large || diff.collapsed ? undefined : diff.diff,
   });
+}
+
+function toForgeUser(user: GlUser | null | undefined): ForgeUser | undefined {
+  if (!user) return undefined;
+  return {
+    login: user.username,
+    ...(user.name ? { name: user.name } : {}),
+    ...(user.avatar_url ? { avatarUrl: user.avatar_url } : {}),
+    ...(user.web_url ? { webUrl: user.web_url } : {}),
+  };
 }
 
 function toRepo(project: GlProject): ForgeRepo {
@@ -304,6 +331,27 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       title: mr.title,
       state: mr.state === "merged" ? "merged" : mr.state === "closed" ? "closed" : "open",
       isDraft: mr.draft ?? mr.work_in_progress ?? false,
+    };
+  }
+
+  async getChangeDetails(project: string, number: number): Promise<ChangeDetails> {
+    const mr = await this.http.json<GlMergeRequest>(`${this.project(project)}/merge_requests/${number}`);
+    const state = mr.state === "merged" ? "merged" : mr.state === "closed" ? "closed" : "open";
+    const author = toForgeUser(mr.author);
+    const mergedBy = toForgeUser(mr.merge_user ?? mr.merged_by);
+    const closedBy = toForgeUser(mr.closed_by);
+    return {
+      state,
+      isDraft: mr.draft ?? mr.work_in_progress ?? false,
+      sourceBranch: mr.source_branch,
+      targetBranch: mr.target_branch,
+      ...(author ? { author } : {}),
+      createdAt: mr.created_at,
+      updatedAt: mr.updated_at,
+      ...(state === "merged" && mr.merged_at ? { mergedAt: mr.merged_at } : {}),
+      ...(state === "merged" && mergedBy ? { mergedBy } : {}),
+      ...(state === "closed" && mr.closed_at ? { closedAt: mr.closed_at } : {}),
+      ...(state === "closed" && closedBy ? { closedBy } : {}),
     };
   }
 

@@ -119,6 +119,31 @@ export interface ReviewSummary {
   usageTotals?: UsageTotals
 }
 
+// A forge account as a change shows it.
+export interface ForgeUser {
+  login: string
+  name?: string
+  avatarUrl?: string
+  webUrl?: string
+}
+
+// Who opened a change and what has happened to it since, read live from the
+// forge (GET /api/reviews/:id/change).
+export interface ChangeDetails {
+  state: "open" | "closed" | "merged"
+  isDraft: boolean
+  // A GitHub pull request from a fork names its source as owner:branch.
+  sourceBranch: string
+  targetBranch: string
+  author?: ForgeUser
+  createdAt: string
+  updatedAt: string
+  mergedAt?: string
+  mergedBy?: ForgeUser
+  closedAt?: string
+  closedBy?: ForgeUser
+}
+
 // One file of the change as the result stored it. `patch` is absent on results
 // stored before diffs were kept, and when `patchOmitted` says why.
 export interface ChangedFile {

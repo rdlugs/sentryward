@@ -1,16 +1,20 @@
 import type { ReactNode } from "react"
-import { Copy, GitBranch } from "lucide-react"
+import { Copy } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { PROVIDERS } from "@/features/forge/providers"
 import { copyToClipboard } from "@/lib/clipboard"
 import { plural } from "@/lib/plural"
 import { formatDuration, timeAgo } from "@/lib/time"
+import { useReviewChange } from "../api"
 import { TriggerIcon } from "../badges"
 import { costUnknown, formatCost } from "../cost"
 import { TRIGGER_LABEL } from "../options"
-import type { DropReason, Publication, ReviewDetail, ReviewResult } from "../types"
+import { isActive, type ChangeDetails, type DropReason, type Publication, type ReviewDetail, type ReviewResult } from "../types"
+import { branchesOf } from "./branches"
+import { ForgeUserLink, RelativeTime } from "./ChangePeople"
 
 const OMISSION_TEXT: Record<string, string> = {
   ignored: "ignored by configuration",
@@ -76,21 +80,95 @@ function SideCard({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
+const STATE_LABEL: Record<ChangeDetails["state"], string> = { open: "Open", merged: "Merged", closed: "Closed" }
+
+const STATE_CLASS: Record<ChangeDetails["state"], string> = {
+  open: "border-emerald-500/40 text-emerald-700 dark:text-emerald-400",
+  merged: "border-violet-500/40 text-violet-700 dark:text-violet-400",
+  closed: "border-destructive/40 text-destructive",
+}
+
+// The change's own state and dates, as the forge reports them now.
+function ChangeRows({ details }: { details: ChangeDetails }) {
+  return (
+    <>
+      <Row label="State">
+        <Badge variant="outline" className={STATE_CLASS[details.state]}>
+          {details.isDraft && details.state === "open" ? "Draft" : STATE_LABEL[details.state]}
+        </Badge>
+      </Row>
+      {details.author && (
+        <Row label="Opened by">
+          <ForgeUserLink user={details.author} />
+        </Row>
+      )}
+      <Row label="Opened">
+        <RelativeTime iso={details.createdAt} />
+      </Row>
+      <Row label="Updated">
+        <RelativeTime iso={details.updatedAt} />
+      </Row>
+      {details.mergedAt && (
+        <Row label="Merged">
+          <RelativeTime iso={details.mergedAt} />
+          {details.mergedBy && (
+            <>
+              {" by "}
+              <ForgeUserLink user={details.mergedBy} />
+            </>
+          )}
+        </Row>
+      )}
+      {details.closedAt && (
+        <Row label="Closed">
+          <RelativeTime iso={details.closedAt} />
+          {details.closedBy && (
+            <>
+              {" by "}
+              <ForgeUserLink user={details.closedBy} />
+            </>
+          )}
+        </Row>
+      )}
+    </>
+  )
+}
+
+function BranchRow({ label, branch }: { label: string; branch: string }) {
+  return (
+    <Row label={label}>
+      <span className="inline-flex max-w-full min-w-0 items-center gap-1">
+        <code className="truncate text-xs" title={branch}>
+          {branch}
+        </code>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 shrink-0"
+          aria-label={`Copy ${label.toLowerCase()} branch`}
+          onClick={() => copyToClipboard(branch, `${label} branch`)}
+        >
+          <Copy className="size-3" />
+        </Button>
+      </span>
+    </Row>
+  )
+}
+
 function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewResult | null }) {
   const change = result?.change
+  const forge = PROVIDERS[review.repository.provider].label
+  const details = useReviewChange(review.id, isActive(review.status))
+  const branches = branchesOf(details.data?.change, result)
   const duration =
     review.startedAt && review.finishedAt
       ? formatDuration(new Date(review.finishedAt).getTime() - new Date(review.startedAt).getTime())
       : null
   return (
     <SideCard title="Change">
-      {change?.headRef && change.baseRef && (
-        <p className="flex items-center gap-1.5 font-mono text-xs break-all">
-          <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          {change.baseRef} ← {change.headRef}
-        </p>
-      )}
       <dl className="flex flex-col gap-1.5">
+        {branches.source && <BranchRow label="Source" branch={branches.source} />}
+        {branches.target && <BranchRow label="Target" branch={branches.target} />}
         <Row label="Commit">
           <span className="inline-flex items-center gap-1">
             <code className="text-xs">{review.headSha.slice(0, 7)}</code>
@@ -105,10 +183,20 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             </Button>
           </span>
         </Row>
-        {change?.isDraft && (
-          <Row label="State">
-            <Badge variant="outline">Draft</Badge>
-          </Row>
+        {details.data ? (
+          <ChangeRows details={details.data.change} />
+        ) : details.isError ? (
+          <p className="text-xs text-muted-foreground">Couldn't load the change from {forge}.</p>
+        ) : (
+          <>
+            {change?.isDraft && (
+              <Row label="State">
+                <Badge variant="outline">Draft</Badge>
+              </Row>
+            )}
+            <Skeleton aria-label="Loading the change" className="h-4 w-full" />
+            <Skeleton className="h-4 w-full" />
+          </>
         )}
         <Row label="Trigger">
           <span className="inline-flex items-center gap-1.5">

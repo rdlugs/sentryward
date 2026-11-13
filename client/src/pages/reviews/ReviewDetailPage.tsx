@@ -28,9 +28,11 @@ import {
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { allFindingsPrompt } from "@/features/reviews/agentPrompt"
-import { useCancelReview, useRerunReview, useReview, useReviewDiff } from "@/features/reviews/api"
+import { useCancelReview, useRerunReview, useReview, useReviewChange, useReviewDiff } from "@/features/reviews/api"
 import { StatusBadge, VerdictBadge } from "@/features/reviews/badges"
 import { CancelReviewDialog } from "@/features/reviews/CancelReviewDialog"
+import { branchesOf } from "@/features/reviews/detail/branches"
+import { BranchPair, ForgeUserLink, RelativeTime } from "@/features/reviews/detail/ChangePeople"
 import { FileDiff } from "@/features/reviews/detail/FileDiff"
 import { FileTree } from "@/features/reviews/detail/FileTree"
 import { buildFileTree, treeOrder } from "@/features/reviews/detail/fileTree"
@@ -245,6 +247,9 @@ export function ReviewDetailPage() {
   const cancel = useCancelReview()
   const [cancelling, setCancelling] = useState(false)
   const markdown = useReviewMarkdown(id)
+  // Who opened the change, for the subtitle; the sidebar reads the same query.
+  // Polled only while the review runs, which the review query decides.
+  const changeDetails = useReviewChange(id, !!data && isActive(data.review.status))
 
   if (isPending) {
     return (
@@ -279,6 +284,8 @@ export function ReviewDetailPage() {
   const result = review.result?.schemaVersion === 1 ? review.result : null
   const title = review.title ?? review.summary?.title ?? result?.change.title ?? review.repository.fullPath
   const webUrl = review.summary?.webUrl ?? result?.change.webUrl
+  const opened = changeDetails.data?.change
+  const branches = branchesOf(opened, result)
 
   async function runAgain() {
     try {
@@ -346,6 +353,18 @@ export function ReviewDetailPage() {
         description={
           <>
             {review.repository.fullPath} {changeLabel(review.repository.provider, review.number)}
+            {opened?.author && (
+              <>
+                {" · opened by "}
+                <ForgeUserLink user={opened.author} /> <RelativeTime iso={opened.createdAt} />
+              </>
+            )}
+            {branches.source && branches.target && (
+              <>
+                {" · "}
+                <BranchPair source={branches.source} target={branches.target} />
+              </>
+            )}
             {webUrl && (
               <>
                 {" · "}

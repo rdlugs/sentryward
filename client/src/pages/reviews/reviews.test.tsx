@@ -663,6 +663,102 @@ describe("Review detail page", () => {
     expect(screen.queryByRole("region", { name: "Actionable comments" })).not.toBeInTheDocument()
   })
 
+  it("names who opened the change and its dates, in the header and the sidebar", async () => {
+    const day = 86_400_000
+    const ago = (days: number) => new Date(Date.now() - days * day).toISOString()
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: detail },
+      [`GET /api/reviews/${detail.id}/change`]: {
+        change: {
+          state: "merged",
+          isDraft: false,
+          sourceBranch: "feature/sticky-headers",
+          targetBranch: "main",
+          author: { login: "dev", webUrl: "https://github.com/dev" },
+          createdAt: ago(3),
+          updatedAt: ago(1),
+          mergedAt: ago(1),
+          mergedBy: { login: "lead" },
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const author = await screen.findAllByRole("link", { name: "@dev" })
+    expect(author[0]).toHaveAttribute("href", "https://github.com/dev")
+    expect(screen.getByText(/opened by/)).toBeInTheDocument()
+
+    const sidebar = screen.getByRole("complementary", { name: "Review details" })
+    // Labels are matched on the <dt>, since the state badge reads "Merged" too.
+    const row = (label: string) => within(sidebar).getByText(label, { selector: "dt" }).closest("div")!
+    expect(row("State")).toHaveTextContent("Merged")
+    expect(within(row("Opened by")).getByRole("link", { name: "@dev" })).toBeInTheDocument()
+    expect(row("Opened")).toHaveTextContent("3 days ago")
+    expect(row("Updated")).toHaveTextContent("yesterday")
+    expect(row("Merged")).toHaveTextContent(/yesterday by/)
+    expect(within(row("Merged")).getByText("@lead")).toBeInTheDocument()
+    expect(within(row("Opened")).getByText("3 days ago")).toHaveAttribute("title")
+    expect(row("Source")).toHaveTextContent("feature/sticky-headers")
+    expect(row("Target")).toHaveTextContent("main")
+    expect(within(row("Source")).getByRole("button", { name: "Copy source branch" })).toBeInTheDocument()
+    // The header names both branches too.
+    expect(screen.getByLabelText("From feature/sticky-headers into main")).toBeInTheDocument()
+  })
+
+  it("falls back to the branches the review recorded when the forge cannot be read", async () => {
+    const result = { ...detail.result!, change: { ...detail.result!.change, headRef: "fix/login", baseRef: "develop" } }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(await within(sidebar).findByText("Couldn't load the change from GitHub.")).toBeInTheDocument()
+    expect(within(sidebar).getByText("Source", { selector: "dt" }).closest("div")).toHaveTextContent("fix/login")
+    expect(within(sidebar).getByText("Target", { selector: "dt" }).closest("div")).toHaveTextContent("develop")
+    expect(screen.getByLabelText("From fix/login into develop")).toBeInTheDocument()
+  })
+
+  it("dates a change closed without merging", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: detail },
+      [`GET /api/reviews/${detail.id}/change`]: {
+        change: {
+          state: "closed",
+          isDraft: false,
+          sourceBranch: "f",
+          targetBranch: "main",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          closedAt: new Date().toISOString(),
+          closedBy: { login: "lead" },
+        },
+      },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(await within(sidebar).findByText("Closed", { selector: "dt" })).toBeInTheDocument()
+    const closed = within(sidebar).getByText("Closed", { selector: "dt" }).closest("div")!
+    expect(closed).toHaveTextContent(/just now by/)
+    expect(within(closed).getByText("@lead")).toBeInTheDocument()
+    // No author from the forge: the header says nothing about who opened it.
+    expect(screen.queryByText(/opened by/)).not.toBeInTheDocument()
+  })
+
+  it("keeps the page when the change's details cannot be read", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: detail },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("Couldn't load the change from GitHub.")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Diff of src/app.ts" })).toBeInTheDocument()
+    expect(screen.queryByText(/opened by/)).not.toBeInTheDocument()
+  })
+
   it("switches between files and the overview from the tree", async () => {
     const files = [
       ...detail.result!.files,

@@ -21,6 +21,32 @@ export interface ChangeHead {
   isDraft: boolean;
 }
 
+// A forge account as a change shows it.
+export interface ForgeUser {
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+  webUrl?: string;
+}
+
+// Who opened a change and what has happened to it since, read live for the
+// review page; nothing here is fixed by a commit, so it is never cached.
+export interface ChangeDetails {
+  state: "open" | "closed" | "merged";
+  isDraft: boolean;
+  // The branch the change merges from, and the one it merges into. A GitHub
+  // pull request from a fork names its source as owner:branch.
+  sourceBranch: string;
+  targetBranch: string;
+  author?: ForgeUser;
+  createdAt: string;
+  updatedAt: string;
+  mergedAt?: string;
+  mergedBy?: ForgeUser;
+  closedAt?: string;
+  closedBy?: ForgeUser;
+}
+
 // An open PR/MR as listed for picking one to review by hand.
 export interface ChangeSummary {
   number: number;
@@ -55,6 +81,8 @@ export interface ForgeAdapter {
   getChange(project: string, number: number, cache?: ForgeCache): Promise<ChangeSet>;
   // Just enough to queue a review, without fetching the diff.
   getChangeHead(project: string, number: number): Promise<ChangeHead>;
+  // The change's author, state and dates, for the review page.
+  getChangeDetails(project: string, number: number): Promise<ChangeDetails>;
   // Open changes, most recently updated first.
   listOpenChanges(project: string): Promise<ChangeSummary[]>;
   // Raw file content at a ref, or null when the file does not exist there.

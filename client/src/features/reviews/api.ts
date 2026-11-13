@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api, ApiError, workspaceHeaders } from "@/lib/api"
-import { isActive, type ChangedFile, type JobStatus, type OpenChange, type ReviewDetail, type ReviewListItem, type ReviewStats, type Trigger, type Verdict } from "./types"
+import { isActive, type ChangeDetails, type ChangedFile, type JobStatus, type OpenChange, type ReviewDetail, type ReviewListItem, type ReviewStats, type Trigger, type Verdict } from "./types"
 
 // While anything is queued or running, poll; otherwise stay quiet.
 const POLL_MS = 3000
@@ -104,6 +104,22 @@ export function useReviewDiff(id: string, enabled: boolean) {
     enabled,
     staleTime: Infinity,
     retry: false,
+  })
+}
+
+// How often a change's details are reread while its review runs, so a merge or
+// close during the run shows up without hammering the forge.
+const CHANGE_POLL_MS = 30_000
+
+// Who opened the change and its dates, read live from the forge. Shared by the
+// page header and the sidebar through the query key.
+export function useReviewChange(id: string, active: boolean) {
+  return useQuery({
+    queryKey: ["review", id, "change"],
+    queryFn: () => api<{ change: ChangeDetails }>(`/reviews/${id}/change`),
+    staleTime: 60_000,
+    retry: false,
+    refetchInterval: active ? CHANGE_POLL_MS : false,
   })
 }
 

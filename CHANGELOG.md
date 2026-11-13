@@ -30,6 +30,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   recorded its base, under the same limits and never written back. A queued
   or running review opens on its progress; any other opens its first file
   with its notes, or the reason it did not run, above the diff.
+- Who opened a PR/MR and its dates on the review page. The header names the
+  author ("opened by @user · 2 days ago"), and the sidebar's Change card
+  shows the change's state (Open, Draft, Merged or Closed), when it was
+  opened and last updated, and when and by whom it was merged or closed.
+  Both also show the source and target branch (a GitHub fork's source as
+  `owner:branch`), falling back to the branches the review recorded, and
+  the sidebar's branch rows replace its old `base ← head` line.
+  They are read live from the forge through the new
+  `GET /api/reviews/:id/change`, so a merge after the review shows up, and
+  the rest of the page still renders when the forge cannot be reached.
 - Claim checks (`review.check_claims`, on by default). A finding may name the
   fact it rests on: a path that does not exist, a symbol nothing references,
   or a file nothing imports. Before verification, the claim is looked up at
