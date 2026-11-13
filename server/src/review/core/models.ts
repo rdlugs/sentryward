@@ -363,6 +363,11 @@ export const reviewResultSchema = z.object({
       changeType: changeTypeSchema,
       additions: z.number().int().min(0),
       deletions: z.number().int().min(0),
+      // The file's hunks as the forge gave them, for the dashboard's diff view
+      // (pipeline.ts storedFiles). Absent on results stored before diffs were
+      // kept, and when patchOmitted says why.
+      patch: z.string().optional(),
+      patchOmitted: z.enum(["binary", "unavailable", "too_large"]).optional(),
     }),
   ),
   findings: z.array(findingSchema),

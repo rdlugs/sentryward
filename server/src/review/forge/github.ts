@@ -1,6 +1,6 @@
 import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
-import type { ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
+import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
 import { ForgeError, ForgeHttp, isNotFound, linkHeaderNext, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
@@ -13,7 +13,9 @@ import {
   MAX_OPEN_CHANGE_PAGES,
   MAX_CODE_SEARCH_RESULTS,
   MAX_COMPARE_FILES,
+  type ChangeDetails,
   type ChangeHead,
+  type ForgeUser,
   type ChangeSummary,
   type CommitStatus,
   type ForgeAccount,
@@ -64,9 +66,19 @@ interface GhRepo {
   html_url: string;
 }
 
+interface GhUser {
+  login: string;
+  id?: number;
+  avatar_url?: string;
+  html_url?: string;
+}
+
 interface GhPull {
   number: number;
+  created_at: string;
   updated_at: string;
+  closed_at?: string | null;
+  merged_by?: GhUser | null;
   state: "open" | "closed";
   merged?: boolean;
   merged_at?: string | null;
@@ -74,10 +86,11 @@ interface GhPull {
   body: string | null;
   draft?: boolean;
   html_url: string;
-  user?: { login: string; id?: number } | null;
+  user?: GhUser | null;
   labels?: { name: string }[];
-  base: { sha: string; ref: string };
-  head: { sha: string; ref: string };
+  base: { sha: string; ref: string; repo?: { full_name: string } | null };
+  // `label` is owner:branch; `repo` is null once a fork has been deleted.
+  head: { sha: string; ref: string; label?: string; repo?: { full_name: string } | null };
 }
 
 interface GhFile {
@@ -90,7 +103,7 @@ interface GhFile {
 
 interface GhComparison {
   status: "ahead" | "behind" | "diverged" | "identical";
-  files?: Pick<GhFile, "filename" | "previous_filename">[];
+  files?: GhFile[];
 }
 
 interface GhContentEntry {
@@ -140,6 +153,33 @@ function encodePath(path: string): string {
 
 function repoApiPath(project: string): string {
   return `/repos/${encodePath(project)}`;
+}
+
+function toForgeUser(user: GhUser | null | undefined): ForgeUser | undefined {
+  if (!user) return undefined;
+  return {
+    login: user.login,
+    ...(user.avatar_url ? { avatarUrl: user.avatar_url } : {}),
+    ...(user.html_url ? { webUrl: user.html_url } : {}),
+  };
+}
+
+// A branch of another repository (a fork) is named owner:branch, so it is not
+// read as a branch of this one. A deleted fork has no repo left to compare.
+function sourceBranchOf(pull: GhPull): string {
+  const fork = pull.head.repo?.full_name !== pull.base.repo?.full_name || pull.head.repo === null;
+  return fork && pull.head.label ? pull.head.label : pull.head.ref;
+}
+
+function toChangedFileFromGh(file: GhFile) {
+  return toChangedFile({
+    path: file.filename,
+    previousPath: file.previous_filename,
+    changeType: changeTypeOf(file.status),
+    // GitHub omits `patch` for binary files and for oversized diffs; a
+    // pure rename or empty file has no changes and so no patch either.
+    patch: file.patch ?? (file.changes === 0 ? "" : undefined),
+  });
 }
 
 function toRepo(repo: GhRepo): ForgeRepo {
@@ -297,16 +337,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       author: pull.user?.login,
       authorId: pull.user?.id === undefined ? undefined : String(pull.user.id),
       labels: (pull.labels ?? []).map((label) => label.name),
-      files: files.map((file) =>
-        toChangedFile({
-          path: file.filename,
-          previousPath: file.previous_filename,
-          changeType: changeTypeOf(file.status),
-          // GitHub omits `patch` for binary files and for oversized diffs; a
-          // pure rename or empty file has no changes and so no patch either.
-          patch: file.patch ?? (file.changes === 0 ? "" : undefined),
-        }),
-      ),
+      files: files.map(toChangedFileFromGh),
     };
   }
 
@@ -319,6 +350,28 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       title: pull.title,
       state: merged ? "merged" : pull.state,
       isDraft: pull.draft ?? false,
+    };
+  }
+
+  // A pull request has no closed_by; a merged one is also "closed", which
+  // merged_at already says, so closedAt is kept for one closed unmerged.
+  async getChangeDetails(project: string, number: number): Promise<ChangeDetails> {
+    const pull = await this.http.json<GhPull>(`${repoApiPath(project)}/pulls/${number}`);
+    const merged = pull.merged ?? Boolean(pull.merged_at);
+    const state = merged ? "merged" : pull.state;
+    const author = toForgeUser(pull.user);
+    const mergedBy = toForgeUser(pull.merged_by);
+    return {
+      state,
+      isDraft: pull.draft ?? false,
+      sourceBranch: sourceBranchOf(pull),
+      targetBranch: pull.base.ref,
+      ...(author ? { author } : {}),
+      createdAt: pull.created_at,
+      updatedAt: pull.updated_at,
+      ...(merged && pull.merged_at ? { mergedAt: pull.merged_at } : {}),
+      ...(merged && mergedBy ? { mergedBy } : {}),
+      ...(state === "closed" && pull.closed_at ? { closedAt: pull.closed_at } : {}),
     };
   }
 
@@ -437,6 +490,23 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       const files = comparison.files ?? [];
       if (files.length >= MAX_COMPARE_FILES) return null;
       return [...new Set(files.flatMap((file) => (file.previous_filename ? [file.filename, file.previous_filename] : [file.filename])))];
+    });
+  }
+
+  // The three-dot compare diffs `head` against its merge base with `base`, as
+  // the PR's own files view does. A sha the forge no longer has (a force push
+  // that was garbage collected) is null; 422 is GitHub's "No common ancestor".
+  async getDiff(project: string, base: string, head: string, cache?: ForgeCache): Promise<ChangedFile[] | null> {
+    return cached(cache, cacheKey("github-diff", this.host, project, base, head), async () => {
+      try {
+        const comparison = await this.http.json<GhComparison>(
+          `${repoApiPath(project)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+        );
+        return (comparison.files ?? []).map(toChangedFileFromGh);
+      } catch (err) {
+        if (isNotFound(err) || (err instanceof ForgeError && err.status === 422)) return null;
+        throw err;
+      }
     });
   }
 

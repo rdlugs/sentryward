@@ -1,6 +1,6 @@
 import type { ReviewDetail, ReviewListItem, ReviewResult } from "@/features/reviews/types"
 
-const finding = (overrides: Partial<ReviewResult["findings"][number]>) => ({
+export const finding = (overrides: Partial<ReviewResult["findings"][number]>) => ({
   file: "src/app.ts",
   startLine: 11,
   endLine: 11,
@@ -36,7 +36,15 @@ export const result: ReviewResult = {
     title: "Add b and c",
     isDraft: false,
   },
-  files: [{ path: "src/app.ts", changeType: "modified", additions: 2, deletions: 0 }],
+  files: [
+    {
+      path: "src/app.ts",
+      changeType: "modified",
+      additions: 2,
+      deletions: 0,
+      patch: "@@ -10,3 +10,5 @@ export function main() {\n const a = 1;\n+const b = a + 1;\n+const c = b * 2;\n const d = 4;\n return d;",
+    },
+  ],
   findings: [
     finding({ severity: "critical", title: "SQL injection in search", suggestion: "db.query(sql, [q])" }),
     finding({ severity: "minor", kind: "nitpick", bucket: "nitpick", title: "Rename c" }),

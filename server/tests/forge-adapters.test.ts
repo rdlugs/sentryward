@@ -313,6 +313,107 @@ describe("GitHubAdapter", () => {
     expect(gh.isSelfLogin("alice")).toBe(false);
   });
 
+  describe("getChangeDetails", () => {
+    const PULL = /\/repos\/acme\/web\/pulls\/7$/;
+    const user = (login: string) => ({ login, avatar_url: `https://a/${login}.png`, html_url: `https://github.com/${login}` });
+    const pull = (over: Record<string, unknown>) => ({
+      number: 7, title: "T", body: null, html_url: "u", state: "open", draft: false,
+      base: { sha: "b", ref: "main" }, head: { sha: "h", ref: "f" },
+      user: user("dev"), created_at: "2026-11-01T10:00:00Z", updated_at: "2026-11-02T10:00:00Z", ...over,
+    });
+
+    it("names the author and dates of an open pull request", async () => {
+      const { adapter: gh } = adapter([{ url: PULL, body: pull({ draft: true }) }]);
+      expect(await gh.getChangeDetails("acme/web", 7)).toEqual({
+        state: "open",
+        isDraft: true,
+        sourceBranch: "f",
+        targetBranch: "main",
+        author: { login: "dev", avatarUrl: "https://a/dev.png", webUrl: "https://github.com/dev" },
+        createdAt: "2026-11-01T10:00:00Z",
+        updatedAt: "2026-11-02T10:00:00Z",
+      });
+    });
+
+    it("says who merged it, and when, without a separate close", async () => {
+      const { adapter: gh } = adapter([
+        { url: PULL, body: pull({ state: "closed", merged: true, merged_at: "2026-11-03T00:00:00Z", closed_at: "2026-11-03T00:00:00Z", merged_by: user("lead") }) },
+      ]);
+      const details = await gh.getChangeDetails("acme/web", 7);
+      expect(details).toMatchObject({ state: "merged", mergedAt: "2026-11-03T00:00:00Z", mergedBy: { login: "lead" } });
+      expect(details).not.toHaveProperty("closedAt");
+    });
+
+    it("names a fork's source branch with its owner", async () => {
+      const { adapter: gh } = adapter([
+        {
+          url: PULL,
+          body: pull({
+            base: { sha: "b", ref: "main", repo: { full_name: "acme/web" } },
+            head: { sha: "h", ref: "fix", label: "someone:fix", repo: { full_name: "someone/web" } },
+          }),
+        },
+      ]);
+      expect(await gh.getChangeDetails("acme/web", 7)).toMatchObject({ sourceBranch: "someone:fix", targetBranch: "main" });
+    });
+
+    it("keeps a same-repository branch's plain name", async () => {
+      const { adapter: gh } = adapter([
+        {
+          url: PULL,
+          body: pull({
+            base: { sha: "b", ref: "main", repo: { full_name: "acme/web" } },
+            head: { sha: "h", ref: "fix", label: "acme:fix", repo: { full_name: "acme/web" } },
+          }),
+        },
+      ]);
+      expect(await gh.getChangeDetails("acme/web", 7)).toMatchObject({ sourceBranch: "fix" });
+    });
+
+    it("dates a pull request closed without merging", async () => {
+      const { adapter: gh } = adapter([{ url: PULL, body: pull({ state: "closed", merged: false, closed_at: "2026-11-04T00:00:00Z" }) }]);
+      expect(await gh.getChangeDetails("acme/web", 7)).toMatchObject({ state: "closed", closedAt: "2026-11-04T00:00:00Z" });
+    });
+  });
+
+  describe("getDiff", () => {
+    const COMPARE = /\/repos\/acme\/web\/compare\/b1\.\.\.h1$/;
+
+    it("maps the compared files with their patches, as a PR's files are", async () => {
+      const { adapter: gh } = adapter([
+        {
+          url: COMPARE,
+          body: {
+            status: "diverged",
+            files: [
+              { filename: "src/a.ts", status: "modified", changes: 1, patch: "@@ -1 +1 @@\n-a\n+b" },
+              { filename: "src/new.ts", previous_filename: "src/old.ts", status: "renamed", changes: 0 },
+              { filename: "logo.png", status: "added", changes: 0 },
+              { filename: "big.ts", status: "modified", changes: 9000 },
+            ],
+          },
+        },
+      ]);
+      const files = await gh.getDiff("acme/web", "b1", "h1");
+      expect(files?.map(({ path, previousPath, changeType, patchUnavailable, hunks }) => ({ path, previousPath, changeType, patchUnavailable, hunks: hunks.length }))).toEqual([
+        { path: "src/a.ts", previousPath: undefined, changeType: "modified", patchUnavailable: false, hunks: 1 },
+        { path: "src/new.ts", previousPath: "src/old.ts", changeType: "renamed", patchUnavailable: false, hunks: 0 },
+        { path: "logo.png", previousPath: undefined, changeType: "added", patchUnavailable: false, hunks: 0 },
+        { path: "big.ts", previousPath: undefined, changeType: "modified", patchUnavailable: true, hunks: 0 },
+      ]);
+    });
+
+    it.each([404, 422])("returns null when GitHub answers %i", async (status) => {
+      const { adapter: gh } = adapter([{ url: COMPARE, status, body: { message: "No common ancestor" } }]);
+      expect(await gh.getDiff("acme/web", "b1", "h1")).toBeNull();
+    });
+
+    it("surfaces other failures", async () => {
+      const { adapter: gh } = adapter([{ url: COMPARE, status: 502, body: { message: "Bad Gateway" } }]);
+      await expect(gh.getDiff("acme/web", "b1", "h1")).rejects.toBeInstanceOf(ForgeError);
+    });
+  });
+
   describe("getToolAnnotations", () => {
     const ref = {
       provider: "github" as const,
@@ -806,6 +907,81 @@ describe("GitLabAdapter", () => {
     ]);
     expect(await gl.listDirAtRef("team/app", "src/a.ts", "h1")).toBeNull();
     expect(await gl.listDirAtRef("team/app", "gone", "h1")).toBeNull();
+  });
+
+  describe("getChangeDetails", () => {
+    const MR = /\/projects\/team%2Fapp\/merge_requests\/7$/;
+    const user = (username: string) => ({ username, name: username.toUpperCase(), avatar_url: `https://a/${username}.png`, web_url: `https://gl/${username}` });
+    const mr = (over: Record<string, unknown>) => ({
+      iid: 7, title: "T", description: null, web_url: "u", state: "opened", sha: "h",
+      source_branch: "f", target_branch: "main", diff_refs: null,
+      author: user("dev"), created_at: "2026-11-01T10:00:00Z", updated_at: "2026-11-02T10:00:00Z", ...over,
+    });
+
+    it("names the author and dates of an open merge request", async () => {
+      const { adapter: gl } = adapter([{ url: MR, body: mr({}) }]);
+      expect(await gl.getChangeDetails("team/app", 7)).toEqual({
+        state: "open",
+        isDraft: false,
+        sourceBranch: "f",
+        targetBranch: "main",
+        author: { login: "dev", name: "DEV", avatarUrl: "https://a/dev.png", webUrl: "https://gl/dev" },
+        createdAt: "2026-11-01T10:00:00Z",
+        updatedAt: "2026-11-02T10:00:00Z",
+      });
+    });
+
+    it("prefers merge_user over the deprecated merged_by", async () => {
+      const { adapter: gl } = adapter([
+        { url: MR, body: mr({ state: "merged", merged_at: "2026-11-03T00:00:00Z", merge_user: user("lead"), merged_by: user("old") }) },
+      ]);
+      expect(await gl.getChangeDetails("team/app", 7)).toMatchObject({ state: "merged", mergedAt: "2026-11-03T00:00:00Z", mergedBy: { login: "lead" } });
+    });
+
+    it("falls back to merged_by on older instances", async () => {
+      const { adapter: gl } = adapter([{ url: MR, body: mr({ state: "merged", merged_at: "2026-11-03T00:00:00Z", merged_by: user("old") }) }]);
+      expect(await gl.getChangeDetails("team/app", 7)).toMatchObject({ mergedBy: { login: "old" } });
+    });
+
+    it("says who closed it, and when", async () => {
+      const { adapter: gl } = adapter([{ url: MR, body: mr({ state: "closed", closed_at: "2026-11-04T00:00:00Z", closed_by: user("lead") }) }]);
+      expect(await gl.getChangeDetails("team/app", 7)).toMatchObject({ state: "closed", closedAt: "2026-11-04T00:00:00Z", closedBy: { login: "lead" } });
+    });
+  });
+
+  describe("getDiff", () => {
+    const COMPARE = /\/repository\/compare\?from=b1&to=h1$/;
+
+    it("maps the compared diffs with their patches, as an MR's diffs are", async () => {
+      const { adapter: gl } = adapter([
+        {
+          url: COMPARE,
+          body: {
+            diffs: [
+              { old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: "@@ -1 +1 @@\n-a\n+b\n" },
+              { old_path: "gone.ts", new_path: "gone.ts", new_file: false, renamed_file: false, deleted_file: true, diff: "@@ -1 +0,0 @@\n-x\n" },
+              { old_path: "huge.ts", new_path: "huge.ts", new_file: true, renamed_file: false, deleted_file: false, diff: "", too_large: true },
+            ],
+          },
+        },
+      ]);
+      const files = await gl.getDiff("team/app", "b1", "h1");
+      expect(files?.map(({ path, changeType, patchUnavailable, hunks }) => ({ path, changeType, patchUnavailable, hunks: hunks.length }))).toEqual([
+        { path: "a.ts", changeType: "modified", patchUnavailable: false, hunks: 1 },
+        { path: "gone.ts", changeType: "deleted", patchUnavailable: false, hunks: 1 },
+        { path: "huge.ts", changeType: "added", patchUnavailable: true, hunks: 0 },
+      ]);
+    });
+
+    it.each([400, 404])("returns null when GitLab answers %i", async (status) => {
+      const { adapter: gl } = adapter([{ url: COMPARE, status, body: { message: "Could not find ref" } }]);
+      expect(await gl.getDiff("team/app", "b1", "h1")).toBeNull();
+    });
+
+    it("returns null when GitLab timed out computing the diff", async () => {
+      const { adapter: gl } = adapter([{ url: COMPARE, body: { diffs: [], compare_timeout: true } }]);
+      expect(await gl.getDiff("team/app", "b1", "h1")).toBeNull();
+    });
   });
 
   describe("getToolAnnotations", () => {

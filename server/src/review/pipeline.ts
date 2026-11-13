@@ -32,6 +32,9 @@ import { capFindings, compareFindings, validateFindings, validateToolFindings, t
 import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkClaims } from "./validate/claims.ts";
 import { checkPatternRules } from "./rules.ts";
+import { lineCounts, storedFiles } from "./diff/stored.ts";
+
+export { MAX_STORED_PATCH_CHARS, MAX_STORED_PATCHES_CHARS } from "./diff/stored.ts";
 
 export interface ReviewDeps {
   generate: Generate;
@@ -104,26 +107,6 @@ const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
 const MANIFEST_ALLOWANCE = Math.ceil(MAX_MANIFEST_CHARS / 4);
 // The agentic instructions and the tool definitions, on top of the review's.
 const AGENTIC_ALLOWANCE = 2_000;
-
-function lineCounts(changeSet: ChangeSet): ReviewResult["files"] {
-  return changeSet.files.map((file) => {
-    let additions = 0;
-    let deletions = 0;
-    for (const hunk of file.hunks) {
-      for (const line of hunk.content.split("\n").slice(1)) {
-        if (line.startsWith("+")) additions += 1;
-        else if (line.startsWith("-")) deletions += 1;
-      }
-    }
-    return {
-      path: file.path,
-      ...(file.previousPath ? { previousPath: file.previousPath } : {}),
-      changeType: file.changeType,
-      additions,
-      deletions,
-    };
-  });
-}
 
 // A tool finding the model also reported: same file and category, with
 // overlapping lines, or the very same fingerprint.
@@ -237,7 +220,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   if (multiPass) {
     const summaries = new Map(((await awaitWalkthrough())?.fileSummaries ?? []).map((entry) => [entry.path, entry.summary]));
     const paths = new Set(reviewable.map((file) => file.path));
-    manifest = lineCounts(changeSet)
+    manifest = lineCounts(changeSet.files)
       .filter((file) => paths.has(file.path))
       .map((file) => {
         const summary = summaries.get(file.path);
@@ -441,7 +424,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       ...(changeSet.headRef ? { headRef: changeSet.headRef } : {}),
       isDraft: changeSet.isDraft,
     },
-    files: lineCounts(changeSet),
+    files: storedFiles(changeSet.files),
     findings,
     ...(walkthrough ? { walkthrough } : {}),
     ...(increment

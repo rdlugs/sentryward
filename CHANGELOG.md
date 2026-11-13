@@ -10,6 +10,36 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- A file tree and per-file diffs on the review page. The changed files are
+  listed as a tree on the left (single-child directories folded, each file
+  with its line counts and a badge for its findings), and the first file's
+  diff opens by default, with each finding shown under the last line it
+  covers and findings off the diff listed above it. The walkthrough and the
+  full findings list move to an Overview entry at the top of the tree, and
+  a finding's path there opens its diff. The selection is kept in the URL
+  (`?path=` or `?view=overview`). Below the `lg` breakpoint the tree opens
+  in a sheet. Reviews now store each file's patch in their result (up to
+  200,000 characters per file and 2,000,000 per review; a file over either
+  limit, a binary file or a diff the forge withheld is listed with the
+  reason instead), so the page shows the revision that was reviewed and
+  retention clears it with the rest of the result. The tree and diffs show
+  for every status: a review with no diffs stored (results from before they
+  were kept, and queued, running, skipped, failed, cancelled, superseded or
+  expired runs) reads them from the forge through the new
+  `GET /api/reviews/:id/diff`, pinned to the reviewed commits when the job
+  recorded its base, under the same limits and never written back. A queued
+  or running review opens on its progress; any other opens its first file
+  with its notes, or the reason it did not run, above the diff.
+- Who opened a PR/MR and its dates on the review page. The header names the
+  author ("opened by @user · 2 days ago"), and the sidebar's Change card
+  shows the change's state (Open, Draft, Merged or Closed), when it was
+  opened and last updated, and when and by whom it was merged or closed.
+  Both also show the source and target branch (a GitHub fork's source as
+  `owner:branch`), falling back to the branches the review recorded, and
+  the sidebar's branch rows replace its old `base ← head` line.
+  They are read live from the forge through the new
+  `GET /api/reviews/:id/change`, so a merge after the review shows up, and
+  the rest of the page still renders when the forge cannot be reached.
 - Claim checks (`review.check_claims`, on by default). A finding may name the
   fact it rests on: a path that does not exist, a symbol nothing references,
   or a file nothing imports. Before verification, the claim is looked up at

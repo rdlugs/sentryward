@@ -89,7 +89,9 @@ function useFindingFilters() {
   }
 }
 
-export function FindingsSection({ result }: { result: ReviewResult }) {
+// onOpenFile shows a file's diff; a finding's path links there when its file is
+// part of the change.
+export function FindingsSection({ result, onOpenFile }: { result: ReviewResult; onOpenFile?: (path: string) => void }) {
   const filters = useFindingFilters()
   const [open, setOpen] = useState(
     () => new Set(result.findings.filter((f) => OPEN_BY_DEFAULT.has(f.bucket)).map((f) => f.fingerprint)),
@@ -311,7 +313,17 @@ export function FindingsSection({ result }: { result: ReviewResult }) {
                   <div key={path} className="flex flex-col gap-2">
                     <h3 className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
                       <FileCode className="size-4 text-muted-foreground" aria-hidden />
-                      <span className="font-mono break-all">{path}</span>
+                      {file && onOpenFile ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpenFile(path)}
+                          className="text-left font-mono break-all hover:underline focus-visible:underline focus-visible:outline-none"
+                        >
+                          {path}
+                        </button>
+                      ) : (
+                        <span className="font-mono break-all">{path}</span>
+                      )}
                       {file && (
                         <span className="text-xs text-muted-foreground">
                           {file.changeType} ·{" "}

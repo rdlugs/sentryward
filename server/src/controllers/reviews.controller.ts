@@ -5,7 +5,10 @@ import { prisma } from "../lib/prisma.ts";
 import { median } from "../lib/stats.ts";
 import { Prisma } from "../generated/prisma/client.ts";
 import type { Repository } from "../generated/prisma/client.ts";
-import { MAX_CHANGE_NUMBER, reviewResultSchema } from "../review/core/models.ts";
+import { MAX_CHANGE_NUMBER, reviewResultSchema, type ChangedFile } from "../review/core/models.ts";
+import { storedFiles } from "../review/diff/stored.ts";
+import { forgeCache } from "../review/forge/cache.ts";
+import { forgeName } from "../review/forge/providers.ts";
 import { roundUsd } from "../review/core/pricing/pricing.ts";
 import { parseChangeUrl } from "../review/forge/url.ts";
 import { toJson } from "../review/render/json.ts";
@@ -417,6 +420,62 @@ export async function getReviewMarkdown(req: Request, res: Response) {
   res
     .type("text/markdown; charset=utf-8")
     .send(toMarkdown(result, { counts, stats, lifecycle, agentPrompt, rules, findingPrompts, ...walkthroughOptions(output) }));
+}
+
+// A review the workspace owns, with an adapter for its repository's
+// connection, for the endpoints that read the change from the forge.
+async function loadReviewForge(req: Request) {
+  const { id } = reviewIdParamSchema.parse(req.params);
+  const job = await prisma.reviewJob.findFirst({
+    where: { id, ...ownedBy(req.workspaceId!) },
+    select: { number: true, headSha: true, baseSha: true, repository: { include: { connection: true } } },
+  });
+  if (!job) {
+    throw new HttpError(404, "Review not found");
+  }
+  return { job, repo: job.repository, forge: adapterForConnection(job.repository.connection) };
+}
+
+// The change a review looked at, for the review page's file tree when the
+// result has no patches stored: results from before they were kept, and runs
+// that never stored one (queued, running, skipped, failed, expired). Read from
+// the forge on each view, pinned to the reviewed commits where they are known,
+// and never written back, so retention still decides what is kept.
+export async function getReviewDiff(req: Request, res: Response) {
+  const { job, repo, forge } = await loadReviewForge(req);
+  try {
+    let files: ChangedFile[] | null;
+    if (job.baseSha) {
+      files = await forge.getDiff(repo.fullPath, job.baseSha, job.headSha, forgeCache);
+    } else {
+      // No base recorded yet (a queued job, or one skipped before the change
+      // was fetched): the change as it is now, if its head is still the one
+      // this job is for, else that head against the change's current base.
+      const change = await forge.getChange(repo.fullPath, job.number, forgeCache);
+      files =
+        change.forgeRef.headSha === job.headSha
+          ? change.files
+          : await forge.getDiff(repo.fullPath, change.forgeRef.baseSha, job.headSha, forgeCache);
+    }
+    if (!files) {
+      throw new HttpError(404, `The reviewed commits are no longer on ${forgeName(repo.provider)}`);
+    }
+    res.json({ files: storedFiles(files), headSha: job.headSha });
+  } catch (err) {
+    throw toHttpError(err, repo.provider);
+  }
+}
+
+// Who opened the change and what has happened to it since (merged, closed),
+// read live so a review shows a merge that came after it. Not cached: none of
+// it is fixed by a commit.
+export async function getReviewChange(req: Request, res: Response) {
+  const { job, repo, forge } = await loadReviewForge(req);
+  try {
+    res.json({ change: await forge.getChangeDetails(repo.fullPath, job.number) });
+  } catch (err) {
+    throw toHttpError(err, repo.provider);
+  }
 }
 
 export async function rerunReview(req: Request, res: Response) {

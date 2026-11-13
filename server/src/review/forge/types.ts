@@ -1,5 +1,5 @@
 import type { DirListing } from "../context/gather.ts";
-import type { ChangeSet, ForgeProvider, ForgeRef, IssueContext } from "../core/models.ts";
+import type { ChangedFile, ChangeSet, ForgeProvider, ForgeRef, IssueContext } from "../core/models.ts";
 import type { ForgeCache } from "./cache.ts";
 import type { ToolResults } from "./toolResults.ts";
 
@@ -19,6 +19,32 @@ export interface ChangeHead {
   title: string;
   state: "open" | "closed" | "merged";
   isDraft: boolean;
+}
+
+// A forge account as a change shows it.
+export interface ForgeUser {
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+  webUrl?: string;
+}
+
+// Who opened a change and what has happened to it since, read live for the
+// review page; nothing here is fixed by a commit, so it is never cached.
+export interface ChangeDetails {
+  state: "open" | "closed" | "merged";
+  isDraft: boolean;
+  // The branch the change merges from, and the one it merges into. A GitHub
+  // pull request from a fork names its source as owner:branch.
+  sourceBranch: string;
+  targetBranch: string;
+  author?: ForgeUser;
+  createdAt: string;
+  updatedAt: string;
+  mergedAt?: string;
+  mergedBy?: ForgeUser;
+  closedAt?: string;
+  closedBy?: ForgeUser;
 }
 
 // An open PR/MR as listed for picking one to review by hand.
@@ -55,6 +81,8 @@ export interface ForgeAdapter {
   getChange(project: string, number: number, cache?: ForgeCache): Promise<ChangeSet>;
   // Just enough to queue a review, without fetching the diff.
   getChangeHead(project: string, number: number): Promise<ChangeHead>;
+  // The change's author, state and dates, for the review page.
+  getChangeDetails(project: string, number: number): Promise<ChangeDetails>;
   // Open changes, most recently updated first.
   listOpenChanges(project: string): Promise<ChangeSummary[]>;
   // Raw file content at a ref, or null when the file does not exist there.
@@ -73,6 +101,10 @@ export interface ForgeAdapter {
   // or is not an ancestor of `to` (a force push or rebase), or when the forge
   // cut the list short. Fixed by the two shas, so read through the cache.
   compareCommits(project: string, from: string, to: string, cache?: ForgeCache): Promise<string[] | null>;
+  // The files changed from the merge base of `base` and `head` to `head`, with
+  // patches, for showing a review's diff after the fact. Null when either sha
+  // is gone or the forge could not compute the diff.
+  getDiff(project: string, base: string, head: string, cache?: ForgeCache): Promise<ChangedFile[] | null>;
   // What static analyzers already reported for the change's head revision:
   // check run annotations on GitHub, Code Quality and SAST reports from the
   // head pipeline on GitLab. No checks or pipeline is an empty result, not an
