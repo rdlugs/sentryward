@@ -143,7 +143,7 @@ describe("POST /api/reviews by repository", () => {
     expect(res.body.review).toMatchObject({ number: 7, headSha: "abc123", trigger: "manual", status: "queued" });
   });
 
-  it("queues a review with the focus asked for, by URL or by change, and none when it is blank", async () => {
+  it("queues a review with the focus asked for, by URL or by change, and treats a blank one as none", async () => {
     vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
 
     const byUrl = await request(app).post("/api/reviews").set("Cookie", cookie).send({ url: MR_URL, focus: "  the auth logic " });
@@ -155,8 +155,12 @@ describe("POST /api/reviews by repository", () => {
     expect(byRepo.body.review.id).not.toBe(byUrl.body.review.id);
     expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: byRepo.body.review.id } })).toMatchObject({ focus: "billing" });
 
+    const spaced = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "the\n  db   layer" });
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: spaced.body.review.id } })).toMatchObject({ focus: "the db layer" });
+
+    // A blank focus is none, and a focused review already answers that.
     const blank = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "  " });
-    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: blank.body.review.id } })).toMatchObject({ focus: null });
+    expect(blank.body.review.id).toBe(spaced.body.review.id);
   });
 
   it("validates the body", async () => {
@@ -716,9 +720,12 @@ describe("POST /api/reviews/:id/rerun", () => {
     expect(res.body.review).toMatchObject({ number: 7, headSha: "newsha", status: "queued" });
   });
 
-  it("asks the same question again, focus included", async () => {
+  it("asks the same question again, focus included, even after retention cleared the result", async () => {
     const job = await completedJob();
-    await prisma.reviewJob.update({ where: { id: job.id }, data: { focus: "the auth logic" } });
+    await prisma.reviewJob.update({
+      where: { id: job.id },
+      data: { focus: "the auth logic", result: Prisma.DbNull, resultExpiredAt: new Date() },
+    });
     vi.stubGlobal("fetch", fetchStub([mrRoute("newsha")]).fetch);
 
     const res = await request(app).post(`/api/reviews/${job.id}/rerun`).set("Cookie", cookie);

@@ -15,15 +15,18 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   still reporting real problems elsewhere. The rest of the command's line is
   used, trimmed and capped at 300 characters. The dashboard's manual review
   sheet has an optional Focus field, and `POST /api/reviews` takes an
-  optional `focus`. It is stored on the job (`review_jobs.focus`, a new
-  nullable column), never in settings; a re-run keeps it, and retention
-  clears it with the result. It reaches the review passes as untrusted text
-  in the user prompt (not the verifier or walkthrough), is recorded as
-  `result.focus`, and the summary comment shows it as a "Focus" line, on a
-  clean pass too. A request with a different focus for a head that is
-  already queued supersedes that job instead of being merged into it, and one
-  for a head under review waits behind it. The review page's sidebar shows
-  the focus.
+  optional `focus`; either way whitespace is collapsed and the cap counts
+  characters, so an emoji is never split. It is stored on the job
+  (`review_jobs.focus`, a new nullable column), never in settings, and
+  retention keeps it, so a re-run asks the same question. It reaches the
+  review passes as untrusted text in the user prompt (not the verifier or
+  walkthrough), and only a review with a focus spends prompt budget on it.
+  It is recorded as `result.focus`, and the summary comment shows it as a
+  plain-text "Focus" line (links, images and emphasis are escaped), on a
+  clean pass too. A request without a focus reuses a queued or running
+  review of the same head, focused or not; a request with a different focus
+  supersedes a queued one (the last of two focuses wins) or waits behind a
+  running one. The review page's sidebar shows the focus.
 - A file tree and per-file diffs on the review page. The changed files are
   listed as a tree on the left (single-child directories folded, each file
   with its line counts and a badge for its findings), and the first file's

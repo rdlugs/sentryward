@@ -158,7 +158,6 @@ export interface ChangedFile {
 
 export interface ReviewResult {
   schemaVersion: 1
-  focus?: string
   status: "completed" | "partial" | "failed"
   errors: string[]
   warnings: string[]
@@ -269,7 +268,6 @@ export interface ReviewProgress {
 export interface ReviewDetail extends ReviewListItem {
   baseSha: string | null
   // What the requester asked this run to look hardest at; their own text.
-  // Cleared by retention like the result.
   focus: string | null
   attempts: number
   result: ReviewResult | null

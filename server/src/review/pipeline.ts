@@ -103,9 +103,9 @@ const INCOMPLETE: ReadonlySet<OmissionReason> = new Set([
 
 // The title, description, guidance and previously-rejected list are bounded but
 // not counted exactly, so they get a generous fixed allowance next to the
-// measured system prompt. The other terms cover the rejected and focus
-// sections (their caps at ~4 chars/token) so they cannot crowd out the diff.
-const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4) + Math.ceil(MAX_FOCUS / 4);
+// measured system prompt. The last term covers the rejected section (its
+// MAX_REJECTED_CHARS at ~4 chars/token) so it cannot crowd out the diff.
+const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
 // A multi-pass review also lists the whole change in every pass, capped at
 // MAX_MANIFEST_CHARS.
 const MANIFEST_ALLOWANCE = Math.ceil(MAX_MANIFEST_CHARS / 4);
@@ -152,6 +152,8 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   let overhead =
     estimateTokens(reviewSystemPrompt(config)) +
     USER_PROMPT_ALLOWANCE +
+    // Only a review asked for a focus sends that section, so only it pays.
+    (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
     (agentic ? AGENTIC_ALLOWANCE + config.review.agent.maxToolTokens : 0);
   let plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
   // Only a change that needs several passes gets the manifest, so only then is

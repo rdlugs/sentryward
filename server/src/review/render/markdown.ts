@@ -215,12 +215,18 @@ function verdictSection(result: ReviewResult): string[] {
   return lines;
 }
 
+// The requester's own words, posted under the bot's name: on top of what
+// inline() neutralizes (tags, pipes, mentions, hidden markers), the markdown
+// that makes links, images or emphasis is escaped, so it reads as typed.
+// inline() escapes backslashes first, so none of these escapes can be undone.
+function plainText(text: string): string {
+  return inline(text).replace(/[[\]()!*_~`]/g, "\\$&");
+}
+
 // The area the requester asked this run to look hardest at, so readers know why
-// some code got more attention. Their own words: kept to one line, with tags,
-// mentions and hidden markers neutralized like other outside text.
+// some code got more attention.
 function focusLines(result: ReviewResult): string[] {
-  const focus = result.focus?.trim();
-  return focus ? ["", `**🎯 Focus:** ${inline(focus)}`] : [];
+  return result.focus ? ["", `**🎯 Focus:** ${plainText(result.focus)}`] : [];
 }
 
 function countsLine(result: ReviewResult): string {

@@ -81,8 +81,14 @@ describe("enqueue", () => {
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: plain.id } })).status).toBe("superseded");
     expect((await focused("auth")).id).toBe(auth.id);
 
+    // A focus only prioritizes, so a plain request is answered by it.
+    expect((await focused(null)).id).toBe(auth.id);
+    expect((await job("aaa")).id).toBe(auth.id);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: auth.id } })).status).toBe("queued");
+
     // A running one keeps going; the new request waits behind it.
     await prisma.reviewJob.update({ where: { id: auth.id }, data: { status: "running" } });
+    expect((await job("aaa")).id).toBe(auth.id);
     const billing = await focused("billing");
     expect(billing).toMatchObject({ status: "queued", focus: "billing" });
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: auth.id } })).status).toBe("running");

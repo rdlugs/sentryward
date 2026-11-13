@@ -5,7 +5,7 @@ import { prisma } from "../lib/prisma.ts";
 import type { Prisma, Repository, ReviewJob, ReviewTrigger } from "../generated/prisma/client.ts";
 import { loadDashboardConfig } from "../review/config/load.ts";
 import type { ResultSummary } from "../review/render/json.ts";
-import type { ReviewProgress } from "../review/core/models.ts";
+import { normalizeFocus, type ReviewProgress } from "../review/core/models.ts";
 
 export interface EnqueueInput {
   repositoryId: string;
@@ -36,11 +36,14 @@ function lockEnqueue(tx: Prisma.TransactionClient, repositoryId: string, number:
 
 // A newer push makes any still-queued review of the same PR pointless, so it is
 // marked superseded rather than left to spend a model call. A job for the same
-// head that is already queued or running is returned instead of duplicated,
-// unless it was asked for with a different focus: then the request would be
-// silently ignored, so it supersedes a queued one or waits behind a running
-// one (the change's lease keeps the two from running at once).
-export async function enqueue(input: EnqueueInput): Promise<ReviewJob> {
+// head that is already queued or running is returned instead of duplicated.
+// A focus only prioritizes, so a review with any focus answers a request
+// without one. A request with a focus the job lacks would be silently ignored
+// by returning it, so it supersedes a queued one or waits behind a running one
+// (the change's lease keeps the two from running at once): of two different
+// focuses, the last asked for wins.
+export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
+  const input = { ...request, focus: normalizeFocus(request.focus) };
   return prisma.$transaction(async (tx) => {
     await lockEnqueue(tx, input.repositoryId, input.number);
 
@@ -50,7 +53,7 @@ export async function enqueue(input: EnqueueInput): Promise<ReviewJob> {
         number: input.number,
         headSha: input.headSha,
         status: { in: ["queued", "running"] },
-        focus: input.focus ?? null,
+        ...(input.focus ? { focus: input.focus } : {}),
       },
     });
     if (existing) {

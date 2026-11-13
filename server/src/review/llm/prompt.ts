@@ -170,9 +170,11 @@ function manifestSection(entries: ManifestEntry[], chunk: Chunk): string {
 // The area the requester asked this one review to look hardest at. In the
 // user prompt, not the system prompt, so runs with and without a focus share
 // the cached system prefix. Their own words, so wrapped as untrusted.
+// Normalized where it was accepted (normalizeFocus); the cap here only backs
+// that up.
 function focusSection(focus: string): string {
   return `Focus requested for this review. Look hardest at this area, but still report real problems anywhere in the diff:\n${untrusted(
-    focus.trim(),
+    focus,
     MAX_FOCUS,
   )}`;
 }
@@ -199,7 +201,7 @@ export function reviewUserPrompt(
     `Title: ${untrusted(changeSet.title, 300)}`,
     `Description:\n${untrusted(changeSet.description || "(none)", MAX_DESCRIPTION_CHARS)}`,
     guidance(config, languages),
-    focus?.trim() ? focusSection(focus) : "",
+    focus ? focusSection(focus) : "",
     rejectedSection(rejected),
     withManifest && manifest ? manifestSection(manifest, chunk) : "",
     `Diff:${pass}\n${chunk.text}`,

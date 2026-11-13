@@ -111,8 +111,8 @@ describe("pruneReviews", () => {
         result: null,
         resolvedConfig: null,
         publication: null,
-        // The requester's words, cleared with the rest of what they reviewed.
-        focus: null,
+        // Kept, so a re-run asks the same question.
+        focus: "auth",
         summary: { title: "T" },
         resultExpiredAt: NOW,
       });
@@ -256,7 +256,7 @@ describe("purgeStaleChanges", () => {
     expect(await prisma.finding.count()).toBe(0);
     expect(await prisma.postedFinding.count()).toBe(0);
     expect(await prisma.threadReply.count()).toBe(0);
-    expect(await load(newest.id)).toMatchObject({ result: null, focus: null, summary: { title: "T" }, resultExpiredAt: NOW });
+    expect(await load(newest.id)).toMatchObject({ result: null, focus: "auth", summary: { title: "T" }, resultExpiredAt: NOW });
     // A second pass has nothing left to do.
     expect((await purgeStaleChanges(30, { now: NOW, workspaceIds: [workspaceId] })).changes).toBe(0);
   });

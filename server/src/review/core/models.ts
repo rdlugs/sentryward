@@ -63,6 +63,15 @@ export const MAX_CHANGE_NUMBER = 2_147_483_647;
 // phrase. Bounded wherever it enters: the comment command and the API.
 export const MAX_FOCUS = 300;
 
+// The one place a focus is shaped, whichever way it arrived: whitespace
+// (newlines included) collapsed to single spaces, capped by code point so an
+// emoji is never split, and null when nothing is left.
+export function normalizeFocus(text: string | null | undefined): string | null {
+  const collapsed = (text ?? "").replace(/\s+/g, " ").trim();
+  const capped = Array.from(collapsed).slice(0, MAX_FOCUS).join("").trim();
+  return capped || null;
+}
+
 export const forgeRefSchema = z.object({
   provider: forgeProviderSchema,
   host: z.string(),

@@ -127,6 +127,13 @@ describe("parseReviewCommand", () => {
     }
   });
 
+  it("takes \"on\" as the connective only when it is a whole word", () => {
+    expect(parseReviewCommand("/sentryward review focus on: the session code")).toEqual({ focus: "the session code" });
+    expect(parseReviewCommand("/sentryward review focus on-call paging")).toEqual({ focus: "on-call paging" });
+    expect(parseReviewCommand("/sentryward review focus only the db")).toEqual({ focus: "only the db" });
+    expect(parseReviewCommand("/sentryward review focus   the   db\tlayer")).toEqual({ focus: "the db layer" });
+  });
+
   it("has no focus without the keyword, or with nothing after it", () => {
     expect(parseReviewCommand("/sentryward review")).toEqual({ focus: null });
     expect(parseReviewCommand("/sentryward review please")).toEqual({ focus: null });
@@ -136,9 +143,13 @@ describe("parseReviewCommand", () => {
     expect(parseReviewCommand("/sentryward review\nfocus on billing")).toEqual({ focus: null });
   });
 
-  it("caps the focus", () => {
+  it("caps the focus by character, never splitting an emoji", () => {
     const { focus } = parseReviewCommand(`/sentryward review focus ${"x".repeat(MAX_FOCUS + 50)}`);
     expect(focus).toHaveLength(MAX_FOCUS);
+
+    const emoji = parseReviewCommand(`/sentryward review focus ${"x".repeat(MAX_FOCUS - 1)}😀tail`).focus!;
+    expect(Array.from(emoji)).toHaveLength(MAX_FOCUS);
+    expect(emoji.endsWith("😀")).toBe(true);
   });
 });
 
