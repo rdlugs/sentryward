@@ -372,12 +372,11 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   if (publishes(config)) {
     // Best effort: a review must not fail because its progress note did.
     if (config.output.postSummary) {
-      const outputs = { walkthrough, inline: config.output.postInline, status: config.output.postCheck, targetUrl };
       // Whether this review will have findings is not known yet, so under
       // output.summaryOnlyWithFindings the note only replaces a summary an
       // earlier run left and never starts one a clean run would leave behind.
       await forge
-        .upsertSummaryComment(ref, progressMarkdown(changeSet, outputs), {
+        .upsertSummaryComment(ref, progressMarkdown(changeSet, { targetUrl }), {
           create: !config.output.summaryOnlyWithFindings,
         })
         .then((id) => {

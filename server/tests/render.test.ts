@@ -3,9 +3,9 @@ import type { ReviewResult } from "../src/review/core/models.ts";
 import { summarize, toJson } from "../src/review/render/json.ts";
 import { inlineBody } from "../src/review/publish/inline.ts";
 import { allFindingsPrompt, findingPrompt } from "../src/review/render/agentPrompt.ts";
-import { BRAND_FOOTER, PROGRESS_BAR_URL, SUMMARY_MARKER, sanitize, toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
+import { BRAND_FOOTER, PROGRESS_BADGE_URL, SUMMARY_MARKER, sanitize, toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
 import { cancelledMarkdown, progressMarkdown } from "../src/review/render/progress.ts";
-import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
+import { makeChangeSet } from "./helpers/changeSet.ts";
 import { sampleResult } from "./helpers/result.ts";
 
 describe("summarize and toJson", () => {
@@ -343,7 +343,6 @@ describe("agent prompts", () => {
   });
 });
 
-const ALL_OUTPUTS = { walkthrough: true, inline: true, status: true };
 
 describe("structured evidence", () => {
   const finding = async () => {
@@ -425,55 +424,45 @@ describe("structured evidence", () => {
 });
 
 describe("progressMarkdown", () => {
-  it("is a status card with no heading, linking the short SHA to the commit", () => {
-    const body = progressMarkdown({ ...makeChangeSet(), forgeRef: { ...makeChangeSet().forgeRef, headSha: "abcdef1234567" } }, ALL_OUTPUTS);
+  it("is a status card with the animated badge, then the short SHA linked to the commit", () => {
+    const body = progressMarkdown({ ...makeChangeSet(), forgeRef: { ...makeChangeSet().forgeRef, headSha: "abcdef1234567" } });
     expect(body).not.toMatch(/^#/m);
     expect(body).not.toContain("<div");
     expect(
       body.startsWith(
-        `<img src="${PROGRESS_BAR_URL}" alt="Review in progress" width="320" height="4">\n\n` +
-          "⏳ **Review in progress** · [`abcdef1`](https://github.com/acme/web/pull/42/commits/abcdef1234567)\n\n",
+        `<img src="${PROGRESS_BADGE_URL}" alt="Review in progress" width="360" height="48">\n\n` +
+          "Reviewing [`abcdef1`](https://github.com/acme/web/pull/42/commits/abcdef1234567) · results will replace this comment\n\n",
       ),
     ).toBe(true);
-    expect(body).toContain(
-      "📝 Walkthrough and summary appear here · 💬 Findings land inline on the diff · ✔️ `sentryward/review` status\n",
-    );
   });
 
   it("links GitLab commits inside the merge request", () => {
     const changeSet = makeChangeSet();
     changeSet.forgeRef = { ...changeSet.forgeRef, provider: "gitlab", webUrl: "https://gitlab.com/acme/web/-/merge_requests/42" };
-    expect(progressMarkdown(changeSet, ALL_OUTPUTS)).toContain(
+    expect(progressMarkdown(changeSet)).toContain(
       "[`head`](https://gitlab.com/acme/web/-/merge_requests/42/diffs?commit_id=head)",
     );
   });
 
-  it("falls back to a plain SHA and only promises what will be published", () => {
+  it("falls back to a plain SHA without a web URL", () => {
     const changeSet = makeChangeSet();
     changeSet.forgeRef = { ...changeSet.forgeRef, webUrl: undefined };
-    const body = progressMarkdown(changeSet, { walkthrough: false, inline: false, status: false });
-    expect(body).toContain("⏳ **Review in progress** · `head`\n");
-    expect(body).toContain("\n📝 Summary appears here\n");
-    expect(body).not.toMatch(/walkthrough|inline|status/i);
+    expect(progressMarkdown(changeSet)).toContain("\nReviewing `head` · results will replace this comment\n");
   });
 
-  it("shows the change's scope from its hunks", () => {
-    expect(progressMarkdown(makeChangeSet(), ALL_OUTPUTS)).toContain("\n📂 1 file · `+2` `-0`\n");
-    const changeSet = makeChangeSet([
-      { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
-      { path: "src/old.ts", changeType: "modified", patch: "@@ -1,3 +1,2 @@\n a\n-b\n--- c\n+d" },
-    ]);
-    expect(progressMarkdown(changeSet, ALL_OUTPUTS)).toContain("\n📂 2 files · `+3` `-2`\n");
+  it("leaves out the change's scope and what the review will post", () => {
+    const body = progressMarkdown(makeChangeSet());
+    expect(body).not.toMatch(/📂|\bfiles?\b|walkthrough|appears? here|inline|`\+\d+`/i);
   });
 
   it("links the dashboard's live progress only when given a target", () => {
-    expect(progressMarkdown(makeChangeSet(), ALL_OUTPUTS)).not.toContain("View live progress");
-    const body = progressMarkdown(makeChangeSet(), { ...ALL_OUTPUTS, targetUrl: "https://app.example/reviews/j1" });
+    expect(progressMarkdown(makeChangeSet())).not.toContain("View live progress");
+    const body = progressMarkdown(makeChangeSet(), { targetUrl: "https://app.example/reviews/j1" });
     expect(body).toContain(`\n[View live progress ↗](https://app.example/reviews/j1)\n\n${BRAND_FOOTER}\n`);
   });
 
   it("keeps the footer and then the summary marker so the review replaces it", () => {
-    const body = progressMarkdown(makeChangeSet(), ALL_OUTPUTS);
+    const body = progressMarkdown(makeChangeSet());
     expect(body.indexOf(BRAND_FOOTER)).toBeLessThan(body.indexOf(SUMMARY_MARKER));
     expect(body.trimEnd().endsWith(SUMMARY_MARKER)).toBe(true);
   });
@@ -496,7 +485,7 @@ describe("branding", () => {
     const bodies = [
       toMarkdown(result),
       walkthroughMarkdown(result),
-      progressMarkdown(makeChangeSet(), ALL_OUTPUTS),
+      progressMarkdown(makeChangeSet()),
       ...result.findings.map((f) => inlineBody(f, "github")),
     ];
     for (const body of bodies) {

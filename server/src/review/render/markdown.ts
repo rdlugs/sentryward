@@ -25,7 +25,9 @@ export { SUMMARY_MARKER };
 const ASSET_BASE = "https://raw.githubusercontent.com/rdlugs/sentryward/main/client/public";
 const LOGO_URL = `${ASSET_BASE}/sentryward-32.png`;
 // Comments take no CSS, so the progress note's animation lives in the image.
-export const PROGRESS_BAR_URL = `${ASSET_BASE}/sentryward-progress.svg`;
+// A new file rather than an edit of sentryward-progress.svg: comments already
+// posted on open changes still point at that one with its old dimensions.
+export const PROGRESS_BADGE_URL = `${ASSET_BASE}/sentryward-reviewing.svg`;
 
 // The only place Sentryward names itself in what it posts: a small credit at the
 // bottom of every comment, so the content reads as the review, not the tool.

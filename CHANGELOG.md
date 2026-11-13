@@ -263,6 +263,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   lifecycle ("Since the last review"), coverage, notes and the review stats
   line are left out. The same output is served by `GET /api/reviews/:id/markdown`. A
   pass that still has findings below the threshold keeps the full summary.
+- The in-progress summary comment is now a loading state only: an animated
+  badge (spinner, "Reviewing changes", pulsing dots and a shimmer track,
+  light/dark aware and still under reduced motion), a "Reviewing `<sha>` ·
+  results will replace this comment" line and the live progress link. The
+  file count and `+/-` line stats, and the "Walkthrough and summary appear
+  here · Findings land inline · status" line are gone. The badge is the new
+  `client/public/sentryward-reviewing.svg`; `sentryward-progress.svg` stays
+  for comments already posted.
 - The Models, Best model and Repositories tables on the Benchmarks page are
   paginated (#276), each with its own page and page size in the URL
   (`?modelsPage=`, `?bestPage=`, `?reposPage=`). Best model pages by model

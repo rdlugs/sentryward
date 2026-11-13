@@ -558,7 +558,7 @@ describe("runJob", () => {
     await runJob(job, runDeps);
 
     expect(published.summaries).toHaveLength(2);
-    expect(published.summaries[0]).toMatch(/^⏳ \*\*Review in progress\*\* · \[?`newhead`/m);
+    expect(published.summaries[0]).toMatch(/^Reviewing \[?`newhead`/m);
     expect(published.summaries[0]).toContain(`[View live progress ↗](`);
     expect(published.summaries[0]).toContain(`/reviews/${job.id})`);
     expect(published.summaries[0]).not.toContain("## Summary");
@@ -614,7 +614,7 @@ describe("runJob", () => {
     it("updates a summary an earlier run left, progress note first", async () => {
       const { published } = await run([], true);
       expect(published.summaries).toHaveLength(2);
-      expect(published.summaries[0]).toMatch(/^⏳ \*\*Review in progress\*\*/m);
+      expect(published.summaries[0]).toMatch(/^Reviewing /m);
     });
 
     it("posts the summary of a review with findings, without starting a progress note", async () => {
