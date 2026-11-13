@@ -1,17 +1,27 @@
 import { z } from "zod";
-import { MAX_CHANGE_NUMBER } from "../review/core/models.ts";
+import { MAX_CHANGE_NUMBER, MAX_FOCUS } from "../review/core/models.ts";
 import { pageSchema } from "./pagination.ts";
 
 const changeNumber = z.number().int().min(1).max(MAX_CHANGE_NUMBER);
 
+// The area this one review should look hardest at; blank means none.
+const focus = z
+  .string()
+  .trim()
+  .max(MAX_FOCUS, `Keep the focus under ${MAX_FOCUS} characters`)
+  .optional()
+  .transform((value) => value || undefined);
+
 export const createReviewSchema = z.object({
   url: z.string().trim().min(1, "Paste a pull or merge request URL"),
+  focus,
 });
 
 // Picked from a repository's open changes rather than pasted as a link.
 export const createReviewByRepoSchema = z.object({
   repoId: z.uuid(),
   number: changeNumber,
+  focus,
 });
 
 export const listReviewsQuerySchema = z.object({

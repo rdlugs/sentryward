@@ -68,7 +68,7 @@ export async function pruneReviews(
       // keeps its first expiry time.
       const { count } = await prisma.reviewJob.updateMany({
         where: { ...where, id: { in: ids } },
-        data: { result: Prisma.DbNull, resolvedConfig: Prisma.DbNull, publication: Prisma.DbNull, resultExpiredAt: now },
+        data: { result: Prisma.DbNull, resolvedConfig: Prisma.DbNull, publication: Prisma.DbNull, focus: null, resultExpiredAt: now },
       });
       trimmed += count;
     }
@@ -140,7 +140,7 @@ export async function purgeStaleChanges(
         prisma.threadReply.deleteMany({ where: { ...where, status: { in: ["done", "skipped", "failed"] } } }),
         prisma.reviewJob.updateMany({
           where: { ...where, resultExpiredAt: null, finishedAt: { lt: cutoff }, status: { in: TRIMMED } },
-          data: { result: Prisma.DbNull, resolvedConfig: Prisma.DbNull, publication: Prisma.DbNull, resultExpiredAt: now },
+          data: { result: Prisma.DbNull, resolvedConfig: Prisma.DbNull, publication: Prisma.DbNull, focus: null, resultExpiredAt: now },
         }),
       ]);
       total.changes++;

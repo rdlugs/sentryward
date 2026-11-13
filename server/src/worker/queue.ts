@@ -18,6 +18,8 @@ export interface EnqueueInput {
   // a review that fails before the change is fetched can still reach them
   // (personal notifications); the worker refreshes it from the fetch.
   authorId?: string;
+  // The area this run should look hardest at (see ReviewJob.focus).
+  focus?: string | null;
 }
 
 // Every write that queues, supersedes or cancels a change's queued jobs takes
@@ -34,7 +36,10 @@ function lockEnqueue(tx: Prisma.TransactionClient, repositoryId: string, number:
 
 // A newer push makes any still-queued review of the same PR pointless, so it is
 // marked superseded rather than left to spend a model call. A job for the same
-// head that is already queued or running is returned instead of duplicated.
+// head that is already queued or running is returned instead of duplicated,
+// unless it was asked for with a different focus: then the request would be
+// silently ignored, so it supersedes a queued one or waits behind a running
+// one (the change's lease keeps the two from running at once).
 export async function enqueue(input: EnqueueInput): Promise<ReviewJob> {
   return prisma.$transaction(async (tx) => {
     await lockEnqueue(tx, input.repositoryId, input.number);
@@ -45,6 +50,7 @@ export async function enqueue(input: EnqueueInput): Promise<ReviewJob> {
         number: input.number,
         headSha: input.headSha,
         status: { in: ["queued", "running"] },
+        focus: input.focus ?? null,
       },
     });
     if (existing) {

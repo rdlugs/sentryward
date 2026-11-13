@@ -124,7 +124,17 @@ export function useReviewChange(id: string, active: boolean) {
 }
 
 // A pasted link, or a change picked from a repository's open ones.
-export type CreateReviewInput = { url: string } | { repoId: string; number: number }
+// focus: the area this one review should look hardest at (blank means none).
+export type CreateReviewInput = ({ url: string } | { repoId: string; number: number }) & { focus?: string }
+
+// Same cap as the server's (MAX_FOCUS), so the input stops where the API would refuse.
+export const MAX_FOCUS = 300
+
+// A focus worth sending: trimmed, and left out entirely when blank.
+export function focusInput(focus: string | undefined): { focus?: string } {
+  const trimmed = focus?.trim()
+  return trimmed ? { focus: trimmed } : {}
+}
 
 // Why a pasted link was refused: the server's message for the url field when
 // there is one. Shared by the review URL form and the command palette.

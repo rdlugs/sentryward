@@ -1,6 +1,7 @@
 import type { Config } from "./config/schema.ts";
 import { verdictFor, blockingFindings } from "./core/verdict.ts";
 import {
+  MAX_FOCUS,
   RESULT_SCHEMA_VERSION,
   type ChangeSet,
   type Finding,
@@ -70,6 +71,9 @@ export interface RunReviewInput {
   // Static analyzer results the forge already holds for the head revision,
   // fetched by the caller when review.toolFindings is on.
   toolAnnotations?: ToolAnnotation[];
+  // The area to look hardest at, for this run only (ReviewJob.focus). A
+  // priority, not a filter: problems elsewhere are still reported.
+  focus?: string;
 }
 
 export interface Increment {
@@ -99,9 +103,9 @@ const INCOMPLETE: ReadonlySet<OmissionReason> = new Set([
 
 // The title, description, guidance and previously-rejected list are bounded but
 // not counted exactly, so they get a generous fixed allowance next to the
-// measured system prompt. The last term covers the rejected section (its
-// MAX_REJECTED_CHARS at ~4 chars/token) so it cannot crowd out the diff.
-const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
+// measured system prompt. The other terms cover the rejected and focus
+// sections (their caps at ~4 chars/token) so they cannot crowd out the diff.
+const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4) + Math.ceil(MAX_FOCUS / 4);
 // A multi-pass review also lists the whole change in every pass, capped at
 // MAX_MANIFEST_CHARS.
 const MANIFEST_ALLOWANCE = Math.ceil(MAX_MANIFEST_CHARS / 4);
@@ -236,7 +240,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     | { chunk: Chunk; review: ChunkReview; error?: undefined; spent?: undefined }
     | { chunk: Chunk; review?: undefined; error: string; spent: LlmUsage[] };
   const reviewPass = async (chunk: Chunk): Promise<PassOutcome> => {
-    const review = () => reviewChunk(deps.generate, changeSet, chunk, chunks.length, config, input.rejectedFindings, manifest);
+    const review = () => reviewChunk(deps.generate, changeSet, chunk, chunks.length, config, input.rejectedFindings, manifest, input.focus);
     if (!agentic) return { chunk, review: await review() };
     try {
       const { toolContext, ...result } = await reviewChunkAgentic(
@@ -248,6 +252,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
         { source: deps.context!, searches },
         input.rejectedFindings,
         manifest,
+        input.focus,
       );
       return { chunk: toolContext ? { ...chunk, toolContext } : chunk, review: result };
     } catch (err) {
@@ -433,6 +438,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     files: storedFiles(changeSet.files),
     findings,
     ...(walkthrough ? { walkthrough } : {}),
+    ...(input.focus ? { focus: input.focus } : {}),
     ...(increment
       ? {
           incremental: {

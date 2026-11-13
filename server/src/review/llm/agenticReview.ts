@@ -36,6 +36,7 @@ export async function reviewChunkAgentic(
   context: { source: ContextSource; searches: SearchBudget },
   rejected: RejectedFinding[] = [],
   manifest?: ManifestEntry[],
+  focus?: string,
 ): Promise<AgenticChunkReview> {
   const models = modelChain(config.llm, "review");
   const errors: unknown[] = [];
@@ -50,7 +51,7 @@ export async function reviewChunkAgentic(
       response = await generateAgentic({
         model,
         system,
-        prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest),
+        prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest, focus),
         schema,
         schemaName: "code_review",
         repair: repairReviewOutput,

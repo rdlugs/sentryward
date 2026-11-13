@@ -4,6 +4,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { app } from "../src/app.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
+import { parseReviewCommand } from "../src/lib/webhook.ts";
+import { MAX_FOCUS } from "../src/review/core/models.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { encryptWithOtherKey } from "./helpers/foreignKey.ts";
 import { createUser } from "./helpers/users.ts";
@@ -111,6 +113,33 @@ afterEach(() => {
 
 afterAll(async () => {
   await prisma.$disconnect();
+});
+
+describe("parseReviewCommand", () => {
+  it("takes the rest of the command's line after the focus keyword", () => {
+    for (const body of [
+      "/sentryward review focus on the auth and session logic",
+      "/sentryward review focus: the auth and session logic",
+      "/sentryward  review  Focus  the auth and session logic  ",
+      "Please look.\n/sentryward review focus on the auth and session logic\nThanks!",
+    ]) {
+      expect(parseReviewCommand(body)).toEqual({ focus: "the auth and session logic" });
+    }
+  });
+
+  it("has no focus without the keyword, or with nothing after it", () => {
+    expect(parseReviewCommand("/sentryward review")).toEqual({ focus: null });
+    expect(parseReviewCommand("/sentryward review please")).toEqual({ focus: null });
+    expect(parseReviewCommand("/sentryward review focus on")).toEqual({ focus: null });
+    expect(parseReviewCommand("/sentryward review focusing")).toEqual({ focus: null });
+    // Only the command's own line counts.
+    expect(parseReviewCommand("/sentryward review\nfocus on billing")).toEqual({ focus: null });
+  });
+
+  it("caps the focus", () => {
+    const { focus } = parseReviewCommand(`/sentryward review focus ${"x".repeat(MAX_FOCUS + 50)}`);
+    expect(focus).toHaveLength(MAX_FOCUS);
+  });
 });
 
 describe("POST /api/webhooks/github", () => {
@@ -247,7 +276,26 @@ describe("POST /api/webhooks/github", () => {
     const res = await sendGithub("issue_comment", commentEvent("COLLABORATOR"));
 
     expect(res.body.outcome).toBe("queued");
-    expect(await prisma.reviewJob.findFirst()).toMatchObject({ trigger: "comment", headSha: "headnow" });
+    expect(await prisma.reviewJob.findFirst()).toMatchObject({ trigger: "comment", headSha: "headnow", focus: null });
+  });
+
+  it("stores the focus a /sentryward review comment asks for", async () => {
+    await githubRepo();
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([
+        {
+          method: "POST",
+          url: /\/app\/installations\/55\/access_tokens$/,
+          body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        },
+        { url: /\/repos\/acme\/web\/pulls\/42$/, body: { state: "open", title: "T", base: { sha: "basenow", ref: "main" }, head: { sha: "headnow" } } },
+      ]).fetch,
+    );
+
+    await sendGithub("issue_comment", commentEvent("MEMBER", "/sentryward review focus on the session cookie handling"));
+
+    expect(await prisma.reviewJob.findFirst()).toMatchObject({ trigger: "comment", focus: "the session cookie handling" });
   });
 
   it("ignores the command from someone without push access, and comments without it", async () => {
@@ -534,6 +582,18 @@ describe("POST /api/webhooks/gitlab/:repoId", () => {
     level = 20;
     await prisma.reviewJob.deleteMany();
     expect((await sendGitlab(repo.id, "Note Hook", noteEvent)).body.outcome).toBe("not_allowed");
+  });
+
+  it("stores the focus a /sentryward review note asks for", async () => {
+    const repo = await gitlabRepo();
+    vi.stubGlobal("fetch", fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } }]).fetch);
+    const focused = {
+      ...noteEvent,
+      object_attributes: { ...noteEvent.object_attributes, note: "/sentryward review focus: migrations" },
+    };
+
+    expect((await sendGitlab(repo.id, "Note Hook", focused)).body.outcome).toBe("queued");
+    expect(await prisma.reviewJob.findFirst()).toMatchObject({ trigger: "comment", focus: "migrations" });
   });
 });
 

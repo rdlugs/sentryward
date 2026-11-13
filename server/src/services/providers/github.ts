@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { env } from "../../config/env.ts";
 import { HttpError } from "../../lib/httpError.ts";
 import { prisma } from "../../lib/prisma.ts";
-import { parseJson, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
+import { parseJson, parseReviewCommand, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
 import type { ForgeConnection } from "../../generated/prisma/client.ts";
 import { GitHubAdapter } from "../../review/forge/github.ts";
 import type { GitHubApp } from "../../review/forge/githubApp.ts";
@@ -185,6 +185,7 @@ export async function handleGithubEvent(
     headSha: head.headSha,
     trigger: "comment",
     actor: payload.comment!.user?.login ?? payload.sender?.login,
+    focus: parseReviewCommand(payload.comment!.body ?? "").focus,
   });
   return { body: { outcome: "queued", reviewId: job.id } };
 }

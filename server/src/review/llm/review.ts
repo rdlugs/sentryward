@@ -22,10 +22,11 @@ export async function reviewChunk(
   config: Config,
   rejected: RejectedFinding[] = [],
   manifest?: ManifestEntry[],
+  focus?: string,
 ): Promise<ChunkReview> {
   const response = await generateWithFallback(generate, modelChain(config.llm, "review"), {
     system: reviewSystemPrompt(config),
-    prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest),
+    prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest, focus),
     schema: reviewOutputSchemaFor(config),
     schemaName: "code_review",
     repair: repairReviewOutput,

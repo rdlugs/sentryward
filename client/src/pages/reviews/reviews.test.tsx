@@ -154,6 +154,44 @@ describe("Reviews page", () => {
     expect(await screen.findByText("Waiting for a worker...")).toBeInTheDocument()
     expect(queued).toHaveBeenCalledOnce()
   })
+
+  const focusRoutes = (bodies: unknown[]) => ({
+    "GET /api/reviews?view=changes&page=1&limit=10": { reviews: [], total: 0, page: 1, limit: 10 },
+    "GET /api/repos": { repos: [savedRepo("r1", "team/web")] },
+    "GET /api/repos/r1/changes": { changes: [openChange(4, "Add search")] },
+    "POST /api/reviews": (init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return jsonResponse(202, { review: { ...listItem, status: "queued", verdict: null } })
+    },
+    [`GET /api/reviews/${listItem.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null, attempts: 0 } },
+  })
+
+  it("sends the focus, trimmed, with a picked change", async () => {
+    const bodies: unknown[] = []
+    mockApi(focusRoutes(bodies))
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await openManualReview()
+    await userEvent.type(await screen.findByLabelText("Focus (optional)"), "  the auth logic ")
+    await userEvent.click(await screen.findByRole("combobox", { name: "Repository" }))
+    await userEvent.click(screen.getByRole("option", { name: /team\/web/ }))
+    await userEvent.click(await screen.findByRole("button", { name: "Review !4" }))
+
+    await waitFor(() => expect(bodies).toEqual([{ repoId: "r1", number: 4, focus: "the auth logic" }]))
+  })
+
+  it("sends the focus with a pasted link", async () => {
+    const bodies: unknown[] = []
+    mockApi(focusRoutes(bodies))
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await openManualReview()
+    await userEvent.type(await screen.findByLabelText("Focus (optional)"), "billing")
+    await userEvent.type(screen.getByLabelText("Review a pull or merge request"), "https://github.com/acme/web/pull/42")
+    await userEvent.click(screen.getByRole("button", { name: "Review" }))
+
+    await waitFor(() => expect(bodies).toEqual([{ url: "https://github.com/acme/web/pull/42", focus: "billing" }]))
+  })
 })
 
 async function openManualReview() {
@@ -703,6 +741,17 @@ describe("Review detail page", () => {
     expect(within(row("Source")).getByRole("button", { name: "Copy source branch" })).toBeInTheDocument()
     // The header names both branches too.
     expect(screen.getByLabelText("From feature/sticky-headers into main")).toBeInTheDocument()
+  })
+
+  it("shows the focus the review was asked for", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, focus: "the auth logic" } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(within(sidebar).getByText("Focus", { selector: "dt" }).closest("div")).toHaveTextContent("the auth logic")
   })
 
   it("falls back to the branches the review recorded when the forge cannot be read", async () => {

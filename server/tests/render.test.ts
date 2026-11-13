@@ -198,6 +198,21 @@ describe("toMarkdown", () => {
     expect(expected).not.toContain("—");
   });
 
+  it("names the requested focus under the verdict, as plain text, also on a clean pass", async () => {
+    const base = await sampleResult();
+    expect(toMarkdown(base)).not.toContain("Focus:");
+
+    const focused = { ...base, focus: "auth <script> | @admin" };
+    const markdown = toMarkdown(focused);
+    expect(markdown).toContain("\n\n**🎯 Focus:** auth &lt;script&gt; \\| @\u200badmin\n");
+    expect(markdown.indexOf("Focus:")).toBeGreaterThan(markdown.indexOf("**Blocked**"));
+
+    const clean = withVerdict({ ...base, focus: "auth" }, { findings: [], verdict: { verdict: "pass", blockOn: "minor", blocking: [] } });
+    expect(toMarkdown(clean)).toBe(
+      `## Summary\n\n### 🎉 Congratulations, no findings at or above minor. 🎉\n\n**🎯 Focus:** auth\n\n${BRAND_FOOTER}\n\n${SUMMARY_MARKER}\n`,
+    );
+  });
+
   it("never uses an em dash", async () => {
     expect(toMarkdown(await sampleResult())).not.toContain("—");
   });

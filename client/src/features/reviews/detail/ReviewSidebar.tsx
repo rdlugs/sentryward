@@ -204,6 +204,12 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             {TRIGGER_LABEL[review.trigger]}
           </span>
         </Row>
+        {review.focus && (
+          <Row label="Focus">
+            {/* The row truncates; the whole request is on hover. */}
+            <span title={review.focus}>{review.focus}</span>
+          </Row>
+        )}
         <Row label="Queued">
           <time dateTime={review.createdAt} title={new Date(review.createdAt).toLocaleString()}>
             {timeAgo(review.createdAt)}

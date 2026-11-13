@@ -1,5 +1,5 @@
 import type { Config } from "../config/schema.ts";
-import type { ChangeSet, Finding, IssueContext, RejectedFinding, ReviewResult } from "../core/models.ts";
+import { MAX_FOCUS, type ChangeSet, type Finding, type IssueContext, type RejectedFinding, type ReviewResult } from "../core/models.ts";
 import type { Chunk } from "../context/chunk.ts";
 import { DEFAULT_RULE_CATEGORY, modelRules } from "../rules.ts";
 
@@ -167,6 +167,16 @@ function manifestSection(entries: ManifestEntry[], chunk: Chunk): string {
   )}`;
 }
 
+// The area the requester asked this one review to look hardest at. In the
+// user prompt, not the system prompt, so runs with and without a focus share
+// the cached system prefix. Their own words, so wrapped as untrusted.
+function focusSection(focus: string): string {
+  return `Focus requested for this review. Look hardest at this area, but still report real problems anywhere in the diff:\n${untrusted(
+    focus.trim(),
+    MAX_FOCUS,
+  )}`;
+}
+
 export function reviewUserPrompt(
   changeSet: ChangeSet,
   chunk: Chunk,
@@ -174,6 +184,7 @@ export function reviewUserPrompt(
   config: Config,
   rejected: RejectedFinding[] = [],
   manifest?: ManifestEntry[],
+  focus?: string,
 ): string {
   const languages = new Set(chunk.parts.map((part) => part.file.language).filter((l): l is string => !!l));
   // A single pass already sees the whole change, so it gets no manifest.
@@ -188,6 +199,7 @@ export function reviewUserPrompt(
     `Title: ${untrusted(changeSet.title, 300)}`,
     `Description:\n${untrusted(changeSet.description || "(none)", MAX_DESCRIPTION_CHARS)}`,
     guidance(config, languages),
+    focus?.trim() ? focusSection(focus) : "",
     rejectedSection(rejected),
     withManifest && manifest ? manifestSection(manifest, chunk) : "",
     `Diff:${pass}\n${chunk.text}`,

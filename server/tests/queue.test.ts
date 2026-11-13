@@ -71,6 +71,23 @@ describe("enqueue", () => {
     expect(await prisma.reviewJob.count()).toBe(1);
   });
 
+  it("queues the same head again when it is asked for with a different focus", async () => {
+    const focused = (focus: string | null) => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "comment", focus });
+    const plain = await job("aaa");
+    const auth = await focused("auth");
+
+    // A queued run would otherwise swallow the request for a focus.
+    expect(auth.id).not.toBe(plain.id);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: plain.id } })).status).toBe("superseded");
+    expect((await focused("auth")).id).toBe(auth.id);
+
+    // A running one keeps going; the new request waits behind it.
+    await prisma.reviewJob.update({ where: { id: auth.id }, data: { status: "running" } });
+    const billing = await focused("billing");
+    expect(billing).toMatchObject({ status: "queued", focus: "billing" });
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: auth.id } })).status).toBe("running");
+  });
+
   it("supersedes a queued job when a newer head arrives", async () => {
     const old = await job("aaa");
     const latest = await job("bbb");
