@@ -179,13 +179,23 @@ describe("toMarkdown", () => {
       findings: [],
       verdict: { verdict: "pass", blockOn: "critical", blocking: [] },
     });
-    expect(toMarkdown(clean)).toContain("✅ **Pass**: no findings at or above critical.");
-    expect(toMarkdown(clean)).toContain("\nNo findings.\n");
+    const below = withVerdict(base, { verdict: { verdict: "pass", blockOn: "critical", blocking: [] } });
+    expect(toMarkdown(below)).toContain("✅ **Pass**: no findings at or above critical.");
 
     const partial = withVerdict(clean, { status: "partial", verdict: { verdict: "error", blockOn: "critical", blocking: [] } });
     expect(toMarkdown(partial)).toContain(
       "⚠️ **Review incomplete**: part of the change was not reviewed, so the absence of findings is not a pass.",
     );
+  });
+
+  it("replaces the whole summary with a celebration on a pass with no findings", async () => {
+    const base = await sampleResult();
+    const clean = withVerdict(base, { findings: [], verdict: { verdict: "pass", blockOn: "minor", blocking: [] } });
+    const expected = `## Summary\n\n### 🎉 Congratulations, no findings at or above minor. 🎉\n\n${BRAND_FOOTER}\n\n${SUMMARY_MARKER}\n`;
+    // Walkthrough, verdict, counts and the stats line are all left out, whatever the options.
+    expect(toMarkdown(clean, { walkthrough: true })).toBe(expected);
+    expect(toMarkdown(clean, { stats: false })).toBe(expected);
+    expect(expected).not.toContain("—");
   });
 
   it("never uses an em dash", async () => {

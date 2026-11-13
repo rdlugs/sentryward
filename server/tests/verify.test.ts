@@ -43,7 +43,12 @@ describe("verifying findings", () => {
     expect(result.findings).toEqual([]);
     expect(result.validation.dropped).toEqual({ refuted: 1 });
     expect(result.verdict).toMatchObject({ verdict: "pass", blocking: [] });
-    expect(toMarkdown(result)).toContain("1 file reviewed · 1 finding refuted on verification</sub>");
+    // A clean pass posts only the celebration, so the stats line (and the
+    // refuted count in it) shows only when the full summary is rendered.
+    expect(toMarkdown(result)).toContain("### 🎉 Congratulations");
+    expect(toMarkdown(result)).not.toContain("refuted on verification");
+    const full = { ...result, status: "partial" as const, verdict: { ...result.verdict, verdict: "error" as const } };
+    expect(toMarkdown(full)).toContain("1 file reviewed · 1 finding refuted on verification</sub>");
   });
 
   it("demotes an uncertain blocker to a minor verification_needed with a new fingerprint", async () => {

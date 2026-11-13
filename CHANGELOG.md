@@ -257,6 +257,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- A review that passes with no findings at all now posts a short summary
+  comment: "🎉 Congratulations, no findings at or above `<block_on>`. 🎉"
+  followed only by the footer. The walkthrough, verdict line, finding counts,
+  lifecycle ("Since the last review"), coverage, notes and the review stats
+  line are left out. The same output is served by `GET /api/reviews/:id/markdown`. A
+  pass that still has findings below the threshold keeps the full summary.
 - The Models, Best model and Repositories tables on the Benchmarks page are
   paginated (#276), each with its own page and page size in the URL
   (`?modelsPage=`, `?bestPage=`, `?reposPage=`). Best model pages by model

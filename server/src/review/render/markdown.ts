@@ -37,6 +37,15 @@ const VERDICT_LINE = {
   error: "⚠️ **Review incomplete**",
 } as const;
 
+// Framing the heading of a clean pass (see isCleanPass).
+const CLEAN_PASS_ICON = "🎉";
+
+// A pass with nothing reported at all, not even below the threshold: there is
+// nothing to act on, so the comment says only that.
+function isCleanPass(result: ReviewResult): boolean {
+  return result.verdict.verdict === "pass" && result.findings.length === 0;
+}
+
 // Forges render only text, so icons are emoji. The severity colours follow the
 // dashboard's palette (red, orange, sky, muted) so both read the same.
 export const SEVERITY_ICON: Record<Severity, string> = {
@@ -527,7 +536,9 @@ function footer(result: ReviewResult): string {
 // (output.agentPromptAll). The findings held back from inline threads come
 // from the result (ReviewResult.heldBack); `rules` and `findingPrompts`
 // (output.agentPrompts) add to each what its thread would have carried. The
-// rest shape the walkthrough (walkthroughOptions).
+// rest shape the walkthrough (walkthroughOptions). A clean pass (isCleanPass)
+// replaces all of it, the stats line included, with one celebratory line and
+// the brand footer, since a reviewer has nothing in it to read through.
 export function toMarkdown(
   result: ReviewResult,
   options: {
@@ -539,6 +550,10 @@ export function toMarkdown(
   } & HeldBackOptions &
     WalkthroughOptions = {},
 ): string {
+  if (isCleanPass(result)) {
+    const heading = `### ${CLEAN_PASS_ICON} Congratulations, no findings at or above ${result.verdict.blockOn}. ${CLEAN_PASS_ICON}`;
+    return `${["## Summary", "", heading, "", BRAND_FOOTER, "", SUMMARY_MARKER].join("\n")}\n`;
+  }
   const walkthrough = options.walkthrough === false ? null : walkthroughSection(result, options);
   const lines = [walkthrough?.heading ?? "## Summary", ...(walkthrough?.lines ?? [])];
   lines.push("", ...verdictSection(result));
