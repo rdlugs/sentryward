@@ -559,7 +559,7 @@ describe("runJob", () => {
 
     expect(published.summaries).toHaveLength(2);
     expect(published.summaries[0]).toMatch(/^Reviewing \[?`newhead`/m);
-    expect(published.summaries[0]).toContain(`[View live progress ↗](`);
+    expect(published.summaries[0]).toContain(`[View live progress](`);
     expect(published.summaries[0]).toContain(`/reviews/${job.id})`);
     expect(published.summaries[0]).not.toContain("## Summary");
     expect(published.summaries[1]).toMatch(/^## Summary\n/);

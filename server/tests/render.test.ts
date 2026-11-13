@@ -458,7 +458,7 @@ describe("progressMarkdown", () => {
   it("links the dashboard's live progress only when given a target", () => {
     expect(progressMarkdown(makeChangeSet())).not.toContain("View live progress");
     const body = progressMarkdown(makeChangeSet(), { targetUrl: "https://app.example/reviews/j1" });
-    expect(body).toContain(`\n[View live progress ↗](https://app.example/reviews/j1)\n\n${BRAND_FOOTER}\n`);
+    expect(body).toContain(`\n[View live progress](https://app.example/reviews/j1)\n\n${BRAND_FOOTER}\n`);
   });
 
   it("keeps the footer and then the summary marker so the review replaces it", () => {

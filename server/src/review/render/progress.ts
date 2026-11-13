@@ -19,7 +19,7 @@ export function progressMarkdown(changeSet: ChangeSet, outputs: ProgressOutputs 
   return card([
     `<img src="${PROGRESS_BADGE_URL}" alt="Review in progress" width="360" height="48">`,
     `Reviewing ${sha} · results will replace this comment`,
-    ...(outputs.targetUrl ? [`[View live progress ↗](${outputs.targetUrl})`] : []),
+    ...(outputs.targetUrl ? [`[View live progress](${outputs.targetUrl})`] : []),
   ]);
 }
 
