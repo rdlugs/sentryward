@@ -5,6 +5,7 @@ import { app } from "../src/app.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { summarize } from "../src/review/render/json.ts";
+import { forgeCache } from "../src/review/forge/cache.ts";
 import { toMarkdown } from "../src/review/render/markdown.ts";
 import { claimNext, recordTitle } from "../src/worker/queue.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -742,5 +743,93 @@ describe("POST /api/reviews/:id/cancel", () => {
 
     expect(res.status).toBe(404);
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: queued.id } })).status).toBe("queued");
+  });
+});
+
+describe("GET /api/reviews/:id/diff", () => {
+  const PATCH = "@@ -1 +1 @@\n-a\n+b";
+  const glDiff = (path: string) => ({ old_path: path, new_path: path, new_file: false, renamed_file: false, deleted_file: false, diff: `${PATCH}\n` });
+
+  beforeEach(() => {
+    // The API keeps one forge cache for the process; each test starts cold.
+    forgeCache.clear();
+  });
+
+  async function job(data: { baseSha?: string; headSha?: string; status?: "queued" | "completed" | "skipped" }) {
+    return prisma.reviewJob.create({
+      data: { repositoryId: repoId, number: 7, headSha: data.headSha ?? "h1", baseSha: data.baseSha, trigger: "manual", status: data.status ?? "completed" },
+    });
+  }
+
+  it("compares the reviewed commits when the base is known", async () => {
+    const created = await job({ baseSha: "b1" });
+    const stub = fetchStub([{ url: /\/projects\/team%2Fweb\/repository\/compare\?from=b1&to=h1$/, body: { diffs: [glDiff("src/a.ts")] } }]);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    const res = await request(app).get(`/api/reviews/${created.id}/diff`).set("Cookie", cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      headSha: "h1",
+      files: [{ path: "src/a.ts", changeType: "modified", additions: 1, deletions: 1, patch: PATCH }],
+    });
+  });
+
+  it("uses the change as it is when a queued job's head is still current", async () => {
+    const created = await job({ status: "queued", headSha: "abc123" });
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([mrRoute("abc123"), { url: /\/merge_requests\/7\/diffs\?per_page=100/, body: [glDiff("src/b.ts")] }]).fetch,
+    );
+
+    const res = await request(app).get(`/api/reviews/${created.id}/diff`).set("Cookie", cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.files.map((file: { path: string }) => file.path)).toEqual(["src/b.ts"]);
+  });
+
+  it("compares the job's head with the change's base once the change has moved on", async () => {
+    const created = await job({ status: "skipped", headSha: "old" });
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([
+        mrRoute("new"),
+        { url: /\/merge_requests\/7\/diffs\?per_page=100/, body: [glDiff("src/new.ts")] },
+        { url: /\/repository\/compare\?from=b&to=old$/, body: { diffs: [glDiff("src/old.ts")] } },
+      ]).fetch,
+    );
+
+    const res = await request(app).get(`/api/reviews/${created.id}/diff`).set("Cookie", cookie);
+
+    expect(res.body.files.map((file: { path: string }) => file.path)).toEqual(["src/old.ts"]);
+  });
+
+  it("says so when the reviewed commits are gone", async () => {
+    const created = await job({ baseSha: "b1" });
+    vi.stubGlobal("fetch", fetchStub([{ url: /\/repository\/compare/, status: 404, body: { message: "404 Not found" } }]).fetch);
+
+    const res = await request(app).get(`/api/reviews/${created.id}/diff`).set("Cookie", cookie);
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toBe("The reviewed commits are no longer on GitLab");
+  });
+
+  it("reports rejected credentials as a broken connection", async () => {
+    const created = await job({ baseSha: "b1" });
+    vi.stubGlobal("fetch", fetchStub([{ url: /\/repository\/compare/, status: 401, body: { message: "401 Unauthorized" } }]).fetch);
+
+    const res = await request(app).get(`/api/reviews/${created.id}/diff`).set("Cookie", cookie);
+
+    expect(res.status).toBe(502);
+    expect(res.body.message).toMatch(/reconnect the account/);
+  });
+
+  it("does not serve another workspace's review", async () => {
+    const created = await job({ baseSha: "b1" });
+    const other = await createUser("other@example.com");
+
+    const res = await request(app).get(`/api/reviews/${created.id}/diff`).set("Cookie", other.cookie);
+
+    expect(res.status).toBe(404);
   });
 });

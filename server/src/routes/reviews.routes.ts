@@ -4,6 +4,7 @@ import {
   createReview,
   getReview,
   getReviewAttention,
+  getReviewDiff,
   getReviewMarkdown,
   getReviewStats,
   listReviews,
@@ -25,5 +26,6 @@ reviewsRouter.get("/attention", getReviewAttention);
 reviewsRouter.post("/viewed", markReviewsViewed);
 reviewsRouter.get("/:id", getReview);
 reviewsRouter.get("/:id/markdown", getReviewMarkdown);
+reviewsRouter.get("/:id/diff", getReviewDiff);
 reviewsRouter.post("/:id/rerun", rerunReview);
 reviewsRouter.post("/:id/cancel", cancelReview);

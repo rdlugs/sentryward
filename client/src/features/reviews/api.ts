@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api, ApiError, workspaceHeaders } from "@/lib/api"
-import { isActive, type JobStatus, type OpenChange, type ReviewDetail, type ReviewListItem, type ReviewStats, type Trigger, type Verdict } from "./types"
+import { isActive, type ChangedFile, type JobStatus, type OpenChange, type ReviewDetail, type ReviewListItem, type ReviewStats, type Trigger, type Verdict } from "./types"
 
 // While anything is queued or running, poll; otherwise stay quiet.
 const POLL_MS = 3000
@@ -91,6 +91,19 @@ export function useReview(id: string) {
     queryKey: ["review", id],
     queryFn: () => api<{ review: ReviewDetail }>(`/reviews/${id}`),
     refetchInterval: (q) => (q.state.data && isActive(q.state.data.review.status) ? POLL_MS : false),
+  })
+}
+
+// The change a review looked at, read from the forge, for a review whose
+// result has no diffs stored (older results, and runs with no result at all).
+// Pinned to the review's commits, so it never needs refetching.
+export function useReviewDiff(id: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["review", id, "diff"],
+    queryFn: () => api<{ files: ChangedFile[]; headSha: string }>(`/reviews/${id}/diff`),
+    enabled,
+    staleTime: Infinity,
+    retry: false,
   })
 }
 

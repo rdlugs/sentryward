@@ -1,6 +1,6 @@
 import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
-import type { ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
+import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
 import { ForgeError, ForgeHttp, isNotFound, linkHeaderNext, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
@@ -90,7 +90,7 @@ interface GhFile {
 
 interface GhComparison {
   status: "ahead" | "behind" | "diverged" | "identical";
-  files?: Pick<GhFile, "filename" | "previous_filename">[];
+  files?: GhFile[];
 }
 
 interface GhContentEntry {
@@ -140,6 +140,17 @@ function encodePath(path: string): string {
 
 function repoApiPath(project: string): string {
   return `/repos/${encodePath(project)}`;
+}
+
+function toChangedFileFromGh(file: GhFile) {
+  return toChangedFile({
+    path: file.filename,
+    previousPath: file.previous_filename,
+    changeType: changeTypeOf(file.status),
+    // GitHub omits `patch` for binary files and for oversized diffs; a
+    // pure rename or empty file has no changes and so no patch either.
+    patch: file.patch ?? (file.changes === 0 ? "" : undefined),
+  });
 }
 
 function toRepo(repo: GhRepo): ForgeRepo {
@@ -297,16 +308,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       author: pull.user?.login,
       authorId: pull.user?.id === undefined ? undefined : String(pull.user.id),
       labels: (pull.labels ?? []).map((label) => label.name),
-      files: files.map((file) =>
-        toChangedFile({
-          path: file.filename,
-          previousPath: file.previous_filename,
-          changeType: changeTypeOf(file.status),
-          // GitHub omits `patch` for binary files and for oversized diffs; a
-          // pure rename or empty file has no changes and so no patch either.
-          patch: file.patch ?? (file.changes === 0 ? "" : undefined),
-        }),
-      ),
+      files: files.map(toChangedFileFromGh),
     };
   }
 
@@ -437,6 +439,23 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       const files = comparison.files ?? [];
       if (files.length >= MAX_COMPARE_FILES) return null;
       return [...new Set(files.flatMap((file) => (file.previous_filename ? [file.filename, file.previous_filename] : [file.filename])))];
+    });
+  }
+
+  // The three-dot compare diffs `head` against its merge base with `base`, as
+  // the PR's own files view does. A sha the forge no longer has (a force push
+  // that was garbage collected) is null; 422 is GitHub's "No common ancestor".
+  async getDiff(project: string, base: string, head: string, cache?: ForgeCache): Promise<ChangedFile[] | null> {
+    return cached(cache, cacheKey("github-diff", this.host, project, base, head), async () => {
+      try {
+        const comparison = await this.http.json<GhComparison>(
+          `${repoApiPath(project)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+        );
+        return (comparison.files ?? []).map(toChangedFileFromGh);
+      } catch (err) {
+        if (isNotFound(err) || (err instanceof ForgeError && err.status === 422)) return null;
+        throw err;
+      }
     });
   }
 

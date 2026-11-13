@@ -522,7 +522,7 @@ describe("Review detail page", () => {
       progress: { stage: "reviewing", steps: ["fetching", "preparing", "reviewing", "publishing"], passes: { done: 2, total: 5 } },
     }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: running } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const steps = await screen.findByRole("list", { name: "Review progress" })
     const items = within(steps).getAllByRole("listitem")
@@ -542,13 +542,13 @@ describe("Review detail page", () => {
   it("names the reviewing step's detail, and falls back to a plain line before any progress", async () => {
     const running = { ...detail, status: "running", verdict: null, result: null, startedAt: new Date().toISOString() }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "walkthrough" } } } })
-    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("· Writing the walkthrough")).toBeInTheDocument()
     unmount()
 
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: running } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("Reviewing the change...")).toBeInTheDocument()
     expect(screen.getByText(/Running for \d+s/)).toBeInTheDocument()
@@ -557,7 +557,7 @@ describe("Review detail page", () => {
   it("shows how long a queued review has waited", async () => {
     const queued = { ...detail, status: "queued", verdict: null, result: null, attempts: 0, createdAt: new Date(Date.now() - 30_000).toISOString() }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: queued } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("Waiting for a worker...")).toBeInTheDocument()
     expect(screen.getByText(/Queued for 3[01]s/)).toBeInTheDocument()
@@ -566,7 +566,7 @@ describe("Review detail page", () => {
   it("shows no wait time for a job requeued after its worker stopped", async () => {
     const queued = { ...detail, status: "queued", verdict: null, result: null, attempts: 1 }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: queued } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("Waiting for a worker to retry...")).toBeInTheDocument()
     expect(screen.queryByText(/Queued for/)).not.toBeInTheDocument()
@@ -575,7 +575,7 @@ describe("Review detail page", () => {
   it("lists only the current step until the run's steps are known", async () => {
     const running = { ...detail, status: "running", verdict: null, result: null, startedAt: new Date().toISOString() }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "fetching" } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const steps = await screen.findByRole("list", { name: "Review progress" })
     const items = within(steps).getAllByRole("listitem")
@@ -591,14 +591,14 @@ describe("Review detail page", () => {
         review: { ...running, progress: { stage: "reviewing", steps, passes: { done: 0, total: 0 } } },
       },
     })
-    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const list = await screen.findByRole("list", { name: "Review progress" })
     expect(within(list).getAllByRole("listitem")[2]).toHaveTextContent(/^Reviewing$/)
     unmount()
 
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...running, progress: { stage: "tools", steps } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("Reviewing the change...")).toBeInTheDocument()
     expect(screen.queryByRole("list", { name: "Review progress" })).not.toBeInTheDocument()
@@ -606,7 +606,7 @@ describe("Review detail page", () => {
 
   it("shows the run's recorded cost, or a dash for a run from before costs were recorded", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const usage = await screen.findByText("Estimated cost")
     expect(usage.nextElementSibling).toHaveTextContent("<$0.01 est.")
@@ -614,7 +614,7 @@ describe("Review detail page", () => {
 
     const { costUsd: _, ...older } = detail.result!.usageTotals
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, usageTotals: older } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect((await screen.findByText("Estimated cost")).nextElementSibling).toHaveTextContent("-")
     expect(screen.getByTitle("Not recorded for this run")).toBeInTheDocument()
@@ -622,7 +622,7 @@ describe("Review detail page", () => {
 
   it("groups findings by bucket and shows walkthrough, notes and coverage", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const actionable = await screen.findByRole("region", { name: "Actionable comments" })
     expect(within(actionable).getByText("SQL injection in search")).toBeInTheDocument()
@@ -641,6 +641,150 @@ describe("Review detail page", () => {
     )
   })
 
+  it("opens the first file's diff with its findings on their lines", async () => {
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const diff = await screen.findByRole("region", { name: "Diff of src/app.ts" })
+    const tree = screen.getByRole("navigation", { name: "Changed files" })
+    expect(within(tree).getByRole("button", { name: /app\.ts/ })).toHaveAttribute("aria-current", "page")
+    expect(within(diff).getByText("const b = a + 1;")).toBeInTheDocument()
+    // Both line-11 findings sit right after line 11, before line 12.
+    const rows = within(diff).getAllByRole("row")
+    const line11 = rows.findIndex((row) => row.textContent?.includes("const b = a + 1;"))
+    expect(within(rows[line11 + 1]!).getByText("SQL injection in search")).toBeInTheDocument()
+    expect(within(rows[line11 + 1]!).getByText("Rename c")).toBeInTheDocument()
+    expect(rows[line11 + 2]).toHaveTextContent("const c = b * 2;")
+    // Line 40 is not in the diff.
+    expect(within(diff).getByRole("heading", { name: "Outside the diff" })).toBeInTheDocument()
+    expect(within(diff).getByText("Caller ignores result")).toBeInTheDocument()
+    // Notes stay visible above a diff.
+    expect(screen.getByText(/unknown setting nope/)).toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "Actionable comments" })).not.toBeInTheDocument()
+  })
+
+  it("switches between files and the overview from the tree", async () => {
+    const files = [
+      ...detail.result!.files,
+      { path: "src/lib/util.ts", changeType: "added", additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+export const x = 1" },
+    ]
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, files } } } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const tree = await screen.findByRole("navigation", { name: "Changed files" })
+    // Directories come first, so lib/util.ts opens before app.ts.
+    expect(await screen.findByRole("region", { name: "Diff of src/lib/util.ts" })).toBeInTheDocument()
+    expect(screen.getByText("export const x = 1")).toBeInTheDocument()
+
+    await user.click(within(tree).getByRole("button", { name: /app\.ts/ }))
+    expect(await screen.findByRole("region", { name: "Diff of src/app.ts" })).toBeInTheDocument()
+
+    await user.click(within(tree).getByRole("button", { name: /Overview/ }))
+    const actionable = await screen.findByRole("region", { name: "Actionable comments" })
+    expect(screen.queryByRole("region", { name: /^Diff of/ })).not.toBeInTheDocument()
+
+    // A finding's path opens its file.
+    await user.click(within(actionable).getByRole("button", { name: "src/app.ts" }))
+    expect(await screen.findByRole("region", { name: "Diff of src/app.ts" })).toBeInTheDocument()
+  })
+
+  it("explains a file with no diff to show", async () => {
+    const files = [
+      { path: "a.ts", changeType: "modified", additions: 1, deletions: 0, patchOmitted: "too_large" as const },
+      { path: "logo.png", changeType: "added", additions: 0, deletions: 0, patchOmitted: "binary" as const },
+    ]
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, files } } } })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByText("This diff is too large to keep with the review.")).toBeInTheDocument()
+    await user.click(within(screen.getByRole("navigation", { name: "Changed files" })).getByRole("button", { name: /logo\.png/ }))
+    expect(await screen.findByText("Binary file, no text diff to show.")).toBeInTheDocument()
+  })
+
+  it("reads the diff from the forge for a result stored without one", async () => {
+    const { patch: _patch, ...bare } = detail.result!.files[0]!
+    const fetched = { files: [detail.result!.files[0]], headSha: "abcdef1234" }
+    const diff = vi.fn(() => jsonResponse(200, fetched))
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, files: [bare] } } },
+      [`GET /api/reviews/${detail.id}/diff`]: diff,
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const region = await screen.findByRole("region", { name: "Diff of src/app.ts" })
+    expect(within(region).getByText("const b = a + 1;")).toBeInTheDocument()
+    // The result's findings still sit on their lines.
+    expect(within(region).getByText("SQL injection in search")).toBeInTheDocument()
+    expect(diff).toHaveBeenCalledTimes(1)
+  })
+
+  it("never asks the forge when the result stored its diffs", async () => {
+    const diff = vi.fn(() => jsonResponse(200, { files: [], headSha: "x" }))
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail }, [`GET /api/reviews/${detail.id}/diff`]: diff })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    await screen.findByRole("region", { name: "Diff of src/app.ts" })
+    expect(diff).not.toHaveBeenCalled()
+  })
+
+  it("opens a running review on its progress, with the change's files in the tree", async () => {
+    const running = { ...detail, status: "running", verdict: null, result: null, startedAt: new Date().toISOString(), progress: { stage: "reviewing", steps: ["fetching", "reviewing"] } }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: running },
+      [`GET /api/reviews/${detail.id}/diff`]: { files: detail.result!.files, headSha: "abcdef1234" },
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    expect(await screen.findByRole("list", { name: "Review progress" })).toBeInTheDocument()
+    const tree = await screen.findByRole("navigation", { name: "Changed files" })
+    expect(within(tree).getByRole("button", { name: /Overview/ })).toHaveAttribute("aria-current", "page")
+
+    await user.click(within(tree).getByRole("button", { name: /app\.ts/ }))
+    const region = await screen.findByRole("region", { name: "Diff of src/app.ts" })
+    expect(within(region).getByText("const b = a + 1;")).toBeInTheDocument()
+    // Progress stays in the overview rather than above the diff.
+    expect(screen.queryByRole("list", { name: "Review progress" })).not.toBeInTheDocument()
+  })
+
+  it("opens the first file of a review that did not run, with the reason above it", async () => {
+    const failed = { ...detail, status: "failed", verdict: "error", result: null, error: "Model call timed out" }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: failed },
+      [`GET /api/reviews/${detail.id}/diff`]: { files: detail.result!.files, headSha: "abcdef1234" },
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const region = await screen.findByRole("region", { name: "Diff of src/app.ts" })
+    expect(within(region).getByText("const b = a + 1;")).toBeInTheDocument()
+    expect(within(screen.getByRole("alert")).getByText("Model call timed out")).toBeInTheDocument()
+  })
+
+  it("offers a retry when the changes cannot be loaded, and still shows the overview", async () => {
+    const failed = { ...detail, status: "failed", verdict: "error", result: null, error: "Model call timed out" }
+    let calls = 0
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: failed },
+      [`GET /api/reviews/${detail.id}/diff`]: () =>
+        ++calls === 1
+          ? jsonResponse(502, { message: "GitLab rejected the stored credentials; reconnect the account" })
+          : jsonResponse(200, { files: detail.result!.files, headSha: "abcdef1234" }),
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const message = await screen.findByText(
+      "Couldn't load the changes: GitLab rejected the stored credentials; reconnect the account",
+    )
+    const status = message.closest<HTMLElement>("[role=status]")!
+    expect(within(screen.getByRole("alert")).getByText("Model call timed out")).toBeInTheDocument()
+
+    await user.click(within(status).getByRole("button", { name: "Retry" }))
+    expect(await screen.findByRole("region", { name: "Diff of src/app.ts" })).toBeInTheDocument()
+  })
+
   it("labels confidence as self-reported and shows verification, impact and fix rationale", async () => {
     const [first, ...rest] = detail.result!.findings
     const findings = [
@@ -654,7 +798,7 @@ describe("Review detail page", () => {
     ]
     const review = { ...detail, result: { ...detail.result!, findings } }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const actionable = await screen.findByRole("region", { name: "Actionable comments" })
     expect(within(actionable).getByText(/Self-reported confidence 90%/)).toBeInTheDocument()
@@ -669,7 +813,7 @@ describe("Review detail page", () => {
     const findings = [{ ...first!, source: "rule" as const, ruleId: "no-db-in-controllers", model: undefined }, ...rest]
     const review = { ...detail, result: { ...detail.result!, findings } }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const actionable = await screen.findByRole("region", { name: "Actionable comments" })
     expect(within(actionable).getByText("Rule no-db-in-controllers")).toBeInTheDocument()
@@ -680,7 +824,7 @@ describe("Review detail page", () => {
     const fileSummaries = Array.from({ length: 6 }, (_, i) => ({ path: `src/f${i}.ts`, summary: `Changes f${i}` }))
     const walkthrough = { ...detail.result!.walkthrough!, fileSummaries }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, walkthrough } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const trigger = await screen.findByRole("button", { name: /Changed files\s*\(6\)/ })
     expect(screen.getByRole("img", { name: "Review effort 2 of 5" })).toBeInTheDocument()
@@ -696,7 +840,7 @@ describe("Review detail page", () => {
     ]
     const walkthrough = { ...detail.result!.walkthrough!, riskyAreas }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, walkthrough } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const section = await screen.findByRole("region", { name: "Risky areas" })
     expect(within(section).getByText("Authorization")).toBeInTheDocument()
@@ -715,7 +859,7 @@ describe("Review detail page", () => {
       errors: [],
     }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, publication } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(
       await screen.findByText("Posted to GitHub: 2 inline comments, 1 already posted, summary, commit status (failure)"),
@@ -732,7 +876,7 @@ describe("Review detail page", () => {
       errors: ["Commit status: 403"],
     }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, publication } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const sidebar = await screen.findByRole("complementary", { name: "Review details" })
     expect(within(sidebar).getByText("1 inline comment failed to post")).toBeInTheDocument()
@@ -744,7 +888,7 @@ describe("Review detail page", () => {
   it("counts filtered and demoted findings in the sidebar", async () => {
     const validation = { dropped: { duplicate: 1, low_confidence: 2, off_diff: 0 }, demoted: 1 }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, validation } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const sidebar = await screen.findByRole("complementary", { name: "Review details" })
     expect(within(sidebar).getByText("Validation")).toBeInTheDocument()
@@ -761,7 +905,7 @@ describe("Review detail page", () => {
   it("shows only the downgrade line when nothing was dropped", async () => {
     const validation = { dropped: { low_confidence: 0 }, demoted: 2 }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, validation } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const sidebar = await screen.findByRole("complementary", { name: "Review details" })
     expect(
@@ -774,7 +918,7 @@ describe("Review detail page", () => {
   it("hides the validation summary when nothing was filtered or demoted", async () => {
     const validation = { dropped: { low_confidence: 0 }, demoted: 0 }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, validation } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const sidebar = await screen.findByRole("complementary", { name: "Review details" })
     expect(within(sidebar).getByText("Coverage")).toBeInTheDocument()
@@ -784,7 +928,7 @@ describe("Review detail page", () => {
   it("names an unfamiliar drop reason readably", async () => {
     const validation = { dropped: { some_new_reason: 3 }, demoted: 0 }
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, validation } } } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const sidebar = await screen.findByRole("complementary", { name: "Review details" })
     expect(within(sidebar).getByText("Some new reason").closest("div")).toHaveTextContent(/^Some new reason\s*3$/)
@@ -793,7 +937,7 @@ describe("Review detail page", () => {
 
   it("starts nitpicks collapsed and expands them on demand", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const nitpicks = await screen.findByRole("region", { name: "Nitpick comments" })
     const trigger = within(nitpicks).getByRole("button", { name: /Rename c/ })
@@ -811,7 +955,7 @@ describe("Review detail page", () => {
 
   it("filters findings by severity and clears the filter", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const toolbar = await screen.findByRole("toolbar", { name: "Filter findings" })
     await userEvent.click(within(toolbar).getByRole("button", { name: /critical/ }))
@@ -827,7 +971,7 @@ describe("Review detail page", () => {
 
   it("reads severity filters from the URL", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}?severity=minor` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview&severity=minor` })
 
     expect(await screen.findByText("Rename c")).toBeInTheDocument()
     expect(screen.queryByText("SQL injection in search")).not.toBeInTheDocument()
@@ -848,7 +992,7 @@ describe("Review detail page", () => {
 
   it("filters findings by a case-insensitive file path substring", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: spreadAcrossFiles } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await userEvent.type(await screen.findByRole("searchbox", { name: "Filter by file path" }), "  AUTH/ ")
 
@@ -859,7 +1003,7 @@ describe("Review detail page", () => {
 
   it("combines the file path filter with severity", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: spreadAcrossFiles } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}?file=auth&severity=critical` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview&file=auth&severity=critical` })
 
     expect(await screen.findByText("SQL injection in search")).toBeInTheDocument()
     expect(screen.queryByText("Caller ignores result")).not.toBeInTheDocument()
@@ -868,7 +1012,7 @@ describe("Review detail page", () => {
 
   it("reads the file path filter from the URL", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: spreadAcrossFiles } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}?file=app.ts` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview&file=app.ts` })
 
     expect(await screen.findByText("Rename c")).toBeInTheDocument()
     expect(screen.getByRole("searchbox", { name: "Filter by file path" })).toHaveValue("app.ts")
@@ -877,7 +1021,7 @@ describe("Review detail page", () => {
 
   it("shows the filtered empty state when no path matches and clears the query", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: spreadAcrossFiles } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const search = await screen.findByRole("searchbox", { name: "Filter by file path" })
     await userEvent.type(search, "nope")
@@ -895,7 +1039,7 @@ describe("Review detail page", () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const actionable = await screen.findByRole("region", { name: "Actionable comments" })
     await user.click(within(actionable).getByRole("button", { name: "Copy agent prompt" }))
@@ -914,7 +1058,7 @@ describe("Review detail page", () => {
   it("moves between findings in display order with Ctrl+J and Ctrl+U and toggles them with Ctrl+O and Enter", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     await user.keyboard(ctrl("j"))
@@ -938,7 +1082,7 @@ describe("Review detail page", () => {
   it("leaves Ctrl+K to the command palette", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail }, "GET /api/repos": { repos: [] } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     // From a finding with one before it, where Ctrl+K used to move back.
@@ -950,7 +1094,7 @@ describe("Review detail page", () => {
   it("ignores the shortcut letters without Ctrl", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     await user.keyboard("j?")
@@ -961,7 +1105,7 @@ describe("Review detail page", () => {
   it("continues keyboard navigation from a finding focused with the mouse", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await user.click(await screen.findByRole("button", { name: /Caller ignores result/ }))
     await user.keyboard(ctrl("j"))
@@ -972,7 +1116,7 @@ describe("Review detail page", () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     // Nothing focused yet, so nothing to copy.
@@ -987,7 +1131,7 @@ describe("Review detail page", () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     await user.keyboard(ctrl("j"))
@@ -999,7 +1143,7 @@ describe("Review detail page", () => {
   it("ignores shortcuts while typing in the file filter", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const search = await screen.findByRole("searchbox", { name: "Filter by file path" })
     await user.type(search, "jk?")
@@ -1012,7 +1156,7 @@ describe("Review detail page", () => {
   it("lists the shortcuts in a dialog opened with Ctrl+? or the severity bar's button", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     await user.keyboard(ctrl("?"))
@@ -1034,7 +1178,7 @@ describe("Review detail page", () => {
   it("jumps to the first finding of a severity, counting only the visible findings", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const bar = await screen.findByRole("navigation", { name: "Jump to severity" })
     await user.click(within(bar).getByRole("button", { name: "Jump to first major finding (1)" }))
@@ -1053,7 +1197,7 @@ describe("Review detail page", () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     await user.keyboard(ctrl("j"))
@@ -1073,7 +1217,7 @@ describe("Review detail page", () => {
   it("leaves the browser's own Ctrl shortcuts alone when there is nothing to act on", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     // fireEvent returns false when the event was prevented.
@@ -1086,7 +1230,7 @@ describe("Review detail page", () => {
   it("never lets Ctrl+U open view source, even on the first finding", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     await user.keyboard(ctrl("j"))
@@ -1099,7 +1243,7 @@ describe("Review detail page", () => {
     mockApi({
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, findings: [] } } },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText(/No findings/)
 
     expect(fireEvent.keyDown(document.body, { key: "j", ctrlKey: true })).toBe(true)
@@ -1108,7 +1252,7 @@ describe("Review detail page", () => {
 
   it("matches Ctrl+? on the typed character, not the US slash key", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
     await screen.findByText("SQL injection in search")
 
     // Ctrl+Shift+- (zoom out) on a German layout is the US slash key.
@@ -1123,7 +1267,7 @@ describe("Review detail page", () => {
   it("keeps the focus ring on a finding reached by a mouse-started jump until focus moves on", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const bar = await screen.findByRole("navigation", { name: "Jump to severity" })
     await user.click(within(bar).getByRole("button", { name: "Jump to first major finding (1)" }))
@@ -1143,7 +1287,7 @@ describe("Review detail page", () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await user.click(await exportItem("Copy prompt for all findings", user))
 
@@ -1169,7 +1313,7 @@ describe("Review detail page", () => {
         finishCopy = resolve
       }),
     )
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await user.click(await exportItem("Copy markdown", user))
     const trigger = screen.getByRole("button", { name: "Export" })
@@ -1206,7 +1350,7 @@ describe("Review detail page", () => {
       [`GET /api/reviews/${detail.id}`]: { review: detail },
       [`GET /api/reviews/${detail.id}/markdown`]: fetchMarkdown,
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await userEvent.click(await exportItem(`${action} markdown`))
     const trigger = screen.getByRole("button", { name: "Export" })
@@ -1244,7 +1388,7 @@ describe("Review detail page", () => {
       [`GET /api/reviews/${detail.id}/markdown`]: () => new Response(markdown, { status: 200 }),
     })
     const { blobs, click } = stubDownload()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await userEvent.click(await exportItem("Download markdown"))
 
@@ -1261,7 +1405,7 @@ describe("Review detail page", () => {
     mockApi({
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, status: "failed", verdict: "error", result: null } },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await exportItem("Download markdown")).toHaveAttribute("aria-disabled", "true")
     expect(screen.getByRole("menuitem", { name: "Copy markdown" })).toHaveAttribute("aria-disabled", "true")
@@ -1277,7 +1421,7 @@ describe("Review detail page", () => {
         review: { ...detail, result: null, publication: null, resultExpiredAt: "2026-01-01T00:00:00.000Z" },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("The full result has expired")).toBeInTheDocument()
     expect(screen.queryByText("The review did not run")).not.toBeInTheDocument()
@@ -1299,7 +1443,7 @@ describe("Review detail page", () => {
         },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("The full result has expired")).toBeInTheDocument()
     expect(screen.getByText("Model call timed out")).toBeInTheDocument()
@@ -1312,7 +1456,7 @@ describe("Review detail page", () => {
       [`GET /api/reviews/${detail.id}/markdown`]: () => jsonResponse(500, { message: "boom" }),
     })
     const { click } = stubDownload()
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await userEvent.click(await exportItem("Download markdown"))
 
@@ -1329,7 +1473,7 @@ describe("Review detail page", () => {
     mockApi({
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, status, findings: [] } } },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByRole("region", { name: "Findings" })).toHaveTextContent(message)
     if (status !== "completed") {
@@ -1343,7 +1487,7 @@ describe("Review detail page", () => {
         review: { ...detail, status: "failed", verdict: "error", result: null, error: "No API key for anthropic" },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText("The review did not run")).toBeInTheDocument()
     expect(screen.getByText("No API key for anthropic")).toBeInTheDocument()
@@ -1365,7 +1509,7 @@ describe("Review detail page", () => {
       [`POST /api/reviews/${detail.id}/rerun`]: rerun,
       "GET /api/reviews/new": { review: { ...detail, id: "new", status: "queued", verdict: null, result: null, attempts: 0 } },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByRole("link", { name: "Check LLM connections" })).toHaveAttribute("href", "/llm-connections")
@@ -1389,7 +1533,7 @@ describe("Review detail page", () => {
         },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByText(/A trigger setting kept this run from starting/)).toBeInTheDocument()
@@ -1414,7 +1558,7 @@ describe("Review detail page", () => {
         },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByText(/\.sentryward\.yaml sets some of its trigger settings/)).toBeInTheDocument()
   })
@@ -1433,7 +1577,7 @@ describe("Review detail page", () => {
         },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByRole("link", { name: "Turn reviews back on" })).toHaveAttribute("href", "/repositories")
@@ -1454,7 +1598,7 @@ describe("Review detail page", () => {
         },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByRole("link", { name: "Check the installation" })).toBeInTheDocument()
@@ -1474,7 +1618,7 @@ describe("Review detail page", () => {
         },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByRole("button", { name: "Re-run" })).toBeInTheDocument()
@@ -1483,7 +1627,7 @@ describe("Review detail page", () => {
 
   it("links back to every review when one is not found", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: () => jsonResponse(404, { message: "Review not found" }) })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByText("Review not found.")).toBeInTheDocument()
@@ -1496,7 +1640,7 @@ describe("Review detail page", () => {
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, status: "queued", verdict: null, result: null, attempts: 0 } },
       [`POST /api/reviews/${detail.id}/cancel`]: cancel,
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     await userEvent.click(await screen.findByRole("button", { name: "Cancel" }))
     await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel review" }))
@@ -1506,7 +1650,7 @@ describe("Review detail page", () => {
 
   it("has no cancel button once a review has finished", async () => {
     mockApi({ [`GET /api/reviews/${detail.id}`]: { review: detail } })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     expect(await screen.findByRole("button", { name: "Re-run" })).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
@@ -1518,7 +1662,7 @@ describe("Review detail page", () => {
         review: { ...detail, status: "cancelled", verdict: null, result: null, error: "Cancelled by Dev" },
       },
     })
-    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
 
     const alert = await screen.findByRole("alert")
     expect(within(alert).getByText("Cancelled")).toBeInTheDocument()

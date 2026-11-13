@@ -1,6 +1,6 @@
 import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
-import type { ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
+import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
 import { ForgeError, ForgeHttp, isNotFound, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
@@ -85,7 +85,7 @@ interface GlDiff {
 }
 
 interface GlComparison {
-  diffs?: Pick<GlDiff, "old_path" | "new_path">[];
+  diffs?: GlDiff[];
   // Set when GitLab gave up computing the diff; the list is then incomplete.
   compare_timeout?: boolean;
 }
@@ -130,6 +130,16 @@ function changeTypeOf(diff: GlDiff): ChangeType {
   if (diff.deleted_file) return "deleted";
   if (diff.renamed_file) return "renamed";
   return "modified";
+}
+
+function toChangedFileFromGl(diff: GlDiff) {
+  return toChangedFile({
+    path: diff.deleted_file ? diff.old_path : diff.new_path,
+    previousPath: diff.old_path,
+    changeType: changeTypeOf(diff),
+    // GitLab empties `diff` and flags it when a file is over its limits.
+    patch: diff.too_large || diff.collapsed ? undefined : diff.diff,
+  });
 }
 
 function toRepo(project: GlProject): ForgeRepo {
@@ -282,15 +292,7 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       author: mr.author?.username,
       authorId: mr.author?.id === undefined ? undefined : String(mr.author.id),
       labels: mr.labels ?? [],
-      files: diffs.map((diff) =>
-        toChangedFile({
-          path: diff.deleted_file ? diff.old_path : diff.new_path,
-          previousPath: diff.old_path,
-          changeType: changeTypeOf(diff),
-          // GitLab empties `diff` and flags it when a file is over its limits.
-          patch: diff.too_large || diff.collapsed ? undefined : diff.diff,
-        }),
-      ),
+      files: diffs.map(toChangedFileFromGl),
     };
   }
 
@@ -415,6 +417,25 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       );
       if (comparison.compare_timeout) return null;
       return [...new Set((comparison.diffs ?? []).flatMap((diff) => [diff.new_path, diff.old_path]))];
+    });
+  }
+
+  // Compare diffs `to` against its merge base with `from` (straight=false, the
+  // default), as an MR's own diff does. A ref GitLab cannot find is null (400,
+  // or 404 for no shared history), as is a diff it gave up computing.
+  async getDiff(project: string, base: string, head: string, cache?: ForgeCache): Promise<ChangedFile[] | null> {
+    return cached(cache, cacheKey("gitlab-diff", this.host, project, base, head), async () => {
+      let comparison: GlComparison;
+      try {
+        comparison = await this.http.json<GlComparison>(
+          `${this.project(project)}/repository/compare?from=${encodeURIComponent(base)}&to=${encodeURIComponent(head)}`,
+        );
+      } catch (err) {
+        if (isNotFound(err) || (err instanceof ForgeError && err.status === 400)) return null;
+        throw err;
+      }
+      if (comparison.compare_timeout) return null;
+      return (comparison.diffs ?? []).map(toChangedFileFromGl);
     });
   }
 

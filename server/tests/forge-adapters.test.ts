@@ -313,6 +313,44 @@ describe("GitHubAdapter", () => {
     expect(gh.isSelfLogin("alice")).toBe(false);
   });
 
+  describe("getDiff", () => {
+    const COMPARE = /\/repos\/acme\/web\/compare\/b1\.\.\.h1$/;
+
+    it("maps the compared files with their patches, as a PR's files are", async () => {
+      const { adapter: gh } = adapter([
+        {
+          url: COMPARE,
+          body: {
+            status: "diverged",
+            files: [
+              { filename: "src/a.ts", status: "modified", changes: 1, patch: "@@ -1 +1 @@\n-a\n+b" },
+              { filename: "src/new.ts", previous_filename: "src/old.ts", status: "renamed", changes: 0 },
+              { filename: "logo.png", status: "added", changes: 0 },
+              { filename: "big.ts", status: "modified", changes: 9000 },
+            ],
+          },
+        },
+      ]);
+      const files = await gh.getDiff("acme/web", "b1", "h1");
+      expect(files?.map(({ path, previousPath, changeType, patchUnavailable, hunks }) => ({ path, previousPath, changeType, patchUnavailable, hunks: hunks.length }))).toEqual([
+        { path: "src/a.ts", previousPath: undefined, changeType: "modified", patchUnavailable: false, hunks: 1 },
+        { path: "src/new.ts", previousPath: "src/old.ts", changeType: "renamed", patchUnavailable: false, hunks: 0 },
+        { path: "logo.png", previousPath: undefined, changeType: "added", patchUnavailable: false, hunks: 0 },
+        { path: "big.ts", previousPath: undefined, changeType: "modified", patchUnavailable: true, hunks: 0 },
+      ]);
+    });
+
+    it.each([404, 422])("returns null when GitHub answers %i", async (status) => {
+      const { adapter: gh } = adapter([{ url: COMPARE, status, body: { message: "No common ancestor" } }]);
+      expect(await gh.getDiff("acme/web", "b1", "h1")).toBeNull();
+    });
+
+    it("surfaces other failures", async () => {
+      const { adapter: gh } = adapter([{ url: COMPARE, status: 502, body: { message: "Bad Gateway" } }]);
+      await expect(gh.getDiff("acme/web", "b1", "h1")).rejects.toBeInstanceOf(ForgeError);
+    });
+  });
+
   describe("getToolAnnotations", () => {
     const ref = {
       provider: "github" as const,
@@ -806,6 +844,41 @@ describe("GitLabAdapter", () => {
     ]);
     expect(await gl.listDirAtRef("team/app", "src/a.ts", "h1")).toBeNull();
     expect(await gl.listDirAtRef("team/app", "gone", "h1")).toBeNull();
+  });
+
+  describe("getDiff", () => {
+    const COMPARE = /\/repository\/compare\?from=b1&to=h1$/;
+
+    it("maps the compared diffs with their patches, as an MR's diffs are", async () => {
+      const { adapter: gl } = adapter([
+        {
+          url: COMPARE,
+          body: {
+            diffs: [
+              { old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: "@@ -1 +1 @@\n-a\n+b\n" },
+              { old_path: "gone.ts", new_path: "gone.ts", new_file: false, renamed_file: false, deleted_file: true, diff: "@@ -1 +0,0 @@\n-x\n" },
+              { old_path: "huge.ts", new_path: "huge.ts", new_file: true, renamed_file: false, deleted_file: false, diff: "", too_large: true },
+            ],
+          },
+        },
+      ]);
+      const files = await gl.getDiff("team/app", "b1", "h1");
+      expect(files?.map(({ path, changeType, patchUnavailable, hunks }) => ({ path, changeType, patchUnavailable, hunks: hunks.length }))).toEqual([
+        { path: "a.ts", changeType: "modified", patchUnavailable: false, hunks: 1 },
+        { path: "gone.ts", changeType: "deleted", patchUnavailable: false, hunks: 1 },
+        { path: "huge.ts", changeType: "added", patchUnavailable: true, hunks: 0 },
+      ]);
+    });
+
+    it.each([400, 404])("returns null when GitLab answers %i", async (status) => {
+      const { adapter: gl } = adapter([{ url: COMPARE, status, body: { message: "Could not find ref" } }]);
+      expect(await gl.getDiff("team/app", "b1", "h1")).toBeNull();
+    });
+
+    it("returns null when GitLab timed out computing the diff", async () => {
+      const { adapter: gl } = adapter([{ url: COMPARE, body: { diffs: [], compare_timeout: true } }]);
+      expect(await gl.getDiff("team/app", "b1", "h1")).toBeNull();
+    });
   });
 
   describe("getToolAnnotations", () => {

@@ -11,7 +11,7 @@ import { renderHunk } from "../src/review/context/diffText.ts";
 import { classifyFiles } from "../src/review/context/ignore.ts";
 import { MAX_MANIFEST_CHARS, reviewUserPrompt, threadAnswerUserPrompt } from "../src/review/llm/prompt.ts";
 import { generateWithFallback, ModelCallError } from "../src/review/llm/providers.ts";
-import { runReview } from "../src/review/pipeline.ts";
+import { MAX_STORED_PATCH_CHARS, MAX_STORED_PATCHES_CHARS, runReview } from "../src/review/pipeline.ts";
 import { validateFindings } from "../src/review/validate/validator.ts";
 import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { WALKTHROUGH, fakeModel, modelFinding } from "./helpers/model.ts";
@@ -467,7 +467,7 @@ describe("runReview", () => {
       startedAt: "2026-10-04T12:00:00.000Z",
     });
     expect(result.change).toMatchObject({ number: 42, headSha: "head", title: "Add b and c" });
-    expect(result.files).toEqual([{ path: "src/app.ts", changeType: "modified", additions: 2, deletions: 0 }]);
+    expect(result.files).toEqual([{ path: "src/app.ts", changeType: "modified", additions: 2, deletions: 0, patch: APP_PATCH }]);
     expect(result.verdict.blocking).toEqual([result.findings[0]!.fingerprint]);
     expect(result.usage.map((u) => u.purpose).sort()).toEqual(["review", "verify", "walkthrough"]);
     expect(requests.find((r) => r.schemaName === "code_review")!.model).toBe("anthropic/claude-sonnet-5-5");
@@ -481,6 +481,42 @@ describe("runReview", () => {
 
     expect(requests).toHaveLength(0);
     expect(result).toMatchObject({ status: "completed", findings: [], verdict: { verdict: "pass" } });
+  });
+
+  it("stores each file's patch for the diff view, and says why one is missing", async () => {
+    const { generate } = fakeModel({});
+    // Lockfiles are ignored, so no pass runs; ignored files still keep their patch.
+    const line = (size: number) => `@@ -0,0 +1,1 @@\n+${"x".repeat(size)}`;
+    const changeSet = makeChangeSet([
+      { path: "a.lock", changeType: "modified", patch: APP_PATCH },
+      { path: "logo.png", changeType: "added", patch: "Binary files /dev/null and b/logo.png differ" },
+      { path: "withheld.lock", changeType: "modified", patch: null },
+      { path: "huge.lock", changeType: "added", patch: line(MAX_STORED_PATCH_CHARS) },
+    ]);
+
+    const result = await runReview({ changeSet, config: config() }, { generate, now });
+
+    expect(result.files.map(({ path, patch, patchOmitted }) => ({ path, patch, patchOmitted }))).toEqual([
+      { path: "a.lock", patch: APP_PATCH, patchOmitted: undefined },
+      { path: "logo.png", patch: undefined, patchOmitted: "binary" },
+      { path: "withheld.lock", patch: undefined, patchOmitted: "unavailable" },
+      { path: "huge.lock", patch: undefined, patchOmitted: "too_large" },
+    ]);
+  });
+
+  it("stops storing patches once the change's total is spent", async () => {
+    const { generate } = fakeModel({});
+    const size = Math.floor(MAX_STORED_PATCH_CHARS * 0.9);
+    const count = Math.ceil(MAX_STORED_PATCHES_CHARS / size) + 1;
+    const changeSet = makeChangeSet(
+      Array.from({ length: count }, (_, i) => ({ path: `p${i}.lock`, changeType: "added" as const, patch: `@@ -0,0 +1,1 @@\n+${"x".repeat(size)}` })),
+    );
+
+    const result = await runReview({ changeSet, config: config() }, { generate, now });
+
+    const stored = result.files.filter((file) => file.patch !== undefined);
+    expect(stored.length).toBe(Math.floor(MAX_STORED_PATCHES_CHARS / (size + 17)));
+    expect(result.files.slice(stored.length).every((file) => file.patchOmitted === "too_large")).toBe(true);
   });
 
   it("is partial when one pass fails and keeps the other pass's findings", async () => {

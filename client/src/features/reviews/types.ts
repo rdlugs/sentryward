@@ -119,6 +119,18 @@ export interface ReviewSummary {
   usageTotals?: UsageTotals
 }
 
+// One file of the change as the result stored it. `patch` is absent on results
+// stored before diffs were kept, and when `patchOmitted` says why.
+export interface ChangedFile {
+  path: string
+  previousPath?: string
+  changeType: string
+  additions: number
+  deletions: number
+  patch?: string
+  patchOmitted?: "binary" | "unavailable" | "too_large"
+}
+
 export interface ReviewResult {
   schemaVersion: 1
   status: "completed" | "partial" | "failed"
@@ -137,7 +149,7 @@ export interface ReviewResult {
     headRef?: string
     isDraft: boolean
   }
-  files: { path: string; changeType: string; additions: number; deletions: number }[]
+  files: ChangedFile[]
   findings: Finding[]
   walkthrough?: {
     overview: string
