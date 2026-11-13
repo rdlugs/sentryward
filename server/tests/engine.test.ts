@@ -194,6 +194,44 @@ describe("validateFindings", () => {
     );
   });
 
+  it("removes a suggestion that repeats the lines it replaces, keeping the finding", () => {
+    const fixRationale = "Widening first keeps the sum in range.";
+    const result = validate([modelFinding({ suggestion: "const b = a + 1;", fixRationale })]);
+    expect(result.findings[0]).toMatchObject({ title: "b overflows for large a", body: "Adding one can exceed the safe integer range." });
+    expect(result.findings[0]!.suggestion).toBeUndefined();
+    // The rationale explained a fix that is no longer shown.
+    expect(result.findings[0]!.fixRationale).toBeUndefined();
+    expect(result.noopSuggestions).toBe(1);
+  });
+
+  it("ignores trailing whitespace and blank edges, but not indentation, when comparing a suggestion", () => {
+    const suggestionOf = (suggestion: string) => validate([modelFinding({ suggestion })]).findings[0]!.suggestion;
+    expect(suggestionOf("const b = a + 1;   \r\n")).toBeUndefined();
+    expect(suggestionOf("\nconst b = a + 1;\n\n")).toBeUndefined();
+    // Indentation is the fix in Python or YAML.
+    expect(suggestionOf("  const b = a + 1;")).toBe("  const b = a + 1;");
+    expect(suggestionOf("const b = a + 1n;")).toBe("const b = a + 1n;");
+  });
+
+  it("compares a multi-line suggestion against the whole range", () => {
+    const multi = (suggestion: string) =>
+      validate([modelFinding({ startLine: 11, endLine: 12, suggestion })]);
+    const same = multi("const b = a + 1;\nconst c = b * 2;");
+    expect(same.findings[0]!.suggestion).toBeUndefined();
+    expect(same.noopSuggestions).toBe(1);
+    const changed = multi("const b = a + 1;\nconst c = b * 3;");
+    expect(changed.findings[0]!.suggestion).toBe("const b = a + 1;\nconst c = b * 3;");
+    expect(changed.noopSuggestions).toBe(0);
+  });
+
+  it("keeps a suggestion on lines outside the diff, where there is nothing to compare", () => {
+    const { findings, noopSuggestions } = validate([modelFinding({ startLine: 40, endLine: 40, suggestion: "x" })], {
+      review: { fullFile: true },
+    });
+    expect(findings[0]!.suggestion).toBe("x");
+    expect(noopSuggestions).toBe(0);
+  });
+
   it("drops a finding whose fingerprint this team dismissed, but not otherwise", () => {
     const fingerprint = validate([modelFinding()]).findings[0]!.fingerprint;
     const ignored = validateFindings([modelFinding()], changeSet, reviewed, config(), new Set([fingerprint]));

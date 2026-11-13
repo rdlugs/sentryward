@@ -110,7 +110,7 @@ export function checkPatternRules(
     (rule): rule is Rule & { pattern: string } =>
       rule.pattern !== undefined && atLeast(rule.severity, ruleFloor(config, rule.id)),
   );
-  if (rules.length === 0) return { findings: [], dropped, demoted: 0 };
+  if (rules.length === 0) return { findings: [], dropped, demoted: 0, noopSuggestions: 0 };
 
   const files = [...reviewed.map((file) => ({ file, only: false })), ...guardedOnly.map((file) => ({ file, only: true }))];
   for (const { file, only } of files) {
@@ -166,5 +166,5 @@ export function checkPatternRules(
     }
   }
 
-  return { findings: [...kept.values()], dropped, demoted: 0 };
+  return { findings: [...kept.values()], dropped, demoted: 0, noopSuggestions: 0 };
 }

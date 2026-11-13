@@ -1,7 +1,7 @@
 import type { Config } from "../config/schema.ts";
 import { bucketFor } from "../core/buckets.ts";
 import { fingerprint } from "../core/fingerprint.ts";
-import { isAddedLine, type ChangedFile, type ChangeSet, type Finding, type ToolAnnotation } from "../core/models.ts";
+import { isAddedLine, newFileLines, type ChangedFile, type ChangeSet, type Finding, type ToolAnnotation } from "../core/models.ts";
 import { atLeast, severityRank } from "../core/severity.ts";
 import type { ModelFinding } from "../llm/schemas.ts";
 import { DEFAULT_RULE_CATEGORY, modelRuleFor, ruleFloor, ruleMinConfidence } from "../rules.ts";
@@ -40,6 +40,22 @@ export interface ValidationResult {
   findings: Finding[];
   dropped: Partial<Record<DropReason, number>>;
   demoted: number;
+  // Suggestions removed for repeating the lines they replace (findings kept).
+  noopSuggestions: number;
+}
+
+// Trailing whitespace and blank edges are formatting noise a model adds or
+// drops freely. Leading indentation is not: in Python or YAML it is the fix.
+function normalizeCode(lines: string[]): string {
+  const trimmed = lines.map((line) => line.trimEnd());
+  while (trimmed.length > 0 && trimmed[0] === "") trimmed.shift();
+  while (trimmed.length > 0 && trimmed.at(-1) === "") trimmed.pop();
+  return trimmed.join("\n");
+}
+
+// An "apply" button that changes nothing reads as a reviewer bug, not a fix.
+export function isNoopSuggestion(suggestion: string, current: string[]): boolean {
+  return normalizeCode(suggestion.replace(/\r\n/g, "\n").split("\n")) === normalizeCode(current);
 }
 
 function nearestAdded(file: ChangedFile, line: number): number | undefined {
@@ -138,6 +154,7 @@ export function validateFindings(
   const files = new Map(reviewed.map((file) => [file.path, file]));
   const categories = new Set(config.review.categories);
   let demoted = 0;
+  let noopSuggestions = 0;
   const kept = new Map<string, Finding>();
 
   for (const candidate of raw) {
@@ -204,11 +221,21 @@ export function validateFindings(
       drop("empty");
       continue;
     }
-    const suggestion =
+    // Compared against start..end as snapped and clamped: those are the lines
+    // the suggestion would replace.
+    let suggestion =
       config.review.committableSuggestions && candidate.suggestion?.trim() ? candidate.suggestion : undefined;
+    if (suggestion !== undefined) {
+      const current = newFileLines(file, start, end);
+      if (current && isNoopSuggestion(suggestion, current)) {
+        suggestion = undefined;
+        noopSuggestions += 1;
+      }
+    }
     const impact = candidate.impact.trim();
-    // A rationale written for a suggestion the config removed explains code
-    // nobody sees; without a suggestion from the model, body carries the fix.
+    // A rationale written for a suggestion that was removed (by the config, or
+    // for changing nothing) explains code nobody sees; without a suggestion
+    // from the model, body carries the fix.
     const fixRationale = candidate.suggestion?.trim() && suggestion === undefined ? "" : candidate.fixRationale.trim();
 
     const finding: Finding = {
@@ -252,10 +279,10 @@ export function validateFindings(
   }
 
   const sorted = [...kept.values()].sort(compareFindings);
-  if (options.cap === false) return { findings: sorted, dropped, demoted };
+  if (options.cap === false) return { findings: sorted, dropped, demoted, noopSuggestions };
   const capped = capFindings(sorted, config.review.maxFindings);
   if (capped.overLimit > 0) dropped.over_limit = capped.overLimit;
-  return { findings: capped.findings, dropped, demoted };
+  return { findings: capped.findings, dropped, demoted, noopSuggestions };
 }
 
 // The first `max` of findings already sorted by compareFindings.
@@ -360,5 +387,5 @@ export function validateToolFindings(
     kept.set(finding.fingerprint, existing ? stronger(existing, finding) : finding);
   }
 
-  return { findings: [...kept.values()].sort(compareFindings), dropped, demoted: 0 };
+  return { findings: [...kept.values()].sort(compareFindings), dropped, demoted: 0, noopSuggestions: 0 };
 }

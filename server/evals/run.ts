@@ -106,6 +106,7 @@ function printRun(run: EvalRun) {
     `\nprecision ${percent(t.precision)}  recall ${percent(t.recall)}  f1 ${percent(t.f1)}` +
       `  category ${percent(t.categoryAgreement)}  traps hit ${t.trapHits}` +
       `  clean-case FPs ${t.cleanCaseFalsePositives}/${t.cleanCases} cases` +
+      `  no-op suggestions ${t.noopSuggestions}` +
       `  errored ${t.errored}  tokens ${t.inputTokens}/${t.outputTokens}` +
       (reasoning ? `  reasoning ${reasoning}` : "") +
       (steps ? `  agent steps ${steps}` : "") +
@@ -162,6 +163,7 @@ async function main() {
     console.log(
       `\ncompare  recall ${percent(a.totals.recall)} -> ${percent(b.totals.recall)}` +
         `  precision ${percent(a.totals.precision)} -> ${percent(b.totals.precision)}` +
+        `  no-op suggestions ${a.totals.noopSuggestions} -> ${b.totals.noopSuggestions}` +
         `  cost ${usd(a.totals.costUsd)} -> ${usd(b.totals.costUsd)}`,
     );
   }

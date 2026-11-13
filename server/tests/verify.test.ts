@@ -32,7 +32,7 @@ describe("verifying findings", () => {
     expect(verifications).toHaveLength(1);
     expect(result.findings).toMatchObject([{ severity: "critical", kind: "potential_issue" }]);
     expect(result.verdict.verdict).toBe("blocked");
-    expect(result.validation).toEqual({ dropped: {}, demoted: 0 });
+    expect(result.validation).toEqual({ dropped: {}, demoted: 0, noopSuggestions: 0 });
     expect(result.usage.map((u) => u.purpose)).toEqual(["review", "verify"]);
     expect(result.warnings).toEqual([]);
   });
@@ -79,7 +79,7 @@ describe("verifying findings", () => {
     const { result } = await review([BLOCKER], { verdict: "uncertain", reason: "" }, { review: { severityFloor: "major" } });
 
     expect(result.findings).toEqual([]);
-    expect(result.validation).toEqual({ dropped: { below_floor: 1 }, demoted: 1 });
+    expect(result.validation).toEqual({ dropped: { below_floor: 1 }, demoted: 1, noopSuggestions: 0 });
   });
 
   it("never lets an uncertain finding block, even when blockOn reaches its demoted severity", async () => {

@@ -101,6 +101,26 @@ export function isAddedLine(file: ChangedFile, newLine: number): boolean {
   return file.hunks.some((hunk) => hunk.addedLines.includes(newLine));
 }
 
+// The new-file text of lines start..end, read from the one hunk that holds
+// them. Undefined when any of them is not in the diff (a full_file finding on
+// unchanged code): then there is nothing to compare a suggestion against.
+export function newFileLines(file: ChangedFile, start: number, end: number): string[] | undefined {
+  const hunk = file.hunks.find((h) => h.newLineToPosition[String(start)] !== undefined);
+  if (!hunk) return undefined;
+  const found: string[] = [];
+  let newLine = hunk.newStart;
+  // The first line of content is the @@ header.
+  for (const line of hunk.content.split("\n").slice(1)) {
+    const marker = line[0];
+    // Removed lines and "\ No newline" markers are not in the new file.
+    if (marker === "-" || marker === "\\") continue;
+    if (newLine >= start && newLine <= end) found.push(line.slice(1));
+    newLine += 1;
+    if (newLine > end) break;
+  }
+  return found.length === end - start + 1 ? found : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Review result. Stored as JSONB on the job and rendered by every surface.
 // ---------------------------------------------------------------------------
@@ -400,6 +420,9 @@ export const reviewResultSchema = z.object({
     // Reason to how many model findings it removed.
     dropped: z.record(z.string(), z.number().int().min(0)),
     demoted: z.number().int().min(0),
+    // Committable suggestions removed for repeating the lines they replace;
+    // the findings were kept. Absent on results from before it was counted.
+    noopSuggestions: z.number().int().min(0).optional(),
   }),
   usage: z.array(llmUsageSchema),
   verdict: z.object({

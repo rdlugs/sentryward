@@ -438,7 +438,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
         }
       : {}),
     coverage: { reviewedFiles, omissions, passes: plan.chunks.length },
-    validation: { dropped, demoted: validation.demoted + verified.demoted },
+    validation: { dropped, demoted: validation.demoted + verified.demoted, noopSuggestions: validation.noopSuggestions },
     usage,
     verdict: {
       verdict: verdictFor(status, findings, blockOn, config.review.toolFindingsBlock),

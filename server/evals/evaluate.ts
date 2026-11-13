@@ -38,6 +38,9 @@ export interface CaseReport {
   warnings: string[];
   expected: Expected[];
   score?: CaseScore;
+  // Committable suggestions the validator removed for changing nothing; a
+  // prompt that lowers this wastes fewer "apply" buttons.
+  noopSuggestions: number;
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -53,7 +56,7 @@ export interface CaseReport {
 
 export interface EvalRun {
   cases: CaseReport[];
-  totals: Totals & { inputTokens: number; outputTokens: number; costUsd: number | null };
+  totals: Totals & { inputTokens: number; outputTokens: number; noopSuggestions: number; costUsd: number | null };
 }
 
 // The config a case is reviewed with: production defaults, the case's own
@@ -112,7 +115,15 @@ export async function evaluateCase(evalCase: EvalCase, models: EvalModels, optio
     if (result.status === "failed") {
       // A call that threw (e.g. on a malformed response) may still have been
       // billed, and its usage is not in the result, so the cost is unknown.
-      return { ...base, status: "failed", error: result.errors.join("; "), warnings: result.warnings, usage, costUsd: null };
+      return {
+        ...base,
+        status: "failed",
+        error: result.errors.join("; "),
+        warnings: result.warnings,
+        noopSuggestions: result.validation.noopSuggestions ?? 0,
+        usage,
+        costUsd: null,
+      };
     }
     const costUsd = costOf(result.usage, options.price);
     return {
@@ -120,6 +131,7 @@ export async function evaluateCase(evalCase: EvalCase, models: EvalModels, optio
       status: result.status,
       warnings: result.warnings,
       score: scoreCase(result.findings, evalCase.expected, evalCase.traps, options.match),
+      noopSuggestions: result.validation.noopSuggestions ?? 0,
       usage,
       costUsd,
     };
@@ -131,6 +143,7 @@ export async function evaluateCase(evalCase: EvalCase, models: EvalModels, optio
       status: "error",
       error: err instanceof Error ? err.message : String(err),
       warnings: [],
+      noopSuggestions: 0,
       usage: summarizeUsage([]),
       costUsd: null,
     };
@@ -146,6 +159,7 @@ export async function evaluate(cases: EvalCase[], models: EvalModels, options: E
       ...summarize(reports.map((report) => ({ expectedCount: report.expected.length, score: report.score }))),
       inputTokens: reports.reduce((total, report) => total + report.usage.inputTokens, 0),
       outputTokens: reports.reduce((total, report) => total + report.usage.outputTokens, 0),
+      noopSuggestions: reports.reduce((total, report) => total + report.noopSuggestions, 0),
       costUsd: costs.includes(null) ? null : costs.reduce<number>((total, cost) => total + (cost ?? 0), 0),
     },
   };
