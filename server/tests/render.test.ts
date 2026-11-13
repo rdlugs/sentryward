@@ -213,6 +213,9 @@ describe("toMarkdown", () => {
       "**🎯 Focus:** \\!\\[x\\]\\(https://t/p.gif\\) \\[ok\\]\\(https://e\\) \\*b\\* \\_i\\_ \\`c\\` \\~s\\~\n",
     );
 
+    // A backslash of its own cannot cancel the escape after it.
+    expect(toMarkdown({ ...base, focus: "a\\[x](https://e)" })).toContain("**🎯 Focus:** a\\\\\\[x\\]\\(https://e\\)\n");
+
     const clean = withVerdict({ ...base, focus: "auth" }, { findings: [], verdict: { verdict: "pass", blockOn: "minor", blocking: [] } });
     expect(toMarkdown(clean)).toBe(
       `## Summary\n\n### 🎉 Congratulations, no findings at or above minor. 🎉\n\n**🎯 Focus:** auth\n\n${BRAND_FOOTER}\n\n${SUMMARY_MARKER}\n`,

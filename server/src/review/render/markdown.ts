@@ -215,12 +215,12 @@ function verdictSection(result: ReviewResult): string[] {
   return lines;
 }
 
-// The requester's own words, posted under the bot's name: on top of what
-// inline() neutralizes (tags, pipes, mentions, hidden markers), the markdown
-// that makes links, images or emphasis is escaped, so it reads as typed.
-// inline() escapes backslashes first, so none of these escapes can be undone.
+// The requester's own words, posted under the bot's name, so they read as
+// typed. One pass escapes backslashes together with the markdown that makes
+// links, images or emphasis, so a "\" in the text cannot undo an escape;
+// codeCell() then neutralizes tags, pipes, mentions and hidden markers.
 function plainText(text: string): string {
-  return inline(text).replace(/[[\]()!*_~`]/g, "\\$&");
+  return codeCell(text.replace(/[\\[\]()!*_~`]/g, "\\$&"));
 }
 
 // The area the requester asked this run to look hardest at, so readers know why
