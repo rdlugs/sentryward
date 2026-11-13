@@ -215,6 +215,20 @@ function verdictSection(result: ReviewResult): string[] {
   return lines;
 }
 
+// The requester's own words, posted under the bot's name, so they read as
+// typed. One pass escapes backslashes together with the markdown that makes
+// links, images or emphasis, so a "\" in the text cannot undo an escape;
+// codeCell() then neutralizes tags, pipes, mentions and hidden markers.
+function plainText(text: string): string {
+  return codeCell(text.replace(/[\\[\]()!*_~`]/g, "\\$&"));
+}
+
+// The area the requester asked this run to look hardest at, so readers know why
+// some code got more attention.
+function focusLines(result: ReviewResult): string[] {
+  return result.focus ? ["", `**🎯 Focus:** ${plainText(result.focus)}`] : [];
+}
+
 function countsLine(result: ReviewResult): string {
   const summary = summarize(result);
   if (summary.total === 0) return "No findings.";
@@ -554,11 +568,12 @@ export function toMarkdown(
 ): string {
   if (isCleanPass(result)) {
     const heading = `### ${CLEAN_PASS_ICON} Congratulations, no findings at or above ${result.verdict.blockOn}. ${CLEAN_PASS_ICON}`;
-    return `${["## Summary", "", heading, "", BRAND_FOOTER, "", SUMMARY_MARKER].join("\n")}\n`;
+    return `${["## Summary", "", heading, ...focusLines(result), "", BRAND_FOOTER, "", SUMMARY_MARKER].join("\n")}\n`;
   }
   const walkthrough = options.walkthrough === false ? null : walkthroughSection(result, options);
   const lines = [walkthrough?.heading ?? "## Summary", ...(walkthrough?.lines ?? [])];
   lines.push("", ...verdictSection(result));
+  lines.push(...focusLines(result));
   if (options.counts !== false) lines.push("", countsLine(result));
   lines.push(...incrementalNote(result));
   if (options.lifecycle !== false) lines.push(...lifecycleSection(result));

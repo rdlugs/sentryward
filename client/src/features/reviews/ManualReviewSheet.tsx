@@ -5,7 +5,7 @@ import { toast } from "sonner"
 import { SearchableSelect } from "@/components/SearchableSelect"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Field, FieldLabel } from "@/components/ui/field"
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -14,7 +14,7 @@ import { PROVIDERS } from "@/features/forge/providers"
 import { ApiError } from "@/lib/api"
 import { matchesQuery } from "@/lib/filters"
 import { timeAgo } from "@/lib/time"
-import { useCreateReview, useOpenChanges } from "./api"
+import { focusInput, MAX_FOCUS, useCreateReview, useOpenChanges } from "./api"
 import { changeLabel } from "./links"
 import { ReviewUrlForm } from "./ReviewUrlForm"
 
@@ -46,6 +46,7 @@ function RepoPicker({ onDone }: { onDone: () => void }) {
     [data],
   )
   const [repoId, setRepoId] = useState<string>()
+  const [focus, setFocus] = useState("")
   const repo = repos.find((r) => r.id === repoId)
 
   return (
@@ -82,22 +83,34 @@ function RepoPicker({ onDone }: { onDone: () => void }) {
             />
           </Field>
         )}
+        {/* Applies to whichever change is reviewed below, picked or pasted. */}
+        <Field className="mt-4">
+          <FieldLabel htmlFor="manual-review-focus">Focus (optional)</FieldLabel>
+          <Input
+            id="manual-review-focus"
+            value={focus}
+            onChange={(event) => setFocus(event.target.value)}
+            maxLength={MAX_FOCUS}
+            placeholder="e.g. the auth and session logic"
+          />
+          <FieldDescription>Looked at hardest, for this review only. Problems elsewhere are still reported.</FieldDescription>
+        </Field>
       </div>
       {/* Keyed so switching repositories clears the filter. */}
       {repo ? (
-        <ChangeList key={repo.id} repo={repo} onDone={onDone} />
+        <ChangeList key={repo.id} repo={repo} focus={focus} onDone={onDone} />
       ) : (
         <div className="min-h-0 flex-1" />
       )}
       {/* For a change Sentryward's list does not show, e.g. one past the newest few hundred. */}
       <div className="border-t p-4">
-        <ReviewUrlForm onQueued={onDone} />
+        <ReviewUrlForm onQueued={onDone} focus={focus} />
       </div>
     </>
   )
 }
 
-function ChangeList({ repo, onDone }: { repo: ForgeRepo; onDone: () => void }) {
+function ChangeList({ repo, focus, onDone }: { repo: ForgeRepo; focus: string; onDone: () => void }) {
   const { data, isPending, isError, error } = useOpenChanges(repo.id)
   const createReview = useCreateReview()
   const navigate = useNavigate()
@@ -123,7 +136,7 @@ function ChangeList({ repo, onDone }: { repo: ForgeRepo; onDone: () => void }) {
   async function review(number: number) {
     setPendingNumber(number)
     try {
-      const { review } = await createReview.mutateAsync({ repoId: repo.id, number })
+      const { review } = await createReview.mutateAsync({ repoId: repo.id, number, ...focusInput(focus) })
       onDone()
       navigate(`/reviews/${review.id}`)
     } catch (err) {

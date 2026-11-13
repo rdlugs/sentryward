@@ -47,28 +47,28 @@ function ownedBy(workspaceId: string) {
 
 type RepoWithConnection = Repository & { connection: Parameters<typeof adapterForConnection>[0] };
 
-async function queueLatest(repo: RepoWithConnection, number: number) {
+async function queueLatest(repo: RepoWithConnection, number: number, focus: string | null) {
   const head = await adapterForConnection(repo.connection)
     .getChangeHead(repo.fullPath, number)
     .catch((err: unknown) => {
       throw toHttpError(err, repo.provider);
     });
-  return enqueue({ repositoryId: repo.id, number, headSha: head.headSha, trigger: "manual" });
+  return enqueue({ repositoryId: repo.id, number, headSha: head.headSha, trigger: "manual", focus });
 }
 
 // Both ways of asking for a review end here, so they refuse and queue alike.
-async function queueManual(res: Response, repo: RepoWithConnection, number: number) {
+async function queueManual(res: Response, repo: RepoWithConnection, number: number, focus: string | null = null) {
   if (!repo.enabled) {
     throw new HttpError(409, `Reviews are turned off for ${repo.fullPath}`);
   }
-  const job = await queueLatest(repo, number);
+  const job = await queueLatest(repo, number, focus);
   const review = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id }, select: listFields });
   res.status(202).json({ review });
 }
 
 export async function createReview(req: Request, res: Response) {
   if (req.body && typeof req.body === "object" && "repoId" in req.body) {
-    const { repoId, number } = createReviewByRepoSchema.parse(req.body);
+    const { repoId, number, focus } = createReviewByRepoSchema.parse(req.body);
     const repo = await prisma.repository.findFirst({
       where: { id: repoId, connection: { workspaceId: req.workspaceId } },
       include: { connection: true },
@@ -76,11 +76,11 @@ export async function createReview(req: Request, res: Response) {
     if (!repo) {
       throw new HttpError(404, "Repository not found");
     }
-    await queueManual(res, repo, number);
+    await queueManual(res, repo, number, focus ?? null);
     return;
   }
 
-  const { url } = createReviewSchema.parse(req.body);
+  const { url, focus } = createReviewSchema.parse(req.body);
   const parsed = parseChangeUrl(url);
   if (!parsed) {
     throw new HttpError(400, "Not a pull or merge request URL");
@@ -95,7 +95,7 @@ export async function createReview(req: Request, res: Response) {
   if (!repo) {
     throw new HttpError(404, `${parsed.project} is not connected; enable it under Repositories first`);
   }
-  await queueManual(res, repo, parsed.number);
+  await queueManual(res, repo, parsed.number, focus ?? null);
 }
 
 type ListQuery = ReturnType<typeof listReviewsQuerySchema.parse>;
@@ -344,6 +344,7 @@ async function loadOwnedReview(workspaceId: string, id: string) {
       result: true,
       publication: true,
       resolvedConfig: true,
+      focus: true,
       resultExpiredAt: true,
       progress: true,
     },
@@ -487,7 +488,8 @@ export async function rerunReview(req: Request, res: Response) {
   if (!existing) {
     throw new HttpError(404, "Review not found");
   }
-  await queueManual(res, existing.repository, existing.number);
+  // A re-run asks the same question again, focus included.
+  await queueManual(res, existing.repository, existing.number, existing.focus);
 }
 
 export async function cancelReview(req: Request, res: Response) {

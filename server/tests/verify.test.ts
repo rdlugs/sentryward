@@ -103,6 +103,21 @@ describe("verifying findings", () => {
     expect(ignored.validation.noopSuggestions).toBe(0);
   });
 
+  it("asks every pass for the requested focus and records it on the result", async () => {
+    const model = fakeModel({ code_review: { findings: [BLOCKER] }, verification: { verdict: "confirmed", reason: "" } });
+    const result = await runReview({ changeSet: makeChangeSet(), config: config(), focus: "overflow" }, { generate: model.generate, now });
+
+    expect(result.focus).toBe("overflow");
+    const passes = model.requests.filter((request) => request.schemaName === "code_review");
+    expect(passes.length).toBeGreaterThan(0);
+    for (const pass of passes) expect(pass.prompt).toContain("<untrusted>\noverflow\n</untrusted>");
+    // The verifier judges the finding, not the request.
+    for (const check of model.requests.filter((request) => request.schemaName === "verification")) {
+      expect(check.prompt).not.toContain("overflow\n</untrusted>");
+    }
+    expect((await review([BLOCKER], { verdict: "confirmed", reason: "" })).result.focus).toBeUndefined();
+  });
+
   it("never lets an uncertain finding block, even when blockOn reaches its demoted severity", async () => {
     for (const blockOn of ["minor", "info"] as const) {
       const { result } = await review([BLOCKER], { verdict: "uncertain", reason: "" }, { review: { blockOn, severityFloor: "info" } });

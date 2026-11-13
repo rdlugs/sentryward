@@ -449,6 +449,11 @@ model ReviewJob {
   // fetches it. Matched against linked sign-in identities for personal
   // notifications: an id survives a rename, a login does not.
   authorId        String?        @map("author_id")
+  // Area this run should look hardest at ("/sentryward review focus ..." or the
+  // dashboard). The requester's text: untrusted, this run only, never config.
+  // Kept by retention, so a re-run asks the same question: one short phrase on
+  // a row that is kept anyway.
+  focus           String?
   status          ReviewStatus   @default(queued)
   verdict         ReviewVerdict?
   resolvedConfig  Json?          @map("resolved_config")

@@ -4,9 +4,10 @@ import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Field, FieldError, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { reviewUrlErrorMessage, useCreateReview } from "./api"
+import { focusInput, reviewUrlErrorMessage, useCreateReview } from "./api"
 
-export function ReviewUrlForm({ onQueued }: { onQueued?: () => void }) {
+// focus: what the manual review sheet asks this review to look hardest at.
+export function ReviewUrlForm({ onQueued, focus }: { onQueued?: () => void; focus?: string }) {
   const [url, setUrl] = useState("")
   const [error, setError] = useState<string | null>(null)
   const createReview = useCreateReview()
@@ -16,7 +17,7 @@ export function ReviewUrlForm({ onQueued }: { onQueued?: () => void }) {
     event.preventDefault()
     setError(null)
     try {
-      const { review } = await createReview.mutateAsync({ url })
+      const { review } = await createReview.mutateAsync({ url, ...focusInput(focus) })
       setUrl("")
       onQueued?.()
       navigate(`/reviews/${review.id}`)

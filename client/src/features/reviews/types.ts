@@ -267,6 +267,8 @@ export interface ReviewProgress {
 
 export interface ReviewDetail extends ReviewListItem {
   baseSha: string | null
+  // What the requester asked this run to look hardest at; their own text.
+  focus: string | null
   attempts: number
   result: ReviewResult | null
   publication: Publication | null

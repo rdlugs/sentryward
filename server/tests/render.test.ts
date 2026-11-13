@@ -198,6 +198,30 @@ describe("toMarkdown", () => {
     expect(expected).not.toContain("—");
   });
 
+  it("names the requested focus under the verdict, as plain text, also on a clean pass", async () => {
+    const base = await sampleResult();
+    expect(toMarkdown(base)).not.toContain("Focus:");
+
+    const focused = { ...base, focus: "auth <script> | @admin" };
+    const markdown = toMarkdown(focused);
+    expect(markdown).toContain("\n\n**🎯 Focus:** auth &lt;script&gt; \\| @\u200badmin\n");
+    expect(markdown.indexOf("Focus:")).toBeGreaterThan(markdown.indexOf("**Blocked**"));
+
+    // Links, images and emphasis read as typed, not as the bot's markdown.
+    const tricky = toMarkdown({ ...base, focus: "![x](https://t/p.gif) [ok](https://e) *b* _i_ `c` ~s~" });
+    expect(tricky).toContain(
+      "**🎯 Focus:** \\!\\[x\\]\\(https://t/p.gif\\) \\[ok\\]\\(https://e\\) \\*b\\* \\_i\\_ \\`c\\` \\~s\\~\n",
+    );
+
+    // A backslash of its own cannot cancel the escape after it.
+    expect(toMarkdown({ ...base, focus: "a\\[x](https://e)" })).toContain("**🎯 Focus:** a\\\\\\[x\\]\\(https://e\\)\n");
+
+    const clean = withVerdict({ ...base, focus: "auth" }, { findings: [], verdict: { verdict: "pass", blockOn: "minor", blocking: [] } });
+    expect(toMarkdown(clean)).toBe(
+      `## Summary\n\n### 🎉 Congratulations, no findings at or above minor. 🎉\n\n**🎯 Focus:** auth\n\n${BRAND_FOOTER}\n\n${SUMMARY_MARKER}\n`,
+    );
+  });
+
   it("never uses an em dash", async () => {
     expect(toMarkdown(await sampleResult())).not.toContain("—");
   });

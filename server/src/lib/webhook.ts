@@ -1,9 +1,21 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { IgnoreReason } from "../generated/prisma/client.ts";
+import { normalizeFocus } from "../review/core/models.ts";
 import { HttpError } from "./httpError.ts";
 
 // "/sentryward review" at the start of any line of a comment.
 export const REVIEW_COMMAND = /^\/sentryward\s+review\b/im;
+
+// "/sentryward review focus [on][:] <area>": the rest of that one line, only
+// after the keyword, so other words after "review" are not taken as a focus.
+// "on" is only the connective when a space, colon or the line end follows it:
+// "focus on-call paging" and "focus only the db" keep their first word.
+const REVIEW_FOCUS = /^\/sentryward\s+review\b[ \t]+focus\b(?:[ \t]+on(?=[ \t:]|$))?[ \t]*:?[ \t]*(.*)$/im;
+
+// What a "/sentryward review" comment asks for beyond a review.
+export function parseReviewCommand(body: string): { focus: string | null } {
+  return { focus: normalizeFocus(REVIEW_FOCUS.exec(body)?.[1]) };
+}
 
 // "/sentryward ignore <reason> [note]" at the start of any line of a reply on a
 // finding's thread; the rest of that line is the note.

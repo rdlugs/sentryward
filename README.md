@@ -756,6 +756,13 @@ Rules and limits:
 - Comment `/sentryward review` on a PR/MR to ask for a review of its current
   head. Only people who can push (GitHub owners, members and collaborators;
   GitLab Developer or above) can.
+- Add a focus to ask that review to look hardest at one area:
+  `/sentryward review focus on the auth and session logic` (also
+  `focus: ...` or `focus ...`). It is a priority, not a filter: problems
+  elsewhere are still reported. Only the rest of the command's line is used,
+  up to 300 characters, and it applies to that run only (a re-run keeps it),
+  never to settings. The summary comment names it. The manual review sheet in
+  the dashboard has the same optional field.
 
 | Key | Values | Effect |
 | --- | --- | --- |
@@ -1852,7 +1859,7 @@ rate limited (20 requests per 15 minutes per IP).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| POST   | `/api/reviews` | `{ url }` of a pull or merge request on an enabled repository; queues a review of its current head |
+| POST   | `/api/reviews` | `{ url }` of a pull or merge request on an enabled repository, or `{ repoId, number }`; queues a review of its current head. An optional `focus` (up to 300 characters) names the area that run should look hardest at |
 | GET    | `/api/reviews?repoId=&status=&page=&limit=` | The workspace's reviews, newest first, with a summary but not the full result; returns `{ reviews, total, page, limit }` (`limit` 1-100, default 20) |
 | GET    | `/api/reviews/stats?repoId=&days=` | Runs, verdicts, review time and token totals over the last `days` (default 7), with `cost: { usd }` (see below) |
 | GET    | `/api/reviews/attention` | `{ failed, since }`: runs that failed since the caller last opened the Reviews list in this workspace, or in the last 24 hours before their first visit |

@@ -143,7 +143,30 @@ describe("POST /api/reviews by repository", () => {
     expect(res.body.review).toMatchObject({ number: 7, headSha: "abc123", trigger: "manual", status: "queued" });
   });
 
+  it("queues a review with the focus asked for, by URL or by change, and treats a blank one as none", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+
+    const byUrl = await request(app).post("/api/reviews").set("Cookie", cookie).send({ url: MR_URL, focus: "  the auth logic " });
+    expect(byUrl.status).toBe(202);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: byUrl.body.review.id } })).toMatchObject({ focus: "the auth logic" });
+
+    // A different focus is a different request, not a duplicate.
+    const byRepo = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "billing" });
+    expect(byRepo.body.review.id).not.toBe(byUrl.body.review.id);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: byRepo.body.review.id } })).toMatchObject({ focus: "billing" });
+
+    const spaced = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "the\n  db   layer" });
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: spaced.body.review.id } })).toMatchObject({ focus: "the db layer" });
+
+    // A blank focus is none, and a focused review already answers that.
+    const blank = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "  " });
+    expect(blank.body.review.id).toBe(spaced.body.review.id);
+  });
+
   it("validates the body", async () => {
+    const long = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "x".repeat(301) });
+    expect(long.status).toBe(400);
+    expect(long.body.errors).toHaveProperty("focus");
     for (const number of [0, 2147483648]) {
       const res = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number });
       expect(res.status, String(number)).toBe(400);
@@ -526,6 +549,16 @@ describe("GET /api/reviews/:id and /markdown", () => {
     expect(res.body.review.result.usageTotals.calls).toBe(2);
     expect(res.body.review.result.usageTotals.costUsd).toBe(0.0008);
     expect(res.body.review.result.usage[0].cost.total).toBe(0.0004);
+    expect(res.body.review.focus).toBeNull();
+  });
+
+  it("serves the focus the review was asked for", async () => {
+    const job = await completedJob();
+    await prisma.reviewJob.update({ where: { id: job.id }, data: { focus: "the auth logic" } });
+
+    const res = await request(app).get(`/api/reviews/${job.id}`).set("Cookie", cookie);
+
+    expect(res.body.review.focus).toBe("the auth logic");
   });
 
   it("serves a running review's progress", async () => {
@@ -685,6 +718,19 @@ describe("POST /api/reviews/:id/rerun", () => {
     expect(res.status).toBe(202);
     expect(res.body.review.id).not.toBe(job.id);
     expect(res.body.review).toMatchObject({ number: 7, headSha: "newsha", status: "queued" });
+  });
+
+  it("asks the same question again, focus included, even after retention cleared the result", async () => {
+    const job = await completedJob();
+    await prisma.reviewJob.update({
+      where: { id: job.id },
+      data: { focus: "the auth logic", result: Prisma.DbNull, resultExpiredAt: new Date() },
+    });
+    vi.stubGlobal("fetch", fetchStub([mrRoute("newsha")]).fetch);
+
+    const res = await request(app).post(`/api/reviews/${job.id}/rerun`).set("Cookie", cookie);
+
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: res.body.review.id } })).toMatchObject({ focus: "the auth logic" });
   });
 
   it("409s for a repository whose reviews are turned off, and queues nothing", async () => {

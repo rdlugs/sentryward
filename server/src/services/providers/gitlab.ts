@@ -1,5 +1,5 @@
 import { HttpError } from "../../lib/httpError.ts";
-import { parseJson, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
+import { parseJson, parseReviewCommand, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
 import type { ForgeConnection } from "../../generated/prisma/client.ts";
 import { GitLabAdapter } from "../../review/forge/gitlab.ts";
 import { gitlabConnectSchema } from "../../schemas/connections.schema.ts";
@@ -114,6 +114,7 @@ export const gitlabProvider: ProviderDefinition = {
           headSha: mr.last_commit.id,
           trigger: "comment",
           actor: payload.user.username,
+          focus: parseReviewCommand(attrs.note ?? "").focus,
         });
         return { body: { outcome: "queued", reviewId: job.id } };
       }

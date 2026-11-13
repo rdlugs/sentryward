@@ -482,6 +482,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
         rejectedFindings,
         increment,
         toolAnnotations: tools,
+        ...(job.focus ? { focus: job.focus } : {}),
       },
       {
         generate: abortableGenerate(generate, watch.signal),
