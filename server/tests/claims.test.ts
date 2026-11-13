@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { Config, ConfigOverride } from "../src/review/config/schema.ts";
 import type { Claim, Finding } from "../src/review/core/models.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
+import { searchBudget } from "../src/review/agent/tools.ts";
 import { repairReviewOutput } from "../src/review/llm/schemas.ts";
 import { runReview } from "../src/review/pipeline.ts";
 import { checkClaims } from "../src/review/validate/claims.ts";
+import { validateFindings } from "../src/review/validate/validator.ts";
 import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { fakeModel, modelFinding } from "./helpers/model.ts";
 
@@ -59,7 +62,7 @@ async function check(claim: Claim, files: Record<string, string>, options: { sea
     findings: [finding(claim)],
     changeSet: options.changeSet ?? makeChangeSet(),
     source: ctx,
-    ...(options.maxSearches !== undefined ? { maxSearches: options.maxSearches } : {}),
+    searches: searchBudget(options.maxSearches ?? 10),
   });
   return { result, calls };
 }
@@ -74,21 +77,23 @@ describe("checkClaims", () => {
   it("keeps a missing_path finding when the path is not there", async () => {
     const { result } = await check({ kind: "missing_path", subject: "src/lib/missing.ts" }, { "src/app.ts": APP });
     expect(result.findings).toHaveLength(1);
-    expect(result).toMatchObject({ dropped: {}, checked: 1, inconclusive: 1 });
+    expect(result.dropped).toEqual({});
   });
 
-  it("refutes missing_path from a file the change adds, without a read", async () => {
+  it("refutes missing_path from a file the change adds, without reading it", async () => {
     const changeSet = makeChangeSet([
       { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
       { path: "src/new.ts", changeType: "added", patch: "@@ -0,0 +1 @@\n+export const x = 1;" },
     ]);
     const { result, calls } = await check({ kind: "missing_path", subject: "src/new.ts" }, {}, { changeSet });
     expect(result.dropped).toEqual({ claim_refuted: 1 });
-    expect(calls.reads).toEqual([]);
+    // The finding's own file is read, to see whether it imports the path
+    // relative to itself; the added file is not.
+    expect(calls.reads).toEqual(["src/app.ts"]);
   });
 
   it("never reads a path that escapes the repository", async () => {
-    const { result, calls } = await check({ kind: "missing_path", subject: "../secrets.txt" }, { "../secrets.txt": "x" });
+    const { result, calls } = await check({ kind: "missing_path", subject: "../../secrets.txt" }, { "../secrets.txt": "x" });
     expect(result.findings).toHaveLength(1);
     expect(calls.reads).toEqual([]);
   });
@@ -161,9 +166,134 @@ describe("checkClaims", () => {
   it("leaves findings without a claim untouched", async () => {
     const { ctx, calls } = source({});
     const plain = { ...finding({ kind: "missing_path", subject: "x" }), claim: undefined };
-    const result = await checkClaims({ findings: [plain], changeSet: makeChangeSet(), source: ctx });
-    expect(result).toMatchObject({ findings: [plain], dropped: {}, checked: 0 });
+    const result = await checkClaims({ findings: [plain], changeSet: makeChangeSet(), source: ctx, searches: searchBudget(5) });
+    expect(result).toEqual({ findings: [plain], dropped: {} });
     expect(calls.reads).toEqual([]);
+  });
+});
+
+describe("checkClaims refutes only on a real reference", () => {
+  const app = APP.replace("export const b", "export const total");
+
+  it("does not count a same-named symbol in a file that does not import the finding's file", async () => {
+    const { result } = await check({ kind: "unused_symbol", subject: "total" }, { "src/app.ts": app, "src/other.ts": "console.log(total);" });
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("does not count a property access, a string or a doc mention as a use", async () => {
+    const files = {
+      "src/app.ts": app,
+      "src/api.ts": 'import { cart } from "./app";\nconsole.log(cart.total, cart?.total, "total");',
+      "README.md": "Call total() to sum the cart.",
+    };
+    const { result } = await check({ kind: "unused_symbol", subject: "total" }, files);
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("does not count a method, property or Go method declaration as a use", async () => {
+    const files = {
+      "src/app.ts": app,
+      "src/cart.ts": 'import "./app";\nclass Cart {\n  total(): number {\n    return 1;\n  }\n}',
+      "src/order.ts": 'import "./app";\nconst order = {\n  total: 3,\n};',
+      "src/svc.ts": 'import "./app";\nfunc (s *Svc) total() int {',
+    };
+    const { result } = await check({ kind: "unused_symbol", subject: "total" }, files);
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("refutes from a real use in a file that imports the finding's file, for a name ending in $", async () => {
+    const files = {
+      "src/app.ts": APP.replace("export const b", "export const total$"),
+      "src/api.ts": 'import { total$ } from "./app";\ntotal$.subscribe(render);',
+    };
+    const { result } = await check({ kind: "unused_symbol", subject: "total$" }, files);
+    expect(result.dropped).toEqual({ claim_refuted: 1 });
+  });
+
+  it("ignores own-file uses when the file declares the name more than once", async () => {
+    const own = `${app}\nfunction other() {\n  const total = 1;\n  return total;\n}`;
+    const { result } = await check({ kind: "unused_symbol", subject: "total" }, { "src/app.ts": own });
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("does not take a bare word, another module or a doc mention for an import of the file", async () => {
+    const files = {
+      "src/app.ts": 'log("audit");\nimport "./billing/audit";\nimport "./lib/my-audit";\nconst kind = { type: "audit" };',
+      "src/lib/audit.ts": "export const log = 1;",
+      "README.md": "See `audit.ts` and ./lib/audit.",
+    };
+    const { result } = await check({ kind: "unreferenced_file", subject: "src/lib/audit.ts" }, files);
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("does not take an import of foo for one of foo.test", async () => {
+    const files = { "src/app.ts": 'import { x } from "./foo";', "src/foo.test.ts": "test()" };
+    const { result } = await check({ kind: "unreferenced_file", subject: "src/foo.test.ts" }, files, { searchIndex: { "foo.test": ["src/app.ts"] } });
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("refutes unreferenced_file from a parent-relative import and an alias import", async () => {
+    const relative = await check(
+      { kind: "unreferenced_file", subject: "src/lib/audit.ts" },
+      { "src/lib/audit.ts": "export {}", "src/billing/refunds.ts": 'import { log } from "../lib/audit";' },
+    );
+    expect(relative.result.dropped).toEqual({ claim_refuted: 1 });
+    const alias = await check(
+      { kind: "unreferenced_file", subject: "src/lib/audit.ts" },
+      { "src/lib/audit.ts": "export {}", "src/routes.ts": 'import { log } from "@/lib/audit";' },
+    );
+    expect(alias.result.dropped).toEqual({ claim_refuted: 1 });
+  });
+
+  it("resolves a parent-relative missing_path from the finding's directory", async () => {
+    const { ctx } = source({ "src/lib/audit.ts": "export {}" });
+    const result = await checkClaims({
+      findings: [finding({ kind: "missing_path", subject: "../lib/audit.ts" }, { file: "src/billing/refunds.ts" })],
+      changeSet: makeChangeSet(),
+      source: ctx,
+      searches: searchBudget(5),
+    });
+    expect(result.dropped).toEqual({ claim_refuted: 1 });
+  });
+
+  it("keeps missing_path when the root path exists but the file's own import points elsewhere", async () => {
+    const { ctx } = source({ "lib/audit.ts": "export {}", "src/billing/refunds.ts": 'import { log } from "./lib/audit";' });
+    const result = await checkClaims({
+      findings: [finding({ kind: "missing_path", subject: "lib/audit.ts" }, { file: "src/billing/refunds.ts" })],
+      changeSet: makeChangeSet(),
+      source: ctx,
+      searches: searchBudget(5),
+    });
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("counts an empty file as existing", async () => {
+    const { result } = await check({ kind: "missing_path", subject: "src/empty.ts" }, { "src/app.ts": APP, "src/empty.ts": "" });
+    expect(result.dropped).toEqual({ claim_refuted: 1 });
+  });
+
+  it("spends the review's shared search budget", async () => {
+    const files = { "src/app.ts": app, "src/api.ts": 'import { total } from "./app";\nuse(total);' };
+    const { ctx, calls } = source(files);
+    const searches = searchBudget(1);
+    const findings = [finding({ kind: "unused_symbol", subject: "total" }), finding({ kind: "unused_symbol", subject: "other" })];
+    await checkClaims({ findings, changeSet: makeChangeSet(), source: ctx, searches });
+    expect(calls.searches).toEqual(["total"]);
+    expect(searches.left).toBe(0);
+  });
+});
+
+describe("duplicate findings and claims", () => {
+  const changeSet = makeChangeSet();
+  const config = resolveConfig({}).config;
+
+  it("keeps a claim only when both duplicates made one", () => {
+    const claim = { kind: "unused_symbol", subject: "renderTotal" } as const;
+    const loose = validateFindings([modelFinding({ claim: null, confidence: 0.6 }), modelFinding({ claim, confidence: 0.9 })], changeSet, changeSet.files, config);
+    expect(loose.findings).toHaveLength(1);
+    expect(loose.findings[0]!.claim).toBeUndefined();
+    const both = validateFindings([modelFinding({ claim, confidence: 0.6 }), modelFinding({ claim, confidence: 0.9 })], changeSet, changeSet.files, config);
+    expect(both.findings[0]!.claim).toEqual(claim);
   });
 });
 
@@ -175,7 +305,7 @@ describe("claims in a review", () => {
     title: "c is never used",
     claim: { kind: "unused_symbol", subject: "renderTotal" },
   });
-  const head = { "src/app.ts": APP, "src/view.ts": "renderTotal(cart);" };
+  const head = { "src/app.ts": APP, "src/view.ts": 'import { renderTotal } from "./app";\nrenderTotal(cart);' };
 
   it("drops a contradicted finding and counts it", async () => {
     const { ctx } = source(head);
@@ -195,6 +325,52 @@ describe("claims in a review", () => {
     expect(result.validation.dropped).toEqual({});
     expect(calls.searches).not.toContain("renderTotal");
     expect(JSON.stringify(requests[0])).not.toContain("- claim:");
+    expect(JSON.stringify(z.toJSONSchema(requests[0]!.schema as z.ZodType))).not.toContain('"claim"');
+  });
+
+  it("asks for claims in the output schema when check_claims is on", async () => {
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    await runReview({ changeSet: makeChangeSet(), config: config() }, { generate });
+    expect(JSON.stringify(z.toJSONSchema(requests[0]!.schema as z.ZodType))).toContain('"claim"');
+  });
+
+  it("caps findings after claim checks, so a refuted finding frees its slot", async () => {
+    const { ctx } = source(head);
+    const findings = [
+      { ...unused, severity: "major" as const },
+      modelFinding({ severity: "minor", title: "first minor" }),
+      modelFinding({ severity: "minor", title: "second minor" }),
+    ];
+    const { generate } = fakeModel({ code_review: { findings } });
+    const result = await runReview({ changeSet: makeChangeSet(), config: config({ review: { maxFindings: 2 } }) }, { generate, context: ctx });
+    expect(result.findings.map((entry) => entry.title).sort()).toEqual(["first minor", "second minor"]);
+    expect(result.validation.dropped).toEqual({ claim_refuted: 1 });
+  });
+
+  it("takes claim searches from review.agent.max_searches", async () => {
+    const { ctx, calls } = source(head);
+    const { generate } = fakeModel({ code_review: { findings: [unused] } });
+    const result = await runReview(
+      { changeSet: makeChangeSet(), config: config({ review: { fileContext: false, agent: { maxSearches: 0 } } }) },
+      { generate, context: ctx },
+    );
+    expect(calls.searches).toEqual([]);
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("keeps every finding, with a warning, when the claim check fails", async () => {
+    const ctx: ContextSource = {
+      readFile() {
+        throw new Error("forge down");
+      },
+      async searchCode() {
+        return [];
+      },
+    };
+    const { generate } = fakeModel({ code_review: { findings: [unused] } });
+    const result = await runReview({ changeSet: makeChangeSet(), config: config({ review: { fileContext: false } }) }, { generate, context: ctx });
+    expect(result.findings).toHaveLength(1);
+    expect(result.warnings.some((warning) => warning.startsWith("Claim checks failed"))).toBe(true);
   });
 
   it("repairs a reply with a malformed claim without losing the finding", () => {

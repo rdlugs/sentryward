@@ -14,12 +14,22 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   fact it rests on: a path that does not exist, a symbol nothing references,
   or a file nothing imports. Before verification, the claim is looked up at
   the head revision (a file read, the change's own added lines, then at most
-  5 code searches and 15 reads per review) and the finding is dropped as
+  5 code searches, taken from the review's shared `review.agent.max_searches`
+  budget, and 15 reads per review) and the finding is dropped as
   `claim_refuted` when the repository contradicts it. A search hit counts
   only once it is confirmed by reading the file at the head, since GitHub
-  searches the default branch. Absence, errors and a spent budget never drop
-  anything. No model call is made; the claim is only requested in the prompt
-  while the setting is on. The dashboard's Accuracy section has the toggle,
+  searches the default branch. Only an unambiguous reference refutes: a use
+  of a symbol in another file counts only when that file imports the
+  finding's file, property accesses, strings, docs and other declarations of
+  the name are not uses, a file counts as referenced only by an import or
+  path that resolves to it, and a path relative to the finding's file must
+  exist under every reading (an empty file exists). Absence, errors, a
+  failed check and a spent budget never drop anything. `review.max_findings`
+  applies after the check, so a dropped finding frees its slot. No model call
+  is made; the claim is only requested in the prompt and the output schema
+  while the setting is on, and of two duplicate findings the merged one keeps
+  a claim only if both made one. The dashboard's Accuracy section has the
+  toggle, the "Checking findings" step now also covers claim checks,
   and the review sidebar names the new drop reason. A new eval case,
   `ts-clean-audit-import`, covers an import of an untouched module.
 - Discord and Microsoft Teams notification targets (#259). A new `discord`

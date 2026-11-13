@@ -9,7 +9,8 @@ import {
   evidenceSchema,
   severitySchema,
 } from "../core/severity.ts";
-import { CLAIM_KINDS } from "../core/models.ts";
+import type { Config } from "../config/schema.ts";
+import { CLAIM_KINDS, type Claim } from "../core/models.ts";
 
 // What the model is asked to return. Numeric ranges and string lengths are
 // described rather than enforced in the schema, because providers' structured
@@ -54,12 +55,24 @@ export const modelFindingSchema = z.object({
     .nullable()
     .describe("The checkable fact the finding rests on, or null"),
 });
-export type ModelFinding = z.infer<typeof modelFindingSchema>;
+// claim is absent from a reply when review.check_claims is off.
+export type ModelFinding = Omit<z.infer<typeof modelFindingSchema>, "claim"> & { claim?: Claim | null };
 
 export const reviewOutputSchema = z.object({
   findings: z.array(modelFindingSchema),
 });
-export type ReviewOutput = z.infer<typeof reviewOutputSchema>;
+const reviewOutputWithoutClaimSchema = z.object({
+  findings: z.array(modelFindingSchema.omit({ claim: true })),
+});
+export interface ReviewOutput {
+  findings: ModelFinding[];
+}
+
+// The schema a review pass asks for. The claim field is only described while
+// claims are checked, so a disabled check costs no prompt or output tokens.
+export function reviewOutputSchemaFor(config: Config): z.ZodType<ReviewOutput> {
+  return config.review.checkClaims ? reviewOutputSchema : reviewOutputWithoutClaimSchema;
+}
 
 export const VERIFICATION_VERDICTS = ["confirmed", "refuted", "uncertain"] as const;
 

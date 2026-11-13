@@ -28,7 +28,7 @@ import { reviewChunkAgentic } from "./llm/agenticReview.ts";
 import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/providers.ts";
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
-import { compareFindings, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
+import { capFindings, compareFindings, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
 import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkClaims } from "./validate/claims.ts";
 import { checkPatternRules } from "./rules.ts";
@@ -334,25 +334,36 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const incomplete = new Set(omissions.filter((o) => INCOMPLETE.has(o.reason)).map((o) => o.path));
   const succeeded = outcomes.filter((outcome) => outcome.review).flatMap((outcome) => outcome.chunk.parts);
   const reviewedFiles = [...new Set(succeeded.map((part) => part.file.path))].filter((path) => !incomplete.has(path));
+  // Uncapped: claim checks may drop findings, and the cap then takes the next
+  // ones in line rather than leaving their slots empty.
   const validation = validateFindings(
     raw,
     changeSet,
     scoped.filter((file) => succeeded.some((part) => part.file === file)),
     config,
     input.ignoredFingerprints,
+    { cap: false },
   );
   // Claims first: a lookup is cheaper than the verifier's model call, and a
   // finding the repository contradicts is not worth one. Without a source
   // (tests, an eval case without an after/ tree) there is nothing to check.
-  const claims =
-    config.review.checkClaims && deps.context
-      ? await checkClaims({ findings: validation.findings, changeSet, source: deps.context })
-      : { findings: validation.findings, dropped: {} };
+  // A failed check keeps every finding, as a failed lookup within it does.
+  let claims: { findings: Finding[]; dropped: Partial<Record<DropReason, number>> } = { findings: validation.findings, dropped: {} };
+  const checking = config.review.checkClaims && deps.context !== undefined;
+  if (checking || verifies(config)) report({ stage: "verifying" });
+  if (checking) {
+    try {
+      claims = await checkClaims({ findings: validation.findings, changeSet, source: deps.context!, searches });
+    } catch (err) {
+      warnings.push(`Claim checks failed, the findings were kept: ${errorMessage(err)}`);
+    }
+  }
+  const limited = capFindings(claims.findings, config.review.maxFindings);
+  if (limited.overLimit > 0) validation.dropped.over_limit = limited.overLimit;
   // After validation, so only findings that would be published are checked,
   // and before the verdict, so a refuted blocker cannot fail the status.
-  if (verifies(config)) report({ stage: "verifying" });
   const verified = await verifyFindings({
-    findings: claims.findings,
+    findings: limited.findings,
     changeSet,
     chunks: outcomes.filter((outcome) => outcome.review).map((outcome) => outcome.chunk),
     config,
@@ -387,7 +398,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const patternRules = checkPatternRules(scoped, changeSet, config, input.ignoredFingerprints, guardedOnly);
   const reviewed = [...verified.findings, ...toolFindings, ...patternRules.findings].sort(compareFindings);
   // The cap covers model, tool and rule findings together; the model's own
-  // were already capped by the validator.
+  // were already capped after the claim checks.
   const overLimit = Math.max(0, reviewed.length - config.review.maxFindings);
   const fresh = new Set(reviewed.map((finding) => finding.fingerprint));
   const carried = (increment?.carried ?? []).filter(

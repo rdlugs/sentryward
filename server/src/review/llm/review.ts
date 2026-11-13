@@ -3,7 +3,7 @@ import type { ChangeSet, LlmUsage, RejectedFinding } from "../core/models.ts";
 import type { Chunk } from "../context/chunk.ts";
 import { reviewSystemPrompt, reviewUserPrompt, type ManifestEntry } from "./prompt.ts";
 import { callUsage, failedUsage, type Generate, generateWithFallback, modelChain } from "./providers.ts";
-import { repairReviewOutput, reviewOutputSchema, type ModelFinding } from "./schemas.ts";
+import { repairReviewOutput, reviewOutputSchemaFor, type ModelFinding } from "./schemas.ts";
 
 export interface ChunkReview {
   findings: ModelFinding[];
@@ -26,7 +26,7 @@ export async function reviewChunk(
   const response = await generateWithFallback(generate, modelChain(config.llm, "review"), {
     system: reviewSystemPrompt(config),
     prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest),
-    schema: reviewOutputSchema,
+    schema: reviewOutputSchemaFor(config),
     schemaName: "code_review",
     repair: repairReviewOutput,
     temperature: config.llm.temperature,

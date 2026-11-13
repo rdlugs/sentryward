@@ -127,6 +127,9 @@ export function validateFindings(
   config: Config,
   // Fingerprints this team dismissed on this change; a match is dropped.
   ignoredFingerprints?: ReadonlySet<string>,
+  // cap: false leaves review.max_findings to the caller, for a pipeline that
+  // drops more findings first (claim checks) and caps afterwards.
+  options: { cap?: boolean } = {},
 ): ValidationResult {
   const dropped: Partial<Record<DropReason, number>> = {};
   const drop = (reason: DropReason) => {
@@ -245,14 +248,29 @@ export function validateFindings(
 
     const existing = kept.get(finding.fingerprint);
     if (existing) drop("duplicate");
-    kept.set(finding.fingerprint, existing ? stronger(existing, finding) : finding);
+    kept.set(finding.fingerprint, existing ? mergeDuplicate(existing, finding) : finding);
   }
 
   const sorted = [...kept.values()].sort(compareFindings);
-  const overLimit = sorted.length - config.review.maxFindings;
-  if (overLimit > 0) dropped.over_limit = overLimit;
+  if (options.cap === false) return { findings: sorted, dropped, demoted };
+  const capped = capFindings(sorted, config.review.maxFindings);
+  if (capped.overLimit > 0) dropped.over_limit = capped.overLimit;
+  return { findings: capped.findings, dropped, demoted };
+}
 
-  return { findings: sorted.slice(0, config.review.maxFindings), dropped, demoted };
+// The first `max` of findings already sorted by compareFindings.
+export function capFindings(findings: Finding[], max: number): { findings: Finding[]; overLimit: number } {
+  return { findings: findings.slice(0, max), overLimit: Math.max(0, findings.length - max) };
+}
+
+// The stronger of two reports of one problem. Its claim survives only if both
+// made one: a claim can only remove a finding, so a report that rested on no
+// claim must not be dropped through its twin's.
+function mergeDuplicate(existing: Finding, candidate: Finding): Finding {
+  const kept = stronger(existing, candidate);
+  if (!kept.claim || (existing.claim && candidate.claim)) return kept;
+  const { claim: _claim, ...rest } = kept;
+  return rest;
 }
 
 // Analyzer results are held to the same file, category, floor and dismissal
