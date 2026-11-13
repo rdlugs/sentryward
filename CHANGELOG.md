@@ -287,6 +287,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Changed
 
+- A committable suggestion that repeats the lines it would replace is
+  removed before publishing, along with its fix rationale; the finding is
+  kept and its body carries the fix. The comparison is of what applying it
+  would change: only the final newline and line endings are ignored, so a
+  suggestion that adds or removes blank lines, trailing whitespace or
+  indentation is kept. A suggestion on lines outside the diff
+  (`review.full_file`) is kept since there is nothing to compare it with.
+  When two reports of one finding merge, the kept one takes its twin's
+  suggestion for the same lines if it has none of its own. How many
+  published findings lost a suggestion this way is stored with the result
+  (`validation.noopSuggestions`; findings later dropped as duplicates,
+  dismissed, refuted or over the cap are not counted) and totalled by
+  `npm run eval`, including in `--compare` runs.
 - A review that passes with no findings at all now posts a short summary
   comment: "🎉 Congratulations, no findings at or above `<block_on>`. 🎉"
   followed only by the footer. The walkthrough, verdict line, finding counts,

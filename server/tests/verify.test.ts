@@ -32,7 +32,7 @@ describe("verifying findings", () => {
     expect(verifications).toHaveLength(1);
     expect(result.findings).toMatchObject([{ severity: "critical", kind: "potential_issue" }]);
     expect(result.verdict.verdict).toBe("blocked");
-    expect(result.validation).toEqual({ dropped: {}, demoted: 0 });
+    expect(result.validation).toEqual({ dropped: {}, demoted: 0, noopSuggestions: 0 });
     expect(result.usage.map((u) => u.purpose)).toEqual(["review", "verify"]);
     expect(result.warnings).toEqual([]);
   });
@@ -79,7 +79,28 @@ describe("verifying findings", () => {
     const { result } = await review([BLOCKER], { verdict: "uncertain", reason: "" }, { review: { severityFloor: "major" } });
 
     expect(result.findings).toEqual([]);
-    expect(result.validation).toEqual({ dropped: { below_floor: 1 }, demoted: 1 });
+    expect(result.validation).toEqual({ dropped: { below_floor: 1 }, demoted: 1, noopSuggestions: 0 });
+  });
+
+  it("counts a no-op suggestion only on a finding that is published", async () => {
+    const noop = { ...BLOCKER, suggestion: "const b = a + 1;" };
+    const confirmed = { verdict: "confirmed", reason: "" };
+
+    expect((await review([noop], confirmed)).result.validation.noopSuggestions).toBe(1);
+    // Two reports of one problem publish one finding.
+    expect((await review([noop, noop], confirmed)).result.validation.noopSuggestions).toBe(1);
+    expect((await review([noop], { verdict: "refuted", reason: "" })).result.validation.noopSuggestions).toBe(0);
+    // Demotion changes the fingerprint, not what the suggestion was on.
+    expect((await review([noop], { verdict: "uncertain", reason: "" })).result.validation.noopSuggestions).toBe(1);
+
+    const dismissed = fingerprint({ file: "src/app.ts", category: "bug", kind: "potential_issue", title: "b overflows for large a" });
+    const model = fakeModel({ code_review: { findings: [noop] }, verification: confirmed });
+    const ignored = await runReview(
+      { changeSet: makeChangeSet(), config: config(), ignoredFingerprints: new Set([dismissed]) },
+      { generate: model.generate, now },
+    );
+    expect(ignored.findings).toEqual([]);
+    expect(ignored.validation.noopSuggestions).toBe(0);
   });
 
   it("never lets an uncertain finding block, even when blockOn reaches its demoted severity", async () => {
