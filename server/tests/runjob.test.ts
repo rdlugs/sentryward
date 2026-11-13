@@ -558,8 +558,8 @@ describe("runJob", () => {
     await runJob(job, runDeps);
 
     expect(published.summaries).toHaveLength(2);
-    expect(published.summaries[0]).toMatch(/^⏳ \*\*Review in progress\*\* · \[?`newhead`/m);
-    expect(published.summaries[0]).toContain(`[View live progress ↗](`);
+    expect(published.summaries[0]).toMatch(/^Reviewing \[?`newhead`/m);
+    expect(published.summaries[0]).toContain(`[View live progress](`);
     expect(published.summaries[0]).toContain(`/reviews/${job.id})`);
     expect(published.summaries[0]).not.toContain("## Summary");
     expect(published.summaries[1]).toMatch(/^## Summary\n/);
@@ -614,7 +614,7 @@ describe("runJob", () => {
     it("updates a summary an earlier run left, progress note first", async () => {
       const { published } = await run([], true);
       expect(published.summaries).toHaveLength(2);
-      expect(published.summaries[0]).toMatch(/^⏳ \*\*Review in progress\*\*/m);
+      expect(published.summaries[0]).toMatch(/^Reviewing /m);
     });
 
     it("posts the summary of a review with findings, without starting a progress note", async () => {
@@ -652,9 +652,11 @@ describe("runJob", () => {
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: fixedJob.id } });
     expect(stored.publication).toMatchObject({ threadsResolved: [print], threadsReopened: [] });
     expect(await prisma.finding.findFirst({ where: { fingerprint: print } })).toMatchObject({ state: "resolved", lifecycle: "fixed" });
-    // The rerun records what became of the finding, and the summary says so.
+    // The rerun records what became of the finding; with nothing left, the
+    // summary is the clean-pass celebration rather than the lifecycle list.
     expect((stored.result as ReviewResult).lifecycle).toMatchObject({ new: [], stillOpen: [], gone: [{ fingerprint: print, outcome: "fixed" }] });
-    expect(fixed.published.summaries.at(-1)).toContain("> 🔄 Since the last review: 1 fixed.");
+    expect(fixed.published.summaries.at(-1)).toContain("### 🎉 Congratulations, no findings at or above");
+    expect(fixed.published.summaries.at(-1)).not.toContain("Since the last review");
 
     const back = deps({}, found);
     await enqueue({ repositoryId, number: 42, headSha: "back", trigger: "manual" });
