@@ -61,6 +61,7 @@ statuses. The dashboard tracks reviews and findings across runs.
   [monthly budget](#monthly-budget) ·
   [model capabilities](#model-capabilities) ·
   [thinking and agentic context](#thinking-and-agentic-context) ·
+  [deep review](#deep-review) ·
   [Ollama](#ollama) ·
   [`.sentryward.yaml`](#sentrywardyaml-reference) ·
   [review rules](#review-rules) ·
@@ -813,6 +814,11 @@ age and repository.
   up to 300 characters, and it applies to that run only (a re-run keeps it),
   never to settings. The summary comment names it. The manual review sheet in
   the dashboard has the same optional field.
+- Ask for a [deep review](#deep-review) of that run with
+  `/sentryward review deep` (combine it with a focus as
+  `/sentryward review deep focus on ...`). It turns `review.deep` on for that
+  run only (a re-run keeps it), using the specialists the settings select. The
+  manual review sheet has a **Deep review** switch for the same.
 
 | Key | Values | Effect |
 | --- | --- | --- |
@@ -1530,6 +1536,44 @@ context as a static one, and may call these tools:
 - A model or endpoint without tool support falls back to static context with a
   warning.
 
+### Deep review
+
+`review.deep` adds specialist passes on top of the general one. Each
+specialist reviews every planned pass of the change again, told to look for
+one kind of defect only:
+
+| Specialist | Looks for |
+| --- | --- |
+| `naming` | Names, comments, log and error messages that disagree with what the code does |
+| `invariants` | Broken invariants, check-then-act races, state changed without the surrounding lock or transaction |
+| `boundaries` | Off-by-one, inclusive/exclusive ranges, empty and single-element inputs, overflow, ordering assumptions |
+| `contracts` | A changed signature, shape, error or nullability whose callers or consumers were not updated |
+| `tests` | Tests that would still pass if the behaviour they cover broke |
+| `leaks` | Secrets and personal data in logs, error messages, responses or client code |
+| `consistency` | Changed files that disagree with each other (a renamed value, client and server, schema and code) |
+
+- Off by default. Turn it on for every review with `review.deep.enabled`, or
+  for one run with `/sentryward review deep` or the manual review sheet.
+  `review.deep.specialists` picks which run (all seven by default).
+- **Cost:** each selected specialist is one more model call per review pass, so
+  all seven make a review about eight times as expensive. Usage records each
+  specialist's calls, and the eval runner compares recall with and without it
+  (`npm run eval -- --compare --deep`).
+- Specialists see the same diff and context as the general pass (static or
+  agentic). The team rules stay with the general pass, so a rule violation is
+  never reported once per specialist.
+- Their findings go through the same validation, claim checks, verification
+  and `max_findings` cap. They are reported whatever `review.categories` says,
+  like rule findings, since the specialist was asked for by name (the `tests`
+  specialist files under `testing`).
+- When a specialist reports a problem the general pass also found in other
+  words (same file, category and overlapping lines, with titles sharing at
+  least half their words), the two are merged and counted as a duplicate.
+  Reports from the same pass are never merged this way.
+- A failed specialist pass is a warning, not a partial review: the general
+  pass alone decides what was reviewed. The review page tags each finding with
+  the specialist that found it and shows how many ran.
+
 ### Ollama
 
 Add Ollama under LLM Connections and enter its OpenAI-compatible base URL. For
@@ -1584,6 +1628,9 @@ review:
     max_steps: 8            # model calls per pass, the final report included
     max_tool_tokens: 30000  # what tools may return in one pass
     max_searches: 5         # code searches across the whole review
+  deep:                     # specialist passes on top of the general one (see Deep review)
+    enabled: false          # one more model call per pass for each specialist below
+    specialists: [naming, invariants, boundaries, contracts, tests, leaks, consistency]
 output:
   walkthrough: true         # the PR summary
   post_inline: true
@@ -2365,7 +2412,8 @@ docker compose exec worker npm run eval -- --model anthropic/claude-sonnet-5-5 -
 | `--base-url` | none | send the model's calls to this endpoint (a proxy or Ollama) |
 | `--thinking` | the case's setting (`off`) | `off`, `low`, `medium` or `high` |
 | `--context` | the case's setting (`static`) | `static` or `agentic` |
-| `--compare` | off | review every case twice, with thinking off and static context, then with `--thinking` (default `medium`) and `--context`, and print recall, precision and cost side by side |
+| `--deep` | the case's setting (off) | turn [deep review](#deep-review) on, and list each specialist's hits, false positives and cost |
+| `--compare` | off | review every case twice, with thinking off and static context, then with `--thinking` (default `medium`) and `--context`, and print recall, precision and cost side by side. With `--deep`, compare deep review off and on instead, both with the `--thinking` and `--context` given |
 | `--out` | `server/evals/reports/<time>-<model>.json` | where to write the report |
 
 **How cases are scored.** Each case runs through `runReview` with the default

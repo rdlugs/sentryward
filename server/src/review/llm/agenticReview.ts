@@ -4,6 +4,7 @@ import type { ChangeSet, RejectedFinding } from "../core/models.ts";
 import type { Chunk } from "../context/chunk.ts";
 import type { ContextSource } from "../context/gather.ts";
 import { ToolsUnsupportedError, agenticSystemPrompt, type AgenticResponse, type GenerateAgentic } from "./agentic.ts";
+import type { Lens } from "./lenses.ts";
 import { reviewSystemPrompt, reviewUserPrompt, type ManifestEntry } from "./prompt.ts";
 import {
   callUsage,
@@ -37,12 +38,13 @@ export async function reviewChunkAgentic(
   rejected: RejectedFinding[] = [],
   manifest?: ManifestEntry[],
   focus?: string,
+  lens?: Lens,
 ): Promise<AgenticChunkReview> {
   const models = modelChain(config.llm, "review");
   const errors: unknown[] = [];
   const failedAttempts: SpentTokens[] = [];
   const schema = reviewOutputSchemaFor(config);
-  const system = agenticSystemPrompt(reviewSystemPrompt(config), schema, "code_review");
+  const system = agenticSystemPrompt(reviewSystemPrompt(config, lens), schema, "code_review");
   for (const model of models) {
     // Each model starts its own budget; the searches stay shared.
     const { tools, reads } = agentTools({ ...context, maxToolTokens: config.review.agent.maxToolTokens });

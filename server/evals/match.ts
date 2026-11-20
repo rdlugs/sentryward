@@ -16,7 +16,7 @@ type Located = { file: string; startLine: number; endLine: number };
 
 export type ScoredFinding = Pick<
   Finding,
-  "file" | "startLine" | "endLine" | "severity" | "category" | "kind" | "bucket" | "title" | "confidence"
+  "file" | "startLine" | "endLine" | "severity" | "category" | "kind" | "bucket" | "title" | "confidence" | "reviewer"
 > &
   (
     | { outcome: "match"; expected: number; categoryMatch: boolean }
@@ -154,6 +154,7 @@ export function scoreCase(
       bucket: finding.bucket,
       title: finding.title,
       confidence: finding.confidence,
+      ...(finding.reviewer ? { reviewer: finding.reviewer } : {}),
     };
     const pair = byFinding.get(fi);
     if (pair) {

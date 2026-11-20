@@ -22,6 +22,11 @@ export function FindingBody({ finding, change }: { finding: Finding; change: Rev
         <Badge variant="outline">{finding.category}</Badge>
         {finding.kind !== "potential_issue" && <Badge variant="outline">{finding.kind.replace(/_/g, " ")}</Badge>}
         {finding.source === "rule" && finding.ruleId && <Badge variant="secondary">Rule {finding.ruleId}</Badge>}
+        {finding.reviewer && (
+          <Badge variant="secondary" title="Found by a deep review specialist">
+            Deep: {finding.reviewer}
+          </Badge>
+        )}
         {/* An analyzer's result, or a rule's pattern match (no model behind it), has no confidence of its own. */}
         {finding.source === "tool" ? (
           <Badge variant="secondary">via {finding.tool ?? "static analysis"}</Badge>

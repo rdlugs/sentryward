@@ -1,6 +1,7 @@
 import type { Config } from "../config/schema.ts";
 import type { ChangeSet, LlmUsage, RejectedFinding } from "../core/models.ts";
 import type { Chunk } from "../context/chunk.ts";
+import type { Lens } from "./lenses.ts";
 import { reviewSystemPrompt, reviewUserPrompt, type ManifestEntry } from "./prompt.ts";
 import { callUsage, failedUsage, type Generate, generateWithFallback, modelChain } from "./providers.ts";
 import { repairReviewOutput, reviewOutputSchemaFor, type ModelFinding } from "./schemas.ts";
@@ -23,9 +24,10 @@ export async function reviewChunk(
   rejected: RejectedFinding[] = [],
   manifest?: ManifestEntry[],
   focus?: string,
+  lens?: Lens,
 ): Promise<ChunkReview> {
   const response = await generateWithFallback(generate, modelChain(config.llm, "review"), {
-    system: reviewSystemPrompt(config),
+    system: reviewSystemPrompt(config, lens),
     prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest, focus),
     schema: reviewOutputSchemaFor(config),
     schemaName: "code_review",

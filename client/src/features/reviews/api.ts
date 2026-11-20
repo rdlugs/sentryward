@@ -125,7 +125,8 @@ export function useReviewChange(id: string, active: boolean) {
 
 // A pasted link, or a change picked from a repository's open ones.
 // focus: the area this one review should look hardest at (blank means none).
-export type CreateReviewInput = ({ url: string } | { repoId: string; number: number }) & { focus?: string }
+// deep: a deep review (specialist passes) for this one review.
+export type CreateReviewInput = ({ url: string } | { repoId: string; number: number }) & { focus?: string; deep?: boolean }
 
 // Same cap as the server's (MAX_FOCUS), so the input stops where the API would refuse.
 export const MAX_FOCUS = 300
@@ -134,6 +135,17 @@ export const MAX_FOCUS = 300
 export function focusInput(focus: string | undefined): { focus?: string } {
   const trimmed = focus?.trim()
   return trimmed ? { focus: trimmed } : {}
+}
+
+// What the manual review sheet asks of one review beyond the change itself.
+export interface RunOptions {
+  focus: string
+  deep: boolean
+}
+
+// Only what was asked for is sent, so a plain review's request is unchanged.
+export function runInput(options: RunOptions | undefined): { focus?: string; deep?: true } {
+  return { ...focusInput(options?.focus), ...(options?.deep ? { deep: true as const } : {}) }
 }
 
 // Why a pasted link was refused: the server's message for the url field when

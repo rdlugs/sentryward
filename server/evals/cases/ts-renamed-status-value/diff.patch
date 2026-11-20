@@ -1,0 +1,32 @@
+diff --git a/client/orderBadge.ts b/client/orderBadge.ts
+index 79a9523..80bc939 100644
+--- a/client/orderBadge.ts
++++ b/client/orderBadge.ts
+@@ -2,5 +2,6 @@
+ export function badgeFor(status: string): string {
+   if (status === "canceled") return "Cancelled";
+   if (status === "shipped") return "Shipped";
++  if (status === "refunded") return "Refunded";
+   return "Open";
+ }
+diff --git a/server/orders.ts b/server/orders.ts
+index 4ea8d5a..58744e6 100644
+--- a/server/orders.ts
++++ b/server/orders.ts
+@@ -1,4 +1,4 @@
+-export type OrderStatus = "open" | "shipped" | "canceled";
++export type OrderStatus = "open" | "shipped" | "cancelled" | "refunded";
+ 
+ export interface Order {
+   id: string;
+@@ -6,5 +6,9 @@ export interface Order {
+ }
+ 
+ export function cancelOrder(order: Order): void {
+-  order.status = "canceled";
++  order.status = "cancelled";
++}
++
++export function refundOrder(order: Order): void {
++  order.status = "refunded";
+ }

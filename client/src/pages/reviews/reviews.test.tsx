@@ -192,6 +192,19 @@ describe("Reviews page", () => {
 
     await waitFor(() => expect(bodies).toEqual([{ url: "https://github.com/acme/web/pull/42", focus: "billing" }]))
   })
+
+  it("asks for a deep review only when the switch is on", async () => {
+    const bodies: unknown[] = []
+    mockApi(focusRoutes(bodies))
+    renderWithProviders(<App />, { route: "/reviews" })
+
+    await openManualReview()
+    await userEvent.click(await screen.findByRole("switch", { name: "Deep review" }))
+    await userEvent.type(screen.getByLabelText("Review a pull or merge request"), "https://github.com/acme/web/pull/42")
+    await userEvent.click(screen.getByRole("button", { name: "Review" }))
+
+    await waitFor(() => expect(bodies).toEqual([{ url: "https://github.com/acme/web/pull/42", deep: true }]))
+  })
 })
 
 async function openManualReview() {
@@ -741,6 +754,23 @@ describe("Review detail page", () => {
     expect(within(row("Source")).getByRole("button", { name: "Copy source branch" })).toBeInTheDocument()
     // The header names both branches too.
     expect(screen.getByLabelText("From feature/sticky-headers into main")).toBeInTheDocument()
+  })
+
+  it("shows a deep review's specialists and tags what they found", async () => {
+    const result = {
+      ...detail.result!,
+      findings: [{ ...detail.result!.findings[0]!, reviewer: "tests" }],
+      usage: [...detail.result!.usage, { purpose: "review", model: "m", inputTokens: 1, outputTokens: 1, latencyMs: 1, lens: "tests" }],
+    }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, deep: true, result } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")).toHaveTextContent("Deep review (1 specialist)")
+    expect(await screen.findByText("Deep: tests")).toBeInTheDocument()
   })
 
   it("shows the focus the review was asked for", async () => {

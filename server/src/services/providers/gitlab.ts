@@ -136,7 +136,7 @@ export const gitlabProvider: ProviderDefinition = {
           headSha: mr.last_commit.id,
           trigger: "comment",
           actor: payload.user.username,
-          focus: parseReviewCommand(attrs.note ?? "").focus,
+          ...parseReviewCommand(attrs.note ?? ""),
         });
         return { body: { outcome: "queued", reviewId: job.id } };
       }

@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 // A throwaway GitHub App so the installation flow is testable; every forge call
 // is stubbed, so this key never signs anything GitHub sees.
@@ -9,6 +9,8 @@ export default defineConfig({
   test: {
     environment: "node",
     fileParallelism: false,
+    // Eval cases are code under review, not tests, even when they hold tests.
+    exclude: [...configDefaults.exclude, "evals/cases/**"],
     env: {
       GITHUB_HOST: "github.com",
       GITHUB_APP_ID: "123",

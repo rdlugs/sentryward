@@ -6,15 +6,22 @@ import { HttpError } from "./httpError.ts";
 // "/sentryward review" at the start of any line of a comment.
 export const REVIEW_COMMAND = /^\/sentryward\s+review\b/im;
 
-// "/sentryward review focus [on][:] <area>": the rest of that one line, only
-// after the keyword, so other words after "review" are not taken as a focus.
-// "on" is only the connective when a space, colon or the line end follows it:
-// "focus on-call paging" and "focus only the db" keep their first word.
-const REVIEW_FOCUS = /^\/sentryward\s+review\b[ \t]+focus\b(?:[ \t]+on(?=[ \t:]|$))?[ \t]*:?[ \t]*(.*)$/im;
+// "/sentryward review [deep] focus [on][:] <area>": the rest of that one line,
+// only after the keyword, so other words after "review" are not taken as a
+// focus. "on" is only the connective when a space, colon or the line end
+// follows it: "focus on-call paging" and "focus only the db" keep their first word.
+const REVIEW_FOCUS =
+  /^\/sentryward\s+review\b(?:[ \t]+deep\b(?!-))?[ \t]+focus\b(?:[ \t]+on(?=[ \t:]|$))?[ \t]*:?[ \t]*(.*)$/im;
+
+// "/sentryward review deep": a deep review (review.deep) for this run only.
+// Only right after "review", so "review focus on deep links" is not one, and
+// not before a hyphen, so "review deep-dive into auth" (a costly misreading:
+// every specialist pass) is not one either. "deep." still is.
+const REVIEW_DEEP = /^\/sentryward\s+review\b[ \t]+deep\b(?!-)/im;
 
 // What a "/sentryward review" comment asks for beyond a review.
-export function parseReviewCommand(body: string): { focus: string | null } {
-  return { focus: normalizeFocus(REVIEW_FOCUS.exec(body)?.[1]) };
+export function parseReviewCommand(body: string): { focus: string | null; deep: boolean } {
+  return { focus: normalizeFocus(REVIEW_FOCUS.exec(body)?.[1]), deep: REVIEW_DEEP.test(body) };
 }
 
 // "/sentryward ignore <reason> [note]" at the start of any line of a reply on a

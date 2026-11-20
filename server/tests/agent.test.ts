@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { BUDGET_SPENT, MAX_DIR_ENTRIES, MAX_READ_LINES, agentTools, readsContext, safePath, searchBudget } from "../src/review/agent/tools.ts";
+import { BUDGET_SPENT, MAX_DIR_ENTRIES, MAX_READ_LINES, agentTools, readsContext, reservedBudget, safePath, searchBudget } from "../src/review/agent/tools.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { Config, ConfigOverride } from "../src/review/config/schema.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
@@ -154,6 +154,19 @@ describe("agent tools", () => {
     await run(second.tools.search_code, { term: "main" });
     expect(await run(first.tools.search_code, { term: "other" })).toMatch(/No code searches are left/);
     expect(searched).toEqual(["helper", "main"]);
+  });
+
+  it("leaves a reserved share of the searches to the general passes", () => {
+    const searches = searchBudget(5);
+    const specialist = reservedBudget(searches, 3);
+
+    expect(specialist.left).toBe(2);
+    expect([specialist.take(), specialist.take(), specialist.take()]).toEqual([true, true, false]);
+    expect(specialist.left).toBe(0);
+    // The reserve is still there for the shared budget, and the total holds.
+    expect(searches.left).toBe(3);
+    expect([searches.take(), searches.take(), searches.take(), searches.take()]).toEqual([true, true, true, false]);
+    expect(specialist.take()).toBe(false);
   });
 
   it("wraps a failed search as untrusted, since the error can quote the term", async () => {

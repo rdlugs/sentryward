@@ -46,6 +46,20 @@ export function searchBudget(max: number) {
 }
 export type SearchBudget = ReturnType<typeof searchBudget>;
 
+// Deep review specialists draw from the review's shared budget but leave the
+// last `reserve` searches to the general passes, which decide coverage. The
+// total across every pass is still the shared budget's.
+export function reservedBudget(budget: SearchBudget, reserve: number): SearchBudget {
+  return {
+    take(): boolean {
+      return budget.left > reserve && budget.take();
+    },
+    get left() {
+      return Math.max(0, budget.left - reserve);
+    },
+  };
+}
+
 // What a pass read through its tools, so the verifier can be shown the same
 // code (validate/verify.ts).
 export interface ReadRecord {

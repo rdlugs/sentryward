@@ -409,6 +409,27 @@ const CHOICE_INFO: Record<
       { value: "false", label: "No tools" },
     ],
   },
+  deepReview: {
+    label: "Deep review",
+    description:
+      "Adds a pass per specialist on every part of the change, each looking for one kind of defect. Finds more, and multiplies the review's model calls. A single review can also ask for it with /sentryward review deep.",
+    options: [
+      { value: "false", label: "Off" },
+      { value: "true", label: "On" },
+    ],
+  },
+}
+
+// What each deep review specialist looks for, as the checkbox grid shows it.
+// The model's own instructions are in server/src/review/llm/lenses.ts.
+const SPECIALIST_INFO: Record<string, string> = {
+  naming: "Names, comments and messages that disagree with what the code does",
+  invariants: "Broken invariants, races and missing locks or transactions",
+  boundaries: "Off-by-one, empty inputs, ranges, overflow and ordering assumptions",
+  contracts: "Changed signatures or shapes whose callers were not updated",
+  tests: "Tests that would still pass if the behaviour broke",
+  leaks: "Secrets and personal data in logs, errors and responses",
+  consistency: "Changed files that disagree with each other",
 }
 
 const SUMMARY_INSTRUCTIONS_EXAMPLE =
@@ -757,7 +778,14 @@ function CategoriesField(props: {
   effective?: ReactNode
   error?: string
   disabled?: boolean
+  // The same checkbox grid serves the deep review specialists.
+  legend?: string
+  description?: ReactNode
+  idPrefix?: string
+  info?: Record<string, string>
 }) {
+  const legend = props.legend ?? "Categories"
+  const info = props.info ?? CATEGORY_INFO
   const overridden = props.resettable && props.value !== undefined
   const checked = props.value ?? props.inherited
   // Like a toggle, there is nothing truthful to show before the inherited value loads.
@@ -774,7 +802,7 @@ function CategoriesField(props: {
   return (
     <FieldSet data-disabled={disabled} data-invalid={props.error ? true : undefined}>
       <div className="flex flex-wrap items-center gap-2">
-        <FieldLegend variant="label">Categories</FieldLegend>
+        <FieldLegend variant="label">{legend}</FieldLegend>
         {checked && (
           <span className="text-xs text-muted-foreground">
             {checked.length} of {props.options.length} on
@@ -784,7 +812,7 @@ function CategoriesField(props: {
         {props.effective && <span className="text-xs text-muted-foreground">{props.effective}</span>}
         {overridden && (
           <ResetButton
-            label="Categories"
+            label={legend}
             hint={props.inheritedHint}
             onClick={() => props.onChange(undefined)}
             disabled={props.disabled}
@@ -795,6 +823,7 @@ function CategoriesField(props: {
             type="button"
             variant="ghost"
             size="xs"
+            aria-label={`All ${legend.toLowerCase()}`}
             onClick={() => props.onChange([...props.options])}
             disabled={disabled || checked?.length === props.options.length}
           >
@@ -805,6 +834,7 @@ function CategoriesField(props: {
             type="button"
             variant="ghost"
             size="xs"
+            aria-label={`No ${legend.toLowerCase()}`}
             onClick={() => props.onChange([])}
             disabled={disabled || checked?.length === 0}
           >
@@ -812,10 +842,10 @@ function CategoriesField(props: {
           </Button>
         </div>
       </div>
-      <FieldDescription>What kinds of issues the reviewer looks for.</FieldDescription>
+      <FieldDescription>{props.description ?? "What kinds of issues the reviewer looks for."}</FieldDescription>
       <div className="grid grid-cols-2 gap-2 @md/field-group:grid-cols-3 @2xl/field-group:grid-cols-4">
         {props.options.map((category) => {
-          const id = `category-${category}`
+          const id = `${props.idPrefix ?? "category"}-${category}`
           // A label wrapping a field renders as a selectable card (see FieldLabel).
           return (
             <FieldLabel key={category} htmlFor={id}>
@@ -824,16 +854,16 @@ function CategoriesField(props: {
                 <Checkbox
                   id={id}
                   aria-label={category}
-                  aria-describedby={CATEGORY_INFO[category] ? `${id}-description` : undefined}
+                  aria-describedby={info[category] ? `${id}-description` : undefined}
                   checked={checked?.includes(category) ?? false}
                   onCheckedChange={(on) => toggle(category, on === true)}
                   disabled={disabled}
                 />
                 <FieldContent>
                   <FieldTitle className="capitalize">{category}</FieldTitle>
-                  {CATEGORY_INFO[category] && (
+                  {info[category] && (
                     <FieldDescription id={`${id}-description`} className="text-xs">
-                      {CATEGORY_INFO[category]}
+                      {info[category]}
                     </FieldDescription>
                   )}
                 </FieldContent>
@@ -2230,6 +2260,28 @@ export function ConfigFields(props: {
           </FieldSet>
         </Section>
         <FieldSeparator />
+        <Section
+          title="Deep review"
+          description="Specialist passes on top of the general one. Each selected specialist adds one review pass per planned chunk, which may make multiple model calls with Agentic context."
+        >
+          {choiceField("deepReview")}
+          <CategoriesField
+            legend="Specialists"
+            description="Which specialists a deep review runs. Their findings are reported whatever the categories above."
+            idPrefix="specialist"
+            info={SPECIALIST_INFO}
+            options={schema.data?.specialists ?? []}
+            value={form.specialists}
+            inherited={inherited?.review.deep.specialists}
+            onChange={(specialists) => props.onChange({ ...form, specialists })}
+            resettable={isRepo}
+            inheritedHint={inheritedHint("review.deep.specialists", inherited?.review.deep.specialists)}
+            effective={config && effective("review.deep.specialists", config.review.deep.specialists)}
+            error={errors.specialists}
+            disabled={locked("review.deep.specialists")}
+          />
+        </Section>
+        <FieldSeparator />
         <Section title="Static analysis" description="Findings that analyzers on the forge already reported.">
           <ToggleList>
             {toggles(["toolFindings"])}
@@ -2534,11 +2586,12 @@ export function ConfigFields(props: {
     "toolFindingsBlock",
   ]
   const findingsNumbers: NumberName[] = ["maxFindings", "minConfidence", "impactDepth", "maxSteps", "maxToolTokens", "maxSearches"]
-  const findingsChoices: ChoiceName[] = ["verify", "context"]
+  const findingsChoices: ChoiceName[] = ["verify", "context", "deepReview"]
   const findingsPaths = [
     "review.severityFloor",
     "review.blockOn",
     "review.categories",
+    "review.deep.specialists",
     ...findingsFlags.map((name) => `${FLAGS.find((flag) => flag.name === name)!.section}.${name}`),
     ...findingsNumbers.map((name) => `${NUMBERS.find((number) => number.name === name)!.section}.${name}`),
     ...findingsChoices.map((name) => {
@@ -2550,7 +2603,7 @@ export function ConfigFields(props: {
   // not use them, so they are not counted.
   const findingsOverrides =
     isRepo && !disabled
-      ? [form.severityFloor !== INHERIT, form.blockOn !== INHERIT, form.categories !== undefined]
+      ? [form.severityFloor !== INHERIT, form.blockOn !== INHERIT, form.categories !== undefined, form.specialists !== undefined]
           .concat(findingsFlags.map((name) => form.flags[name] !== undefined))
           .concat(findingsNumbers.map((name) => form.numbers[name].trim() !== ""))
           .concat(findingsChoices.map((name) => form.choices[name] !== INHERIT))

@@ -23,11 +23,13 @@ import { gatherContext, type ContextSource, type ReachedCaller } from "./context
 import { floorBlastRadius, riskyAreas, withReach } from "./context/risk.ts";
 import { classifyFiles } from "./context/ignore.ts";
 import { MAX_MANIFEST_CHARS, MAX_REJECTED_CHARS, reviewSystemPrompt, type ManifestEntry } from "./llm/prompt.ts";
-import { searchBudget } from "./agent/tools.ts";
+import { reservedBudget, searchBudget } from "./agent/tools.ts";
 import { ToolsUnsupportedError, toolsUnsupportedWarning, type GenerateAgentic } from "./llm/agentic.ts";
 import { reviewChunkAgentic } from "./llm/agenticReview.ts";
 import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/providers.ts";
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
+import { lensesFor, type Lens } from "./llm/lenses.ts";
+import { mergeAcrossLenses } from "./validate/lensDedupe.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
 import { capFindings, compareFindings, noopKey, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
 import { verifies, verifyFindings } from "./validate/verify.ts";
@@ -147,10 +149,13 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   if (config.review.context === "agentic" && !agentic) {
     warnings.push("Agentic context needs a code source and a tool-capable model call; passes used static context");
   }
+  // Every lens reviews the same planned chunks, so context is gathered once
+  // and each chunk fits the longest lens prompt.
+  const lenses = lensesFor(config);
   // An agentic pass's conversation grows by what its tools return, so that
   // much of the window is kept free of diff.
   let overhead =
-    estimateTokens(reviewSystemPrompt(config)) +
+    Math.max(...lenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
     USER_PROMPT_ALLOWANCE +
     // Only a review asked for a focus sends that section, so only it pays.
     (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
@@ -238,12 +243,16 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   let failedPasses = 0;
   // Shared by every pass: GitHub rate-limits code search per token.
   const searches = searchBudget(config.review.agent.maxSearches);
+  // A deep review's specialists outnumber the general passes, so without a
+  // reserve they could spend every search before a general pass needs one.
+  const specialistSearches = reservedBudget(searches, Math.ceil(config.review.agent.maxSearches / 2));
   type PassOutcome =
-    | { chunk: Chunk; review: ChunkReview; error?: undefined; spent?: undefined }
-    | { chunk: Chunk; review?: undefined; error: string; spent: LlmUsage[] };
-  const reviewPass = async (chunk: Chunk): Promise<PassOutcome> => {
-    const review = () => reviewChunk(deps.generate, changeSet, chunk, chunks.length, config, input.rejectedFindings, manifest, input.focus);
-    if (!agentic) return { chunk, review: await review() };
+    | { chunk: Chunk; lens: Lens; review: ChunkReview; error?: undefined; spent?: undefined }
+    | { chunk: Chunk; lens: Lens; review?: undefined; error: string; spent: LlmUsage[] };
+  const reviewPass = async (chunk: Chunk, lens: Lens): Promise<PassOutcome> => {
+    const review = () =>
+      reviewChunk(deps.generate, changeSet, chunk, chunks.length, config, input.rejectedFindings, manifest, input.focus, lens);
+    if (!agentic) return { chunk, lens, review: await review() };
     try {
       const { toolContext, ...result } = await reviewChunkAgentic(
         deps.generateAgentic!,
@@ -251,12 +260,13 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
         chunk,
         chunks.length,
         config,
-        { source: deps.context!, searches },
+        { source: deps.context!, searches: lens.kind === "specialist" ? specialistSearches : searches },
         input.rejectedFindings,
         manifest,
         input.focus,
+        lens,
       );
-      return { chunk: toolContext ? { ...chunk, toolContext } : chunk, review: result };
+      return { chunk: toolContext ? { ...chunk, toolContext } : chunk, lens, review: result };
     } catch (err) {
       if (!(err instanceof ToolsUnsupportedError)) throw err;
       // Without tools the pass is still worth a static review.
@@ -264,6 +274,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       const refused = failedUsage(err.spent, "review", chunk.index);
       return {
         chunk,
+        lens,
         review: {
           ...fallback,
           failedUsage: [...refused, ...fallback.failedUsage],
@@ -272,31 +283,65 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       };
     }
   };
+  // The general passes go first, so a deep review covers the change as soon
+  // as a plain one would before the specialists add to it.
+  const passes = lenses.flatMap((lens) => chunks.map((chunk) => ({ chunk, lens })));
   let passesDone = 0;
   // With nothing planned there are no passes to count.
   const reportPasses = () => {
-    if (chunks.length > 0) report({ stage: "reviewing", passes: { done: passesDone, total: chunks.length } });
+    if (passes.length > 0) report({ stage: "reviewing", passes: { done: passesDone, total: passes.length } });
   };
   reportPasses();
-  const outcomes = await mapLimit(chunks, deps.concurrency ?? 3, async (chunk): Promise<PassOutcome> => {
+  const outcomes = await mapLimit(passes, deps.concurrency ?? 3, async ({ chunk, lens }): Promise<PassOutcome> => {
     try {
-      return await reviewPass(chunk);
+      return await reviewPass(chunk, lens);
     } catch (err) {
-      return { chunk, error: errorMessage(err), spent: failedUsage(spentBy(err), "review", chunk.index) };
+      return { chunk, lens, error: errorMessage(err), spent: failedUsage(spentBy(err), "review", chunk.index) };
     } finally {
       passesDone += 1;
       reportPasses();
     }
   });
+  // A specialist's calls are tagged so their cost can be told apart.
+  const tagLens = (lens: Lens, entries: LlmUsage[]): LlmUsage[] =>
+    lens.kind === "specialist" ? entries.map((entry) => ({ ...entry, lens: lens.id })) : entries;
+  // The general pass alone decides coverage, so what a specialist found in a
+  // pass whose general pass failed is dropped with it. This is per pass, not
+  // per file: a file split across passes keeps what was found where its
+  // general pass succeeded, as its general findings are. The specialist's
+  // calls were still paid for, so the loss is said rather than silent.
+  const failedGeneral = new Set(
+    outcomes.filter((outcome) => !outcome.review && outcome.lens.kind === "general").map((outcome) => outcome.chunk.index),
+  );
+  let orphaned = 0;
   for (const outcome of outcomes) {
-    if (outcome.review) {
-      const { model } = outcome.review.usage;
-      raw.push(...outcome.review.findings.map((finding) => ({ ...finding, model })));
-      usage.push(...outcome.review.failedUsage, outcome.review.usage);
+    const specialist = outcome.lens.kind === "specialist";
+    if (outcome.review && specialist && failedGeneral.has(outcome.chunk.index)) {
+      orphaned += outcome.review.findings.length;
+      usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
       warnings.push(...outcome.review.warnings);
       continue;
     }
-    usage.push(...outcome.spent);
+    if (outcome.review) {
+      const { model } = outcome.review.usage;
+      // A specialist was not given the team rules, so a rule it names is not
+      // one it was checking; the general pass reports rule violations.
+      raw.push(
+        ...outcome.review.findings.map((finding) =>
+          specialist ? { ...finding, ruleId: null, model, reviewer: outcome.lens.id } : { ...finding, model },
+        ),
+      );
+      usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
+      warnings.push(...outcome.review.warnings);
+      continue;
+    }
+    usage.push(...tagLens(outcome.lens, outcome.spent));
+    // The general pass alone decides coverage: a failed specialist leaves the
+    // change reviewed, only less deeply.
+    if (specialist) {
+      warnings.push(`Deep review pass ${outcome.lens.id} on pass ${outcome.chunk.index} failed: ${outcome.error}`);
+      continue;
+    }
     failedPasses += 1;
     errors.push(`Review pass ${outcome.chunk.index} failed: ${outcome.error}`);
     for (const part of outcome.chunk.parts) {
@@ -322,8 +367,12 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   // Files only count as reviewed if a pass that included them succeeded and
   // none of their hunks were left out.
   const incomplete = new Set(omissions.filter((o) => INCOMPLETE.has(o.reason)).map((o) => o.path));
-  const succeeded = outcomes.filter((outcome) => outcome.review).flatMap((outcome) => outcome.chunk.parts);
+  const general = outcomes.filter((outcome) => outcome.review && outcome.lens.kind === "general");
+  const succeeded = general.flatMap((outcome) => outcome.chunk.parts);
   const reviewedFiles = [...new Set(succeeded.map((part) => part.file.path))].filter((path) => !incomplete.has(path));
+  if (orphaned > 0) {
+    warnings.push(`${orphaned} deep review finding${orphaned === 1 ? " was" : "s were"} dropped with files whose review pass failed`);
+  }
   // Uncapped: claim checks may drop findings, and the cap then takes the next
   // ones in line rather than leaving their slots empty.
   const validation = validateFindings(
@@ -338,12 +387,16 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   // finding the repository contradicts is not worth one. Without a source
   // (tests, an eval case without an after/ tree) there is nothing to check.
   // A failed check keeps every finding, as a failed lookup within it does.
-  let claims: { findings: Finding[]; dropped: Partial<Record<DropReason, number>> } = { findings: validation.findings, dropped: {} };
+  // Specialists may describe a problem the general pass also found in other
+  // words; exact repeats were already merged by fingerprint.
+  const lensed = mergeAcrossLenses(validation.findings);
+  if (lensed.merged > 0) validation.dropped.duplicate = (validation.dropped.duplicate ?? 0) + lensed.merged;
+  let claims: { findings: Finding[]; dropped: Partial<Record<DropReason, number>> } = { findings: lensed.findings, dropped: {} };
   const checking = config.review.checkClaims && deps.context !== undefined;
   if (checking || verifies(config)) report({ stage: "verifying" });
   if (checking) {
     try {
-      claims = await checkClaims({ findings: validation.findings, changeSet, source: deps.context!, searches });
+      claims = await checkClaims({ findings: lensed.findings, changeSet, source: deps.context!, searches });
     } catch (err) {
       warnings.push(`Claim checks failed, the findings were kept: ${errorMessage(err)}`);
     }
@@ -355,7 +408,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const verified = await verifyFindings({
     findings: limited.findings,
     changeSet,
-    chunks: outcomes.filter((outcome) => outcome.review).map((outcome) => outcome.chunk),
+    chunks: general.map((outcome) => outcome.chunk),
     config,
     generate: deps.generate,
     concurrency: deps.concurrency ?? 3,

@@ -4,10 +4,10 @@ import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Field, FieldError, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { focusInput, reviewUrlErrorMessage, useCreateReview } from "./api"
+import { reviewUrlErrorMessage, runInput, useCreateReview, type RunOptions } from "./api"
 
-// focus: what the manual review sheet asks this review to look hardest at.
-export function ReviewUrlForm({ onQueued, focus }: { onQueued?: () => void; focus?: string }) {
+// options: what the manual review sheet asks of this review (focus, depth).
+export function ReviewUrlForm({ onQueued, options }: { onQueued?: () => void; options?: RunOptions }) {
   const [url, setUrl] = useState("")
   const [error, setError] = useState<string | null>(null)
   const createReview = useCreateReview()
@@ -17,7 +17,7 @@ export function ReviewUrlForm({ onQueued, focus }: { onQueued?: () => void; focu
     event.preventDefault()
     setError(null)
     try {
-      const { review } = await createReview.mutateAsync({ url, ...focusInput(focus) })
+      const { review } = await createReview.mutateAsync({ url, ...runInput(options) })
       setUrl("")
       onQueued?.()
       navigate(`/reviews/${review.id}`)

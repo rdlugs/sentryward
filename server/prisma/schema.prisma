@@ -484,6 +484,10 @@ model ReviewJob {
   // Kept by retention, so a re-run asks the same question: one short phrase on
   // a row that is kept anyway.
   focus           String?
+  // Deep review for this run only ("/sentryward review deep" or the dashboard):
+  // the trigger layer turns review.deep on. Kept by retention like focus, so a
+  // re-run asks for the same depth.
+  deep            Boolean        @default(false)
   status          ReviewStatus   @default(queued)
   verdict         ReviewVerdict?
   resolvedConfig  Json?          @map("resolved_config")

@@ -142,24 +142,41 @@ describe("parseReviewCommand", () => {
       "/sentryward  review  Focus  the auth and session logic  ",
       "Please look.\n/sentryward review focus on the auth and session logic\nThanks!",
     ]) {
-      expect(parseReviewCommand(body)).toEqual({ focus: "the auth and session logic" });
+      expect(parseReviewCommand(body)).toEqual({ focus: "the auth and session logic", deep: false });
     }
   });
 
   it("takes \"on\" as the connective only when it is a whole word", () => {
-    expect(parseReviewCommand("/sentryward review focus on: the session code")).toEqual({ focus: "the session code" });
-    expect(parseReviewCommand("/sentryward review focus on-call paging")).toEqual({ focus: "on-call paging" });
-    expect(parseReviewCommand("/sentryward review focus only the db")).toEqual({ focus: "only the db" });
-    expect(parseReviewCommand("/sentryward review focus   the   db\tlayer")).toEqual({ focus: "the db layer" });
+    expect(parseReviewCommand("/sentryward review focus on: the session code")).toEqual({ focus: "the session code", deep: false });
+    expect(parseReviewCommand("/sentryward review focus on-call paging")).toEqual({ focus: "on-call paging", deep: false });
+    expect(parseReviewCommand("/sentryward review focus only the db")).toEqual({ focus: "only the db", deep: false });
+    expect(parseReviewCommand("/sentryward review focus   the   db\tlayer")).toEqual({ focus: "the db layer", deep: false });
   });
 
   it("has no focus without the keyword, or with nothing after it", () => {
-    expect(parseReviewCommand("/sentryward review")).toEqual({ focus: null });
-    expect(parseReviewCommand("/sentryward review please")).toEqual({ focus: null });
-    expect(parseReviewCommand("/sentryward review focus on")).toEqual({ focus: null });
-    expect(parseReviewCommand("/sentryward review focusing")).toEqual({ focus: null });
+    expect(parseReviewCommand("/sentryward review")).toEqual({ focus: null, deep: false });
+    expect(parseReviewCommand("/sentryward review please")).toEqual({ focus: null, deep: false });
+    expect(parseReviewCommand("/sentryward review focus on")).toEqual({ focus: null, deep: false });
+    expect(parseReviewCommand("/sentryward review focusing")).toEqual({ focus: null, deep: false });
     // Only the command's own line counts.
-    expect(parseReviewCommand("/sentryward review\nfocus on billing")).toEqual({ focus: null });
+    expect(parseReviewCommand("/sentryward review\nfocus on billing")).toEqual({ focus: null, deep: false });
+  });
+
+  it("asks for a deep review only right after the review keyword", () => {
+    expect(parseReviewCommand("/sentryward review deep")).toEqual({ focus: null, deep: true });
+    expect(parseReviewCommand("Thanks.\n/sentryward  review  Deep")).toEqual({ focus: null, deep: true });
+    expect(parseReviewCommand("/sentryward review deep focus on the billing code")).toEqual({
+      focus: "the billing code",
+      deep: true,
+    });
+    // "deep" inside a focus is the focus's word, not a request for depth.
+    expect(parseReviewCommand("/sentryward review focus on deep links")).toEqual({ focus: "deep links", deep: false });
+    expect(parseReviewCommand("/sentryward review deeper")).toEqual({ focus: null, deep: false });
+    // A hyphenated word starting with "deep" is not the keyword; punctuation after it is.
+    expect(parseReviewCommand("/sentryward review deep-dive into auth")).toEqual({ focus: null, deep: false });
+    expect(parseReviewCommand("/sentryward review deep-dive focus on auth")).toEqual({ focus: null, deep: false });
+    expect(parseReviewCommand("/sentryward review deep.")).toEqual({ focus: null, deep: true });
+    expect(parseReviewCommand("/sentryward review\ndeep")).toEqual({ focus: null, deep: false });
   });
 
   it("caps the focus by character, never splitting an emoji", () => {

@@ -12,9 +12,13 @@ const focus = z
   .optional()
   .transform((value) => normalizeFocus(value) ?? undefined);
 
+// A deep review (review.deep) for this run only.
+const deep = z.boolean().optional();
+
 export const createReviewSchema = z.object({
   url: z.string().trim().min(1, "Paste a pull or merge request URL"),
   focus,
+  deep,
 });
 
 // Picked from a repository's open changes rather than pasted as a link.
@@ -22,6 +26,7 @@ export const createReviewByRepoSchema = z.object({
   repoId: z.uuid(),
   number: changeNumber,
   focus,
+  deep,
 });
 
 export const listReviewsQuerySchema = z.object({

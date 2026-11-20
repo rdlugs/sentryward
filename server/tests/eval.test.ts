@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Finding, LlmUsage } from "../src/review/core/models.ts";
+import { DEFAULT_CONFIG } from "../src/review/config/schema.ts";
 import { loadCorpus, type EvalCase, type Expected, type Trap } from "../evals/corpus.ts";
 import { caseConfig, evaluate, evaluateCase } from "../evals/evaluate.ts";
 import { DEFAULT_MATCH_OPTIONS, scoreCase, summarize } from "../evals/match.ts";
@@ -242,6 +243,12 @@ describe("evaluate", () => {
     expect(config.llm.thinking).toBe("medium");
     expect(config.review.context).toBe("agentic");
     expect(caseConfig(sqlCase, "anthropic/claude-sonnet-5-5").llm.thinking).toBe("off");
+  });
+
+  it("turns deep review on or off for the comparison, keeping the default specialists", () => {
+    expect(caseConfig(sqlCase, "anthropic/claude-sonnet-5-5", { deep: true }).review.deep.enabled).toBe(true);
+    expect(caseConfig(sqlCase, "anthropic/claude-sonnet-5-5", { deep: false }).review.deep.enabled).toBe(false);
+    expect(caseConfig(sqlCase, "anthropic/claude-sonnet-5-5").review.deep).toEqual(DEFAULT_CONFIG.review.deep);
   });
 
   it("reviews a case and scores what the model reported", async () => {

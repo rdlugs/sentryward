@@ -40,6 +40,7 @@ const schema: ConfigSchema = {
       toolFindingsBlock: false,
       context: "static",
       agent: { maxSteps: 8, maxToolTokens: 30000, maxSearches: 5 },
+      deep: { enabled: false, specialists: ["naming", "tests"] },
     },
     output: {
       walkthrough: true,
@@ -91,6 +92,7 @@ const schema: ConfigSchema = {
   profiles: { balanced: {}, fast: { output: { walkthrough: false } }, strict: { review: { blockOn: "major" } } },
   severities: ["critical", "major", "minor"],
   categories: ["security", "bug", "style"],
+  specialists: ["naming", "tests"],
   contextWindows: { anthropic: 200_000 },
   defaultContextWindow: 128_000,
   thinkingBudgets: { off: 0, low: 2_000, medium: 8_000, high: 24_000 },
@@ -145,6 +147,7 @@ describe("toSettings", () => {
       verifyThinking: INHERIT,
       thinkingSupport: INHERIT,
       toolSupport: INHERIT,
+      deepReview: INHERIT,
     }
     expect(form.choices).toEqual(inherit)
     const next = {

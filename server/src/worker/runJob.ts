@@ -241,6 +241,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
       ...saved,
       changedFiles: changeSet.files,
       cache: cacheFor(savedDisablesCache),
+      // Asked for this run only, so it outranks every saved layer and the
+      // repository file, and is never saved itself.
+      ...(job.deep ? { trigger: { review: { deep: { enabled: true } } } } : {}),
     });
   let loaded = await loadConfig();
   // The repository file asked for fresh reads after a cached one was used.

@@ -1,0 +1,8 @@
+title: Cap discounts at 100 percent
+description: applyDiscount clamps the percentage, with a test for the cap.
+language: typescript
+expected:
+  - file: src/pricing.test.ts
+    lines: [6, 7]
+    category: [testing, bug]
+    description: the test mocks applyDiscount itself and then asserts the mocked return value, so it passes whatever the clamp does and never exercises the change

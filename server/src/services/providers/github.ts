@@ -276,7 +276,7 @@ export async function handleGithubEvent(
     headSha: head.headSha,
     trigger: "comment",
     actor: payload.comment!.user?.login ?? payload.sender?.login,
-    focus: parseReviewCommand(payload.comment!.body ?? "").focus,
+    ...parseReviewCommand(payload.comment!.body ?? ""),
   });
   return { body: { outcome: "queued", reviewId: job.id } };
 }

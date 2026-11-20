@@ -2,11 +2,14 @@
 // the case's expectations. Costs money, so it is never part of `npm test`.
 //
 //   npm run eval -- --model anthropic/claude-sonnet-5-5 [--case a,b] [--out file]
-//                   [--thinking off|low|medium|high] [--context static|agentic] [--compare]
+//                   [--thinking off|low|medium|high] [--context static|agentic] [--deep] [--compare]
 //
 // --compare reviews every case twice, once with thinking off and static
 // context and once with the settings given (thinking defaults to medium), and
-// prints recall and cost side by side.
+// prints recall and cost side by side. With --deep it compares deep review
+// instead: both runs use the thinking and context given, the first without
+// the specialists and the second with them, and each specialist's hits, false
+// positives and cost are listed.
 //
 // See README "Review quality evals" for the options and how to add a case.
 import { execFileSync } from "node:child_process";
@@ -42,6 +45,7 @@ const { values: args } = parseArgs({
     thinking: { type: "string" },
     context: { type: "string" },
     compare: { type: "boolean", default: false },
+    deep: { type: "boolean", default: false },
   },
 });
 
@@ -93,6 +97,37 @@ function row(report: CaseReport): string {
   return [report.id.padEnd(32), ...cells.map((cell) => cell.padStart(7)), usd(report.costUsd).padStart(10)].join(" ");
 }
 
+// What each deep review specialist added: findings that matched an
+// expectation, false positives, and what its calls cost.
+function printLenses(run: EvalRun) {
+  const lenses = new Map<string, { hits: number; falsePositives: number; calls: number; costUsd: number | null }>();
+  const entry = (lens: string) => {
+    let found = lenses.get(lens);
+    if (!found) lenses.set(lens, (found = { hits: 0, falsePositives: 0, calls: 0, costUsd: 0 }));
+    return found;
+  };
+  for (const report of run.cases) {
+    for (const finding of report.score?.findings ?? []) {
+      if (!finding.reviewer) continue;
+      if (finding.outcome === "match") entry(finding.reviewer).hits += 1;
+      else entry(finding.reviewer).falsePositives += 1;
+    }
+    for (const [lens, spent] of Object.entries(report.byLens)) {
+      const found = entry(lens);
+      found.calls += spent.calls;
+      found.costUsd = found.costUsd === null || spent.costUsd === null ? null : found.costUsd + spent.costUsd;
+    }
+  }
+  if (lenses.size === 0) return;
+  console.log(["specialist".padEnd(16), ..."hits fp calls".split(" ").map((h) => h.padStart(7)), "cost".padStart(10)].join(" "));
+  for (const [lens, found] of [...lenses].sort(([a], [b]) => a.localeCompare(b))) {
+    console.log(
+      [lens.padEnd(16), ...[found.hits, found.falsePositives, found.calls].map((n) => String(n).padStart(7)), usd(found.costUsd).padStart(10)].join(" "),
+    );
+  }
+  console.log("");
+}
+
 function printRun(run: EvalRun) {
   console.log(["case".padEnd(32), ..."found fp traps prec recall".split(" ").map((h) => h.padStart(7)), "cost".padStart(10)].join(" "));
   for (const report of run.cases) {
@@ -130,17 +165,29 @@ async function main() {
     ...(args.price ? { price: parsePrice(args.price) } : {}),
   };
   const cases = loadCorpus(args.case?.split(",").map((id) => id.trim()).filter(Boolean));
-  const settings: { label: string; thinking?: ThinkingLevel; context?: EvalOptions["context"] }[] = args.compare
-    ? [
-        { label: "baseline", thinking: "off", context: "static" },
-        { label: "candidate", thinking: thinking ?? "medium", context: context ?? "static" },
-      ]
-    : [{ label: "run", ...(thinking ? { thinking } : {}), ...(context ? { context } : {}) }];
+  type Setting = { label: string; thinking?: ThinkingLevel; context?: EvalOptions["context"]; deep?: boolean };
+  const given = { ...(thinking ? { thinking } : {}), ...(context ? { context } : {}) };
+  const settings: Setting[] =
+    args.compare && args.deep
+      ? [
+          { label: "baseline", ...given, deep: false },
+          { label: "candidate", ...given, deep: true },
+        ]
+      : args.compare
+        ? [
+            { label: "baseline", thinking: "off", context: "static" },
+            { label: "candidate", thinking: thinking ?? "medium", context: context ?? "static" },
+          ]
+        : [{ label: "run", ...given, ...(args.deep ? { deep: true } : {}) }];
 
   const startedAt = new Date();
-  const runs: (EvalRun & { label: string; thinking?: string; context?: string })[] = [];
+  const runs: (EvalRun & Setting)[] = [];
   for (const setting of settings) {
-    const described = [setting.thinking && `thinking ${setting.thinking}`, setting.context && `${setting.context} context`]
+    const described = [
+      setting.thinking && `thinking ${setting.thinking}`,
+      setting.context && `${setting.context} context`,
+      setting.deep !== undefined && (setting.deep ? "deep review" : "no deep review"),
+    ]
       .filter(Boolean)
       .join(", ");
     console.log(`Reviewing ${cases.length} case(s) with ${model}${described ? ` (${described})` : ""}...\n`);
@@ -153,9 +200,15 @@ async function main() {
         generate: createGenerate(keys, undefined, baseUrls, { ledger }),
         generateAgentic: createGenerateAgentic(keys, undefined, baseUrls, { ledger }),
       },
-      { ...options, ...(setting.thinking ? { thinking: setting.thinking } : {}), ...(setting.context ? { context: setting.context } : {}) },
+      {
+        ...options,
+        ...(setting.thinking ? { thinking: setting.thinking } : {}),
+        ...(setting.context ? { context: setting.context } : {}),
+        ...(setting.deep !== undefined ? { deep: setting.deep } : {}),
+      },
     );
     printRun(run);
+    printLenses(run);
     runs.push({ ...setting, ...run });
   }
   if (runs.length === 2) {

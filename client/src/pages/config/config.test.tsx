@@ -42,6 +42,7 @@ const effective = {
     toolFindingsBlock: false,
     context: "static",
     agent: { maxSteps: 8, maxToolTokens: 30000, maxSearches: 5 },
+    deep: { enabled: false, specialists: ["naming", "tests"] },
   },
   // The server's quiet defaults (DEFAULT_CONFIG in server/src/review/config/schema.ts).
   output: {
@@ -105,6 +106,7 @@ const schema = {
   profiles: { balanced: {}, strict: { review: { blockOn: "major" } } },
   severities: ["critical", "major", "minor"],
   categories: ["security", "bug", "style"],
+  specialists: ["naming", "tests"],
   contextWindows: { anthropic: 200_000, openai: 200_000, google: 1_000_000, ollama: 128_000 },
   defaultContextWindow: 128_000,
   thinkingBudgets: { off: 0, low: 2_000, medium: 8_000, high: 24_000 },
@@ -449,6 +451,52 @@ describe("Configuration page", { timeout: 20_000 }, () => {
         },
       }),
     )
+  })
+
+  it("turns deep review on and picks its specialists in the global config", async () => {
+    let body: unknown
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          body = JSON.parse(String(init?.body))
+          return jsonResponse(200, globalConfig((body as { settings: Record<string, unknown> }).settings))
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Finding Types")
+    await userEvent.click(await screen.findByRole("combobox", { name: "Deep review" }))
+    await userEvent.click(screen.getByRole("option", { name: "On" }))
+    // Both default specialists start checked; leave only tests.
+    await userEvent.click(screen.getByRole("checkbox", { name: "naming" }))
+    await selectConnectionOnLlmTab()
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+
+    await waitFor(() => expect(body).toMatchObject({ settings: { review: { deep: { enabled: true, specialists: ["tests"] } } } }))
+  })
+
+  it("refuses to save deep review without a specialist", async () => {
+    let saved = false
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          saved = true
+          return jsonResponse(200, globalConfig(JSON.parse(String(init?.body)).settings))
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Finding Types")
+    await userEvent.click(await screen.findByRole("checkbox", { name: "naming" }))
+    await userEvent.click(screen.getByRole("checkbox", { name: "tests" }))
+
+    expect(await screen.findByText("Choose at least one specialist")).toBeInTheDocument()
+    const save = screen.getByRole("button", { name: "Save global config" })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(saved).toBe(false)
   })
 
   it("edits the trigger settings in the global config", async () => {
@@ -1563,12 +1611,12 @@ describe("Finding Types tab", { timeout: 20_000 }, () => {
     renderWithProviders(<App />, { route: "/configuration?tab=findings" })
 
     expect(await screen.findByText("2 of 3 on")).toBeInTheDocument()
-    await userEvent.click(screen.getByRole("button", { name: "All" }))
+    await userEvent.click(screen.getByRole("button", { name: "All categories" }))
     expect(screen.getByText("3 of 3 on")).toBeInTheDocument()
     expect(screen.getByRole("checkbox", { name: "style" })).toBeChecked()
-    expect(screen.getByRole("button", { name: "All" })).toBeDisabled()
+    expect(screen.getByRole("button", { name: "All categories" })).toBeDisabled()
 
-    await userEvent.click(screen.getByRole("button", { name: "None" }))
+    await userEvent.click(screen.getByRole("button", { name: "No categories" }))
     expect(screen.getByText("0 of 3 on")).toBeInTheDocument()
     expect(screen.getByText("Choose at least one category")).toBeInTheDocument()
   })

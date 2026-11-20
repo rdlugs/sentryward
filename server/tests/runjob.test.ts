@@ -238,6 +238,27 @@ async function claimedJob() {
 }
 
 describe("runJob", () => {
+  it("turns deep review on for a run that asked for it, above the repository file", async () => {
+    await enqueue({ repositoryId, number: 42, headSha: "oldhead", trigger: "comment", deep: true });
+    const job = (await claimNext())!;
+    const { runDeps, model } = deps(
+      { "base:.sentryward.yaml": "review:\n  deep:\n    enabled: false\n    specialists: [tests]\n" },
+      { code_review: { findings: [] }, walkthrough: WALKTHROUGH },
+    );
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("completed");
+    expect(stored.resolvedConfig).toMatchObject({
+      config: { review: { deep: { enabled: true, specialists: ["tests"] } } },
+      sources: { "review.deep.enabled": "trigger", "review.deep.specialists": "repoFile" },
+    });
+    // The general pass and the one specialist.
+    expect(model.requests.filter((request) => request.schemaName === "code_review")).toHaveLength(2);
+    expect((stored.result as ReviewResult).usage.filter((call) => call.lens === "tests")).toHaveLength(1);
+  });
+
   it("reviews the change and stores result, verdict, config and the actual head", async () => {
     const job = await claimedJob();
     const { runDeps, reads } = deps(

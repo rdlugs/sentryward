@@ -71,7 +71,22 @@ const dashboardLlmShape = {
 };
 
 export const VERIFY_MODES = ["off", "blocking", "all"] as const;
+// Deep review: extra passes over the same chunks, each looking for one kind of
+// defect only (llm/lenses.ts). Every one selected costs a model call per pass.
+export const SPECIALISTS = ["naming", "invariants", "boundaries", "contracts", "tests", "leaks", "consistency"] as const;
+export const specialistSchema = z.enum(SPECIALISTS);
+export type Specialist = z.infer<typeof specialistSchema>;
 export const CONTEXT_MODES = ["static", "agentic"] as const;
+
+const deepShape = {
+  enabled: z.boolean(),
+  // Which specialists run when enabled. A list, so it replaces across layers
+  // like any other list.
+  specialists: z
+    .array(specialistSchema)
+    .min(1)
+    .refine((list) => new Set(list).size === list.length, "List each specialist once"),
+};
 
 // Caps on one agentic pass (review.context: agentic).
 const agentShape = {
@@ -130,6 +145,7 @@ const reviewShape = {
   // until it reports, within review.agent's caps.
   context: z.enum(CONTEXT_MODES),
   agent: z.strictObject(agentShape),
+  deep: z.strictObject(deepShape),
 };
 
 export const SUMMARY_LOCATIONS = ["dynamic", "description", "comment"] as const;
@@ -367,7 +383,13 @@ export const configOverrideSchema = z
     ...topLevelShape,
     llm: z.strictObject(llmShape).partial(),
     // Nested objects are partial too, so a layer may set one cap alone.
-    review: z.strictObject({ ...reviewShape, agent: z.strictObject(agentShape).partial() }).partial(),
+    review: z
+      .strictObject({
+        ...reviewShape,
+        agent: z.strictObject(agentShape).partial(),
+        deep: z.strictObject(deepShape).partial(),
+      })
+      .partial(),
     output: z.strictObject(outputShape).partial(),
     triggers: z.strictObject(triggersShape).partial(),
   })
@@ -478,6 +500,7 @@ export const DEFAULT_CONFIG: Config = {
     toolFindingsBlock: false,
     context: "static",
     agent: { maxSteps: 8, maxToolTokens: 30_000, maxSearches: 5 },
+    deep: { enabled: false, specialists: [...SPECIALISTS] },
   },
   // The quiet setup the Display tab offers as its Standard preset: findings
   // inline and in one summary comment with a short PR summary, without the

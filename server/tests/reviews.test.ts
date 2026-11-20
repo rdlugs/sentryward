@@ -163,6 +163,23 @@ describe("POST /api/reviews by repository", () => {
     expect(blank.body.review.id).toBe(spaced.body.review.id);
   });
 
+  it("queues a deep review when asked, which a plain request then reuses", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+
+    const plain = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7 });
+    const deep = await request(app).post("/api/reviews").set("Cookie", cookie).send({ url: MR_URL, deep: true });
+    expect(deep.status).toBe(202);
+    expect(deep.body.review.id).not.toBe(plain.body.review.id);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: deep.body.review.id } })).toMatchObject({ deep: true });
+
+    const again = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, deep: false });
+    expect(again.body.review.id).toBe(deep.body.review.id);
+
+    const bad = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, deep: "yes" });
+    expect(bad.status).toBe(400);
+    expect(bad.body.errors).toHaveProperty("deep");
+  });
+
   it("validates the body", async () => {
     const long = await request(app).post("/api/reviews").set("Cookie", cookie).send({ repoId, number: 7, focus: "x".repeat(301) });
     expect(long.status).toBe(400);
@@ -724,13 +741,16 @@ describe("POST /api/reviews/:id/rerun", () => {
     const job = await completedJob();
     await prisma.reviewJob.update({
       where: { id: job.id },
-      data: { focus: "the auth logic", result: Prisma.DbNull, resultExpiredAt: new Date() },
+      data: { focus: "the auth logic", deep: true, result: Prisma.DbNull, resultExpiredAt: new Date() },
     });
     vi.stubGlobal("fetch", fetchStub([mrRoute("newsha")]).fetch);
 
     const res = await request(app).post(`/api/reviews/${job.id}/rerun`).set("Cookie", cookie);
 
-    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: res.body.review.id } })).toMatchObject({ focus: "the auth logic" });
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: res.body.review.id } })).toMatchObject({
+      focus: "the auth logic",
+      deep: true,
+    });
   });
 
   it("409s for a repository whose reviews are turned off, and queues nothing", async () => {

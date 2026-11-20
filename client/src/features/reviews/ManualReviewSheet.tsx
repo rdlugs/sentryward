@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRepos, type ForgeRepo } from "@/features/forge/api"
@@ -14,7 +15,7 @@ import { PROVIDERS } from "@/features/forge/providers"
 import { ApiError } from "@/lib/api"
 import { matchesQuery } from "@/lib/filters"
 import { timeAgo } from "@/lib/time"
-import { focusInput, MAX_FOCUS, useCreateReview, useOpenChanges } from "./api"
+import { MAX_FOCUS, runInput, useCreateReview, useOpenChanges, type RunOptions } from "./api"
 import { changeLabel } from "./links"
 import { ReviewUrlForm } from "./ReviewUrlForm"
 
@@ -47,6 +48,8 @@ function RepoPicker({ onDone }: { onDone: () => void }) {
   )
   const [repoId, setRepoId] = useState<string>()
   const [focus, setFocus] = useState("")
+  const [deep, setDeep] = useState(false)
+  const options: RunOptions = { focus, deep }
   const repo = repos.find((r) => r.id === repoId)
 
   return (
@@ -95,22 +98,32 @@ function RepoPicker({ onDone }: { onDone: () => void }) {
           />
           <FieldDescription>Looked at hardest, for this review only. Problems elsewhere are still reported.</FieldDescription>
         </Field>
+        <Field orientation="horizontal" className="mt-4">
+          <Switch id="manual-review-deep" checked={deep} onCheckedChange={setDeep} />
+          <div className="flex flex-col gap-1">
+            <FieldLabel htmlFor="manual-review-deep">Deep review</FieldLabel>
+            <FieldDescription>
+              Adds the specialist passes from the review settings, for this review only. Finds more, at several times the
+              model calls.
+            </FieldDescription>
+          </div>
+        </Field>
       </div>
       {/* Keyed so switching repositories clears the filter. */}
       {repo ? (
-        <ChangeList key={repo.id} repo={repo} focus={focus} onDone={onDone} />
+        <ChangeList key={repo.id} repo={repo} options={options} onDone={onDone} />
       ) : (
         <div className="min-h-0 flex-1" />
       )}
       {/* For a change Sentryward's list does not show, e.g. one past the newest few hundred. */}
       <div className="border-t p-4">
-        <ReviewUrlForm onQueued={onDone} focus={focus} />
+        <ReviewUrlForm onQueued={onDone} options={options} />
       </div>
     </>
   )
 }
 
-function ChangeList({ repo, focus, onDone }: { repo: ForgeRepo; focus: string; onDone: () => void }) {
+function ChangeList({ repo, options, onDone }: { repo: ForgeRepo; options: RunOptions; onDone: () => void }) {
   const { data, isPending, isError, error } = useOpenChanges(repo.id)
   const createReview = useCreateReview()
   const navigate = useNavigate()
@@ -136,7 +149,7 @@ function ChangeList({ repo, focus, onDone }: { repo: ForgeRepo; focus: string; o
   async function review(number: number) {
     setPendingNumber(number)
     try {
-      const { review } = await createReview.mutateAsync({ repoId: repo.id, number, ...focusInput(focus) })
+      const { review } = await createReview.mutateAsync({ repoId: repo.id, number, ...runInput(options) })
       onDone()
       navigate(`/reviews/${review.id}`)
     } catch (err) {

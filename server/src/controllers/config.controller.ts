@@ -10,7 +10,14 @@ import { PROFILES } from "../review/config/profiles.ts";
 import { skipReason, walkthroughEnabled, type ReviewTrigger } from "../review/config/filters.ts";
 import { repoSettingsRuleIssues } from "../review/config/load.ts";
 import { resolveConfig } from "../review/config/resolve.ts";
-import { DEFAULT_CONFIG, PROFILE_NAMES, RULE_PATTERN_ERROR, dashboardOverrideSchema, rulePatternCompiles } from "../review/config/schema.ts";
+import {
+  DEFAULT_CONFIG,
+  PROFILE_NAMES,
+  RULE_PATTERN_ERROR,
+  SPECIALISTS,
+  dashboardOverrideSchema,
+  rulePatternCompiles,
+} from "../review/config/schema.ts";
 import { previewPublication } from "../review/preview/preview.ts";
 import {
   checkRulePatternsSchema,
@@ -27,6 +34,7 @@ export function getConfigSchema(_req: Request, res: Response) {
     profiles: Object.fromEntries(PROFILE_NAMES.map((name) => [name, PROFILES[name]])),
     severities: SEVERITIES,
     categories: CATEGORIES,
+    specialists: SPECIALISTS,
     // What promptCeiling resolves an "auto" context budget from.
     contextWindows: CONTEXT_WINDOW,
     defaultContextWindow: DEFAULT_CONTEXT_WINDOW,

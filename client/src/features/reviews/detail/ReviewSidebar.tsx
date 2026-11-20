@@ -164,6 +164,9 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
     review.startedAt && review.finishedAt
       ? formatDuration(new Date(review.finishedAt).getTime() - new Date(review.startedAt).getTime())
       : null
+  // The specialists that ran, read off their calls: settings can turn deep
+  // review on without the run asking for it.
+  const specialists = [...new Set((result?.usage ?? []).flatMap((call) => (call.lens ? [call.lens] : [])))]
   return (
     <SideCard title="Change">
       <dl className="flex flex-col gap-1.5">
@@ -208,6 +211,14 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
           <Row label="Settings">
             <span title={`Folder settings for ${review.resolvedConfig.directory}`}>
               Folder <code>{review.resolvedConfig.directory}</code>
+            </span>
+          </Row>
+        )}
+        {(review.deep || specialists.length > 0) && (
+          <Row label="Depth">
+            <span title={specialists.length ? `Specialists: ${specialists.join(", ")}` : undefined}>
+              Deep review
+              {specialists.length > 0 && ` (${specialists.length} specialist${specialists.length === 1 ? "" : "s"})`}
             </span>
           </Row>
         )}

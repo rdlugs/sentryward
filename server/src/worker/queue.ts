@@ -20,6 +20,8 @@ export interface EnqueueInput {
   authorId?: string;
   // The area this run should look hardest at (see ReviewJob.focus).
   focus?: string | null;
+  // A deep review for this run only (see ReviewJob.deep).
+  deep?: boolean;
 }
 
 // Every write that queues, supersedes or cancels a change's queued jobs takes
@@ -41,7 +43,8 @@ function lockEnqueue(tx: Prisma.TransactionClient, repositoryId: string, number:
 // without one. A request with a focus the job lacks would be silently ignored
 // by returning it, so it supersedes a queued one or waits behind a running one
 // (the change's lease keeps the two from running at once): of two different
-// focuses, the last asked for wins.
+// focuses, the last asked for wins. Depth works the same way: a deep review
+// answers a plain request, a plain one does not answer a request for depth.
 export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
   const input = { ...request, focus: normalizeFocus(request.focus) };
   return prisma.$transaction(async (tx) => {
@@ -54,6 +57,7 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
         headSha: input.headSha,
         status: { in: ["queued", "running"] },
         ...(input.focus ? { focus: input.focus } : {}),
+        ...(input.deep ? { deep: true } : {}),
       },
     });
     if (existing) {

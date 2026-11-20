@@ -77,6 +77,7 @@ export interface ConfigOverride {
     toolFindingsBlock?: boolean
     context?: ContextMode
     agent?: { maxSteps?: number; maxToolTokens?: number; maxSearches?: number }
+    deep?: { enabled?: boolean; specialists?: string[] }
   }
   output?: {
     walkthrough?: boolean
@@ -171,6 +172,7 @@ export interface EffectiveConfig {
     toolFindingsBlock: boolean
     context: ContextMode
     agent: { maxSteps: number; maxToolTokens: number; maxSearches: number }
+    deep: { enabled: boolean; specialists: string[] }
   }
   output: {
     walkthrough: boolean
@@ -252,6 +254,8 @@ export interface ConfigSchema {
   profiles: Record<string, ConfigOverride>
   severities: string[]
   categories: string[]
+  // Deep review specialists, in the order they run.
+  specialists: string[]
   // What an "auto" context budget resolves from (server promptCeiling): the
   // window per provider, less max tokens and the thinking budget.
   contextWindows: Record<string, number>

@@ -94,6 +94,21 @@ describe("enqueue", () => {
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: auth.id } })).status).toBe("running");
   });
 
+  it("queues the same head again for a deep review, which then answers plain requests", async () => {
+    const deep = (value: boolean) => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "comment", deep: value });
+    const plain = await job("aaa");
+    const deepJob = await deep(true);
+
+    // A plain run would otherwise swallow the request for depth.
+    expect(deepJob.id).not.toBe(plain.id);
+    expect(deepJob.deep).toBe(true);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: plain.id } })).status).toBe("superseded");
+    expect((await deep(true)).id).toBe(deepJob.id);
+    // A deep review covers everything a plain one would.
+    expect((await deep(false)).id).toBe(deepJob.id);
+    expect((await job("aaa")).id).toBe(deepJob.id);
+  });
+
   it("supersedes a queued job when a newer head arrives", async () => {
     const old = await job("aaa");
     const latest = await job("bbb");

@@ -6,8 +6,9 @@ import { atLeast, severityRank } from "../core/severity.ts";
 import type { ModelFinding } from "../llm/schemas.ts";
 import { DEFAULT_RULE_CATEGORY, modelRuleFor, ruleFloor, ruleMinConfidence } from "../rules.ts";
 
-// A model finding plus the model of the pass that produced it.
-export type TaggedFinding = ModelFinding & { model?: string };
+// A model finding plus the model of the pass that produced it, and the deep
+// review specialist that pass ran as, if any.
+export type TaggedFinding = ModelFinding & { model?: string; reviewer?: string };
 
 // How far a reported line may be from a changed line and still be snapped to
 // it. Models are occasionally off by a line or two; further than this, the
@@ -177,14 +178,16 @@ export function validateFindings(
       continue;
     }
     // A violation of a team rule is filed and weighed as the rule says, and is
-    // reported whatever review.categories holds: the team asked for it.
+    // reported whatever review.categories holds: the team asked for it. So is
+    // what a deep review specialist reports: it was asked for by name, and the
+    // "tests" one files under testing, which the default categories leave out.
     const rule = modelRuleFor(config, candidate.ruleId, file.path);
     if (rule === null) {
       drop("rule_mismatch");
       continue;
     }
     const category = rule ? (rule.category ?? DEFAULT_RULE_CATEGORY) : candidate.category;
-    if (!rule && !categories.has(candidate.category)) {
+    if (!rule && !candidate.reviewer && !categories.has(candidate.category)) {
       drop("category");
       continue;
     }
@@ -271,6 +274,7 @@ export function validateFindings(
       // finding as one the model filed there on its own.
       fingerprint: fingerprint({ file: file.path, category, kind, title }),
       ...(candidate.model ? { model: candidate.model } : {}),
+      ...(candidate.reviewer ? { reviewer: candidate.reviewer } : {}),
       bucket: bucketFor({ file: file.path, startLine: start, kind }, changeSet),
     };
 

@@ -20,6 +20,8 @@ export interface EvalOptions {
   // What is being compared; absent keeps the case's own (or the default) setting.
   thinking?: ThinkingLevel;
   context?: (typeof CONTEXT_MODES)[number];
+  // Deep review (review.deep) on or off for every case.
+  deep?: boolean;
 }
 
 // The model calls a run makes: agentic passes need their own.
@@ -52,6 +54,8 @@ export interface CaseReport {
     byPurpose: Partial<Record<LlmUsage["purpose"], { calls: number; inputTokens: number; outputTokens: number }>>;
   };
   costUsd: number | null;
+  // Deep review specialists' calls and their cost, by specialist.
+  byLens: Record<string, { calls: number; costUsd: number | null }>;
 }
 
 export interface EvalRun {
@@ -62,7 +66,11 @@ export interface EvalRun {
 // The config a case is reviewed with: production defaults, the case's own
 // override, then the model under test with no fallbacks, so a run measures one
 // model only.
-export function caseConfig(evalCase: EvalCase, model: string, settings: Pick<EvalOptions, "thinking" | "context"> = {}): Config {
+export function caseConfig(
+  evalCase: EvalCase,
+  model: string,
+  settings: Pick<EvalOptions, "thinking" | "context" | "deep"> = {},
+): Config {
   return resolveConfig({
     trigger: {
       ...evalCase.config,
@@ -72,7 +80,11 @@ export function caseConfig(evalCase: EvalCase, model: string, settings: Pick<Eva
         fallbackModels: [],
         ...(settings.thinking ? { thinking: settings.thinking } : {}),
       },
-      review: { ...evalCase.config.review, ...(settings.context ? { context: settings.context } : {}) },
+      review: {
+        ...evalCase.config.review,
+        ...(settings.context ? { context: settings.context } : {}),
+        ...(settings.deep !== undefined ? { deep: { ...evalCase.config.review?.deep, enabled: settings.deep } } : {}),
+      },
     },
   }).config;
 }
@@ -100,6 +112,12 @@ function summarizeUsage(usage: LlmUsage[]): CaseReport["usage"] {
   };
 }
 
+function byLens(usage: LlmUsage[], price: Price | undefined): CaseReport["byLens"] {
+  const groups = new Map<string, LlmUsage[]>();
+  for (const call of usage) if (call.lens) groups.set(call.lens, [...(groups.get(call.lens) ?? []), call]);
+  return Object.fromEntries([...groups].map(([lens, calls]) => [lens, { calls: calls.length, costUsd: costOf(calls, price) }]));
+}
+
 export async function evaluateCase(evalCase: EvalCase, models: EvalModels, options: EvalOptions): Promise<CaseReport> {
   const base = { id: evalCase.id, title: evalCase.title, language: evalCase.language, expected: evalCase.expected };
   try {
@@ -123,6 +141,7 @@ export async function evaluateCase(evalCase: EvalCase, models: EvalModels, optio
         noopSuggestions: result.validation.noopSuggestions ?? 0,
         usage,
         costUsd: null,
+        byLens: byLens(result.usage, options.price),
       };
     }
     const costUsd = costOf(result.usage, options.price);
@@ -134,6 +153,7 @@ export async function evaluateCase(evalCase: EvalCase, models: EvalModels, optio
       noopSuggestions: result.validation.noopSuggestions ?? 0,
       usage,
       costUsd,
+      byLens: byLens(result.usage, options.price),
     };
   } catch (err) {
     // The throw may have come after billable calls, whose usage is lost with
@@ -146,6 +166,7 @@ export async function evaluateCase(evalCase: EvalCase, models: EvalModels, optio
       noopSuggestions: 0,
       usage: summarizeUsage([]),
       costUsd: null,
+      byLens: {},
     };
   }
 }

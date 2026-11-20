@@ -57,6 +57,7 @@ export const CHOICES = [
   { name: "verifyThinking", section: "llm" },
   { name: "thinkingSupport", key: "thinking", section: "llm.capabilities" },
   { name: "toolSupport", key: "tools", section: "llm.capabilities", boolean: true },
+  { name: "deepReview", key: "enabled", section: "review.deep", boolean: true },
 ] as const satisfies readonly { name: string; key?: string; section: string; boolean?: boolean }[]
 
 export type ChoiceName = (typeof CHOICES)[number]["name"]
@@ -185,6 +186,8 @@ export interface FormState {
   blockOn: string
   // undefined inherits.
   categories: string[] | undefined
+  // review.deep.specialists; undefined inherits.
+  specialists: string[] | undefined
   // "" inherits.
   numbers: Record<NumberName, string>
   // One glob per line; empty inherits. Not split on commas: globs use them in braces.
@@ -214,6 +217,7 @@ export type FormErrors = Partial<
     | "verifyModel"
     | "connection"
     | "categories"
+    | "specialists"
     | "ignorePaths"
     | "instructions"
     | "summaryInstructions"
@@ -322,6 +326,7 @@ export function toForm(settings: ConfigOverride): FormState {
     severityFloor: settings.review?.severityFloor ?? INHERIT,
     blockOn: settings.review?.blockOn ?? INHERIT,
     categories: settings.review?.categories,
+    specialists: settings.review?.deep?.specialists,
     numbers,
     choices,
     lists,
@@ -374,6 +379,7 @@ export function toSettings(base: ConfigOverride, form: FormState): ConfigOverrid
       ["blockOn", pick(form.blockOn)],
       ["categories", form.categories],
     ],
+    "review.deep": [["specialists", form.specialists]],
     output: [["highLevelSummaryInstructions", form.summaryInstructions.trim() || undefined]],
     triggers: [
       // Replaced by `review`, which the form reads them into.
@@ -511,6 +517,7 @@ export function validateForm(
   }
 
   if (form.categories?.length === 0) errors.categories = "Choose at least one category"
+  if (form.specialists?.length === 0) errors.specialists = "Choose at least one specialist"
   if (pathList(form.ignorePaths).length > MAX_IGNORE_PATHS) errors.ignorePaths = `At most ${MAX_IGNORE_PATHS} paths`
   if (form.instructions.trim().length > MAX_INSTRUCTIONS) errors.instructions = `At most ${MAX_INSTRUCTIONS} characters`
   if (form.summaryInstructions.trim().length > MAX_SUMMARY_INSTRUCTIONS)
@@ -547,7 +554,12 @@ export function baseConfig(schema: ConfigSchema, profile: string = schema.defaul
     ...defaults,
     profile,
     llm: { ...defaults.llm, ...preset.llm, capabilities: { ...defaults.llm.capabilities, ...preset.llm?.capabilities } },
-    review: { ...defaults.review, ...preset.review, agent: { ...defaults.review.agent, ...preset.review?.agent } },
+    review: {
+      ...defaults.review,
+      ...preset.review,
+      agent: { ...defaults.review.agent, ...preset.review?.agent },
+      deep: { ...defaults.review.deep, ...preset.review?.deep },
+    },
     output: { ...defaults.output, ...preset.output },
     triggers: { ...defaults.triggers, ...preset.triggers },
   }

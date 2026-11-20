@@ -187,6 +187,10 @@ export const findingSchema = z.object({
   source: z.enum(["llm", "tool", "rule"]),
   tool: z.string().optional(),
   ruleId: z.string().optional(),
+  // The extra pass that raised it: a deep review specialist (llm/lenses.ts).
+  // Absent for the general pass, and not part of the fingerprint, so a problem
+  // found by a specialist one run and the general pass the next is one finding.
+  reviewer: z.string().optional(),
   // What the model said the finding rests on; checked before publishing and
   // never part of the fingerprint. Absent when it named none.
   claim: claimSchema.optional(),
@@ -246,6 +250,8 @@ export const llmUsageSchema = z.object({
   reasoningTokens: z.number().int().min(0).optional(),
   latencyMs: z.number().int().min(0),
   chunk: z.number().int().positive().optional(),
+  // The deep review specialist a review call ran as; absent for the general pass.
+  lens: z.string().optional(),
   // An agentic pass (review.context: agentic): its model calls, and its tool
   // calls by tool name. The token counts above sum every step.
   steps: z.number().int().positive().optional(),

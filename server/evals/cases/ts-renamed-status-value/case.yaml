@@ -1,0 +1,8 @@
+title: Add refunded orders
+description: Orders can be refunded; the spelling of cancelled is fixed while we are here.
+language: typescript
+expected:
+  - file: server/orders.ts
+    lines: [1, 1]
+    category: [bug, logic]
+    description: the server now sends "cancelled" while client/orderBadge.ts, changed in the same PR, still compares against "canceled", so cancelled orders show as Open

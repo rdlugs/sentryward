@@ -63,6 +63,8 @@ export interface Finding {
   // The `.sentryward.yaml` rule a rule finding violates, or an analyzer's rule
   // on a tool finding.
   ruleId?: string
+  // The deep review specialist that raised it; absent for the general pass.
+  reviewer?: string
   fingerprint: string
   // The model of the review pass that raised it; absent for tool and rule
   // findings and older results.
@@ -197,6 +199,8 @@ export interface ReviewResult {
     outputTokens: number
     reasoningTokens?: number
     latencyMs: number
+    // The deep review specialist a review call ran as.
+    lens?: string
     // Agentic passes: model calls, and tool calls by name.
     steps?: number
     toolCalls?: Record<string, number>
@@ -269,6 +273,9 @@ export interface ReviewDetail extends ReviewListItem {
   baseSha: string | null
   // What the requester asked this run to look hardest at; their own text.
   focus: string | null
+  // Whether this run was asked for a deep review (the comment command or the
+  // manual review sheet); settings may turn it on without it.
+  deep: boolean
   attempts: number
   result: ReviewResult | null
   publication: Publication | null
