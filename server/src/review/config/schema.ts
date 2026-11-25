@@ -1,5 +1,6 @@
 import RE2 from "re2";
 import { z } from "zod";
+import { RISK_KINDS } from "../core/models.ts";
 import { categorySchema, severitySchema } from "../core/severity.ts";
 
 export const PROFILE_NAMES = ["balanced", "fast", "strict", "security"] as const;
@@ -79,7 +80,16 @@ export type Specialist = z.infer<typeof specialistSchema>;
 export const CONTEXT_MODES = ["static", "agentic"] as const;
 
 const deepShape = {
-  enabled: z.boolean(),
+  // "auto" runs the specialists only on a change whose reviewed files touch
+  // one of the autoOn risk kinds (context/risk.ts), so a docs tweak does not
+  // pay for seven extra passes. A run asked for a deep review still forces true.
+  enabled: z.union([z.boolean(), z.literal("auto")]),
+  // Which risk kinds switch an auto deep review on. A list, so it replaces
+  // across layers; ignored unless enabled is "auto".
+  autoOn: z
+    .array(z.enum(RISK_KINDS))
+    .min(1)
+    .refine((list) => new Set(list).size === list.length, "List each risk kind once"),
   // Which specialists run when enabled. A list, so it replaces across layers
   // like any other list.
   specialists: z
@@ -569,7 +579,7 @@ export const DEFAULT_CONFIG: Config = {
     toolFindingsBlock: false,
     context: "static",
     agent: { maxSteps: 8, maxToolTokens: 30_000, maxSearches: 5 },
-    deep: { enabled: false, specialists: [...SPECIALISTS] },
+    deep: { enabled: false, autoOn: [...RISK_KINDS], specialists: [...SPECIALISTS] },
   },
   // The quiet setup the Display tab offers as its Standard preset: findings
   // inline and in one summary comment with a short PR summary, without the

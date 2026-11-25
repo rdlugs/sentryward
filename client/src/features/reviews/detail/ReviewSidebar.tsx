@@ -156,6 +156,14 @@ function BranchRow({ label, branch }: { label: string; branch: string }) {
   )
 }
 
+// The Depth row's tooltip: which specialists ran and, for an auto deep
+// review, what switched it on.
+function depthTitle(specialists: string[], deepAuto: ReviewResult["deepAuto"]) {
+  const lines = specialists.length ? [`Specialists: ${specialists.join(", ")}`] : []
+  if (deepAuto?.ran) lines.push(`Auto, for: ${deepAuto.matched.map((area) => `${area.path} ${area.reason}`).join("; ")}`)
+  return lines.length ? lines.join("\n") : undefined
+}
+
 function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewResult | null }) {
   const change = result?.change
   const forge = PROVIDERS[review.repository.provider].label
@@ -226,9 +234,19 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
         )}
         {(review.deep || specialists.length > 0) && (
           <Row label="Depth">
-            <span title={specialists.length ? `Specialists: ${specialists.join(", ")}` : undefined}>
+            <span title={depthTitle(specialists, result?.deepAuto)}>
               Deep review
+              {result?.deepAuto?.ran && !review.deep && " (auto)"}
               {specialists.length > 0 && ` (${specialists.length} specialist${specialists.length === 1 ? "" : "s"})`}
+            </span>
+          </Row>
+        )}
+        {/* Auto mode decided against it: say so, or a reader wonders why a
+            repository set to deep review got a plain one. */}
+        {!review.deep && specialists.length === 0 && result?.deepAuto && (
+          <Row label="Depth">
+            <span title="Deep review is on auto and runs only on changes touching the kinds of code chosen in the settings">
+              Standard (auto: no risky changes)
             </span>
           </Row>
         )}

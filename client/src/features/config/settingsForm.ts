@@ -225,6 +225,8 @@ export interface FormState {
   categories: string[] | undefined
   // review.deep.specialists; undefined inherits.
   specialists: string[] | undefined
+  // review.deep.autoOn, the risk kinds an auto deep review runs for; undefined inherits.
+  autoOn: string[] | undefined
   // "" inherits.
   numbers: Record<NumberName, string>
   // One glob per line; empty inherits. Not split on commas: globs use them in braces.
@@ -257,6 +259,7 @@ export type FormErrors = Partial<
     | "connection"
     | "categories"
     | "specialists"
+    | "autoOn"
     | "ignorePaths"
     | "instructions"
     | "summaryInstructions"
@@ -448,6 +451,7 @@ export function toForm(settings: ConfigOverride): FormState {
     blockOn: settings.review?.blockOn ?? INHERIT,
     categories: settings.review?.categories,
     specialists: settings.review?.deep?.specialists,
+    autoOn: settings.review?.deep?.autoOn,
     numbers,
     choices,
     lists,
@@ -503,7 +507,10 @@ export function toSettings(base: ConfigOverride, form: FormState): ConfigOverrid
       ["blockOn", pick(form.blockOn)],
       ["categories", form.categories],
     ],
-    "review.deep": [["specialists", form.specialists]],
+    "review.deep": [
+      ["specialists", form.specialists],
+      ["autoOn", form.autoOn],
+    ],
     output: [["highLevelSummaryInstructions", form.summaryInstructions.trim() || undefined]],
     triggers: [
       // Replaced by `review`, which the form reads them into.
@@ -644,6 +651,7 @@ export function validateForm(
 
   if (form.categories?.length === 0) errors.categories = "Choose at least one category"
   if (form.specialists?.length === 0) errors.specialists = "Choose at least one specialist"
+  if (form.autoOn?.length === 0) errors.autoOn = "Choose at least one kind of change"
   if (pathList(form.ignorePaths).length > MAX_IGNORE_PATHS) errors.ignorePaths = `At most ${MAX_IGNORE_PATHS} paths`
   if (form.instructions.trim().length > MAX_INSTRUCTIONS) errors.instructions = `At most ${MAX_INSTRUCTIONS} characters`
   if (form.summaryInstructions.trim().length > MAX_SUMMARY_INSTRUCTIONS)

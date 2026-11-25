@@ -774,6 +774,33 @@ describe("Review detail page", () => {
     expect(await screen.findByText("Deep: tests")).toBeInTheDocument()
   })
 
+  it("says when an auto deep review ran, and when it decided against it", async () => {
+    const ran = {
+      ...detail.result!,
+      deepAuto: { ran: true, matched: [{ kind: "api" as const, path: "src/routes.ts", reason: "changes an API route" }] },
+      usage: [...detail.result!.usage, { purpose: "review", model: "m", inputTokens: 1, outputTokens: 1, latencyMs: 1, lens: "tests" }],
+    }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: ran } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    const { unmount } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    let sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    let depth = within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")!
+    expect(depth).toHaveTextContent("Deep review (auto) (1 specialist)")
+    expect(within(depth).getByTitle(/src\/routes\.ts changes an API route/)).toBeInTheDocument()
+    unmount()
+
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, deepAuto: { ran: false, matched: [] } } } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    depth = within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")!
+    expect(depth).toHaveTextContent("Standard (auto: no risky changes)")
+  })
+
   it("names a trial's custom reviewer apart from the specialists, and marks the run as a trial", async () => {
     const result = {
       ...detail.result!,

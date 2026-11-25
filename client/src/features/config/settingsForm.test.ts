@@ -53,7 +53,7 @@ const schema: ConfigSchema = {
       toolFindingsBlock: false,
       context: "static",
       agent: { maxSteps: 8, maxToolTokens: 30000, maxSearches: 5 },
-      deep: { enabled: false, specialists: ["naming", "tests"] },
+      deep: { enabled: false, autoOn: ["auth", "database", "api"], specialists: ["naming", "tests"] },
     },
     output: {
       walkthrough: true,
@@ -106,6 +106,7 @@ const schema: ConfigSchema = {
   severities: ["critical", "major", "minor"],
   categories: ["security", "bug", "style"],
   specialists: ["naming", "tests"],
+  riskKinds: ["auth", "database", "api"],
   contextWindows: { anthropic: 200_000 },
   defaultContextWindow: 128_000,
   thinkingBudgets: { off: 0, low: 2_000, medium: 8_000, high: 24_000 },
@@ -145,6 +146,15 @@ describe("toSettings", () => {
       instructions: "Keep it lean",
     }
     expect(toSettings(saved, toForm(saved))).toEqual(saved)
+  })
+
+  it("round-trips an auto deep review and the risk kinds it runs for", () => {
+    const saved = { review: { deep: { enabled: "auto" as const, autoOn: ["auth" as const, "api" as const] } } }
+    const form = toForm(saved)
+    expect(form.choices.deepReview).toBe("auto")
+    expect(form.autoOn).toEqual(["auth", "api"])
+    expect(toSettings(saved, form)).toEqual(saved)
+    expect(toSettings({}, { ...form, choices: { ...form.choices, deepReview: "true" } }).review?.deep?.enabled).toBe(true)
   })
 
   it("saves the trigger choices and skip lists", () => {
@@ -365,6 +375,7 @@ describe("validateForm", () => {
       verifyModel: "anthropic/claude-opus-5-5",
       fallbackModels: ["openai/a", "openai/b", "openai/c", "openai/d"],
       categories: [],
+      autoOn: [],
       numbers: { ...form.numbers, temperature: "2", maxTokens: "1.5", contextBudget: "lots" },
       languageInstructions: [
         { language: "Go", text: "a" },
@@ -382,6 +393,7 @@ describe("validateForm", () => {
       walkthroughModel: 'Use "provider/model", e.g. anthropic/claude-sonnet-5-5',
       fallbackModels: "At most 3 fallback models",
       categories: "Choose at least one category",
+      autoOn: "Choose at least one kind of change",
       temperature: "Must be between 0 and 1",
       maxTokens: "Enter a whole number",
       contextBudget: 'Enter a whole number or "auto"',

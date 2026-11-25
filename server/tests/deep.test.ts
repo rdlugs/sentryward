@@ -3,15 +3,15 @@ import { parseRepoFile } from "../src/review/config/repoFile.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import { SPECIALISTS, configOverrideSchema, type Config, type ConfigOverride } from "../src/review/config/schema.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
-import type { Finding } from "../src/review/core/models.ts";
+import type { Finding, RiskyArea } from "../src/review/core/models.ts";
 import type { AgenticRequest, AgenticResponse, GenerateAgentic } from "../src/review/llm/agentic.ts";
-import { SPECIALIST_INSTRUCTIONS, lensesFor } from "../src/review/llm/lenses.ts";
+import { SPECIALIST_INSTRUCTIONS, deepDecision, lensesFor } from "../src/review/llm/lenses.ts";
 import { reviewSystemPrompt } from "../src/review/llm/prompt.ts";
 import type { GenerateRequest } from "../src/review/llm/providers.ts";
 import { ModelCallError } from "../src/review/llm/providers.ts";
 import { runReview } from "../src/review/pipeline.ts";
 import { mergeAcrossLenses, titleOverlap } from "../src/review/validate/lensDedupe.ts";
-import { makeChangeSet } from "./helpers/changeSet.ts";
+import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { fakeModel, modelFinding } from "./helpers/model.ts";
 
 // Walkthrough off so every model call in these tests is a review pass.
@@ -52,6 +52,7 @@ describe("deep review config", () => {
   it("is off by default, with every specialist selected", () => {
     expect(config().review.deep).toEqual({
       enabled: false,
+      autoOn: ["auth", "database", "api"],
       specialists: ["naming", "invariants", "boundaries", "contracts", "tests", "leaks", "consistency"],
     });
     expect(lensesFor(config()).map((lens) => lens.id)).toEqual(["general"]);
@@ -62,7 +63,7 @@ describe("deep review config", () => {
       repoSettings: { review: { deep: { specialists: ["tests"] } } },
       trigger: { review: { deep: { enabled: true } } },
     });
-    expect(resolved.config.review.deep).toEqual({ enabled: true, specialists: ["tests"] });
+    expect(resolved.config.review.deep).toEqual({ enabled: true, autoOn: ["auth", "database", "api"], specialists: ["tests"] });
     expect(resolved.sources["review.deep.enabled"]).toBe("trigger");
     expect(resolved.sources["review.deep.specialists"]).toBe("repoSettings");
     expect(lensesFor(resolved.config).map((lens) => lens.id)).toEqual(["general", "tests"]);
@@ -74,6 +75,82 @@ describe("deep review config", () => {
     expect(configOverrideSchema.safeParse({ review: { deep: { specialists: [] } } }).success).toBe(false);
     expect(configOverrideSchema.safeParse({ review: { deep: { specialists: ["tests", "tests"] } } }).success).toBe(false);
     expect(configOverrideSchema.safeParse({ review: { deep: { specialists: ["vibes"] } } }).success).toBe(false);
+  });
+});
+
+describe("auto deep review", () => {
+  const auto = (autoOn?: RiskyArea["kind"][]) =>
+    config({ review: { deep: { enabled: "auto", ...(autoOn ? { autoOn } : {}), specialists: ["tests"] } } });
+  const route: RiskyArea = { kind: "api", path: "src/routes.ts", reason: "changes an API route" };
+  const write: RiskyArea = { kind: "database", path: "src/store.ts", reason: "changes a database write" };
+  // Changes a route, which context/risk.ts flags as an api risky area.
+  const ROUTE_PATCH = '@@ -1,2 +1,3 @@\n import { app } from "./app";\n+app.post("/users", createUser);\n export {};';
+  const routeChange = () => makeChangeSet([{ path: "src/routes.ts", changeType: "modified", patch: ROUTE_PATCH }]);
+
+  it("reads auto and auto_on from the repository file and refuses a bad list", () => {
+    const parsed = parseRepoFile(".sentryward.yaml", "review:\n  deep:\n    enabled: auto\n    auto_on: [auth]\n");
+    expect(parsed).toEqual({ override: { review: { deep: { enabled: "auto", autoOn: ["auth"] } } }, warnings: [] });
+    expect(configOverrideSchema.safeParse({ review: { deep: { autoOn: [] } } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ review: { deep: { autoOn: ["api", "api"] } } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ review: { deep: { autoOn: ["css"] } } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ review: { deep: { enabled: "sometimes" } } }).success).toBe(false);
+  });
+
+  it("is overridden by a run that asked for a deep review", () => {
+    const resolved = resolveConfig({
+      repoSettings: { review: { deep: { enabled: "auto" } } },
+      trigger: { review: { deep: { enabled: true } } },
+    });
+    expect(resolved.config.review.deep.enabled).toBe(true);
+    expect(resolved.sources["review.deep.enabled"]).toBe("trigger");
+  });
+
+  it("decides from the risky areas of the kinds it runs for", () => {
+    expect(deepDecision(deep(["tests"]), [])).toEqual({ run: true });
+    expect(deepDecision(config(), [route])).toEqual({ run: false });
+    expect(deepDecision(auto(), [route, write])).toEqual({ run: true, auto: { matched: [route, write] } });
+    expect(deepDecision(auto(["database"]), [route, write])).toEqual({ run: true, auto: { matched: [write] } });
+    expect(deepDecision(auto(["auth"]), [route, write])).toEqual({ run: false, auto: { matched: [] } });
+    expect(deepDecision(auto(), [])).toEqual({ run: false, auto: { matched: [] } });
+    // "auto" is a string, so it must never read as on.
+    expect(lensesFor(auto()).map((lens) => lens.id)).toEqual(["general"]);
+  });
+
+  it("runs the specialists on a change touching a chosen kind, and says why", async () => {
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: routeChange(), config: auto() }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined, "tests"]);
+    expect(result.deepAuto).toEqual({ ran: true, matched: [expect.objectContaining({ kind: "api", path: "src/routes.ts" })] });
+  });
+
+  it("runs only the general pass on a change touching none, or only kinds not chosen", async () => {
+    const plain = fakeModel({ code_review: { findings: [] } });
+    const quiet = await runReview({ changeSet: makeChangeSet(), config: auto() }, { generate: plain.generate });
+    expect(plain.requests.map(specialistOf)).toEqual([undefined]);
+    expect(quiet.deepAuto).toEqual({ ran: false, matched: [] });
+
+    const other = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: routeChange(), config: auto(["auth", "database"]) }, { generate: other.generate });
+    expect(other.requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+  });
+
+  it("decides an incremental review on the files it reviews again", async () => {
+    const changeSet = makeChangeSet([
+      { path: "src/routes.ts", changeType: "modified", patch: ROUTE_PATCH },
+      { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
+    ]);
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const increment = { fromSha: "a", toSha: "head", paths: new Set(["src/app.ts"]), carried: [] };
+    const result = await runReview({ changeSet, config: auto(), increment }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+  });
+
+  it("records nothing when deep review is simply on or off", async () => {
+    const { generate } = fakeModel({ code_review: { findings: [] } });
+    expect((await runReview({ changeSet: routeChange(), config: deep(["tests"]) }, { generate })).deepAuto).toBeUndefined();
+    expect((await runReview({ changeSet: routeChange(), config: config() }, { generate })).deepAuto).toBeUndefined();
   });
 });
 

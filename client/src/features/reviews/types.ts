@@ -193,6 +193,9 @@ export interface ReviewResult {
     relatedIssues?: (IssueRef & { reason: string })[]
     riskyAreas?: RiskyArea[]
   }
+  // Set when deep review was on auto: whether it ran, and the risky areas of
+  // the reviewed files that switched it on.
+  deepAuto?: { ran: boolean; matched: RiskyArea[] }
   coverage: { reviewedFiles: string[]; omissions: Omission[]; passes: number }
   validation: { dropped: Record<string, number>; demoted: number }
   usage: {

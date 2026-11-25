@@ -28,7 +28,7 @@ import { ToolsUnsupportedError, toolsUnsupportedWarning, type GenerateAgentic } 
 import { reviewChunkAgentic } from "./llm/agenticReview.ts";
 import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/providers.ts";
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
-import { lensCovers, lensesFor, type Lens } from "./llm/lenses.ts";
+import { deepDecision, lensCovers, lensesFor, type Lens } from "./llm/lenses.ts";
 import { mergeAcrossLenses } from "./validate/lensDedupe.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
 import { capFindings, capPerReviewer, compareFindings, noopKey, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
@@ -149,9 +149,18 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   if (config.review.context === "agentic" && !agentic) {
     warnings.push("Agentic context needs a code source and a tool-capable model call; passes used static context");
   }
+  // What the diff alone shows. Found by pattern, without a model, so it is
+  // ready before planning: an auto deep review needs it to pick the lenses,
+  // and the walkthrough weighs it; callers traced below are added after.
+  const diffRisks = riskyAreas(reviewable);
+  // Auto deep review decides on what this run reviews, so a push touching
+  // only docs is not reviewed deep because an earlier push touched auth.
+  // Areas reached through callers are found only after planning, which needs
+  // the lenses, so they cannot switch it on: a miss is a standard review.
+  const deep = deepDecision(config, increment ? riskyAreas(scoped) : diffRisks);
   // Every lens reviews the same planned chunks, so context is gathered once
   // and each chunk fits the longest lens prompt.
-  const lenses = lensesFor(config);
+  const lenses = lensesFor(config, deep.run);
   // An agentic pass's conversation grows by what its tools return, so that
   // much of the window is kept free of diff.
   let overhead =
@@ -171,9 +180,6 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   }
   const omissions: Omission[] = [...classified, ...plan.omissions];
 
-  // What the diff alone shows is ready now, so the walkthrough can weigh it
-  // without waiting for context; callers traced below are added after.
-  const diffRisks = riskyAreas(reviewable);
   // The walkthrough runs alongside, so it is a stage only while the review
   // is left waiting for it.
   const wantsWalkthrough = config.output.walkthrough && reviewable.length > 0;
@@ -515,6 +521,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     findings,
     ...(walkthrough ? { walkthrough } : {}),
     ...(input.focus ? { focus: input.focus } : {}),
+    ...(deep.auto ? { deepAuto: { ran: deep.run, matched: deep.auto.matched } } : {}),
     ...(increment
       ? {
           incremental: {
