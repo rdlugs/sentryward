@@ -108,15 +108,13 @@ const INCOMPLETE: ReadonlySet<OmissionReason> = new Set([
 // not counted exactly, so they get a generous fixed allowance next to the
 // measured system prompt. The last term covers the rejected section (its
 // MAX_REJECTED_CHARS at ~4 chars/token) so it cannot crowd out the diff.
-const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
+export const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
 // A multi-pass review also lists the whole change in every pass, capped at
 // MAX_MANIFEST_CHARS.
 const MANIFEST_ALLOWANCE = Math.ceil(MAX_MANIFEST_CHARS / 4);
 // The agentic instructions and the tool definitions, on top of the review's.
 const AGENTIC_ALLOWANCE = 2_000;
 
-// A tool finding the model also reported: same file and category, with
-// overlapping lines, or the very same fingerprint.
 // Each planned file with only the hunks some pass holds, in diff order: a
 // split file's hunks left out for size are not reviewed, so they do not count.
 function plannedFiles(chunks: Chunk[]): ChangedFile[] {
@@ -128,6 +126,8 @@ function plannedFiles(chunks: Chunk[]): ChangedFile[] {
   return [...files.values()];
 }
 
+// A tool finding the model also reported: same file and category, with
+// overlapping lines, or the very same fingerprint.
 function sameProblem(model: Finding, tool: Finding): boolean {
   if (model.fingerprint === tool.fingerprint) return true;
   return (
@@ -169,35 +169,46 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   // file left out for size cannot buy seven specialist passes over the docs
   // that were planned, and an incremental push touching only docs is not
   // reviewed deep because an earlier push touched auth. Planning needs the
-  // lens prompts and the lenses need that decision, so auto plans for the
-  // deep lenses (only the longest specialist instruction more) and the plan
-  // fits either outcome. Areas reached through callers are found only after
-  // planning, so they cannot switch it on: a miss is a standard review.
+  // lens prompts and the lenses need that decision, so auto first plans for
+  // the deep lenses (only the longest specialist instruction more), and a
+  // decision against plans again for the general lens alone, so overhead for
+  // passes that never run cannot cost a hunk. Areas reached through callers
+  // are found only after planning, so they cannot switch it on: a miss is a
+  // standard review.
   const auto = config.review.deep.enabled === "auto";
   const planLenses = lensesFor(config, auto || config.review.deep.enabled === true);
   // Every lens reviews the same planned chunks, so context is gathered once
   // and each chunk fits the longest lens prompt.
   // An agentic pass's conversation grows by what its tools return, so that
   // much of the window is kept free of diff.
-  let overhead =
-    Math.max(...planLenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
-    USER_PROMPT_ALLOWANCE +
-    // Only a review asked for a focus sends that section, so only it pays.
-    (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
-    (agentic ? AGENTIC_ALLOWANCE + config.review.agent.maxToolTokens : 0);
-  let plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
-  // Only a change that needs several passes gets the manifest, so only then is
-  // it paid for, and a single-pass review is planned exactly as before. Should
-  // the smaller budget ever leave one pass, the prompt simply omits the list.
-  const multiPass = plan.chunks.length > 1;
-  if (multiPass) {
-    overhead += MANIFEST_ALLOWANCE;
-    plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
-  }
+  const planFor = (forLenses: Lens[]) => {
+    let overhead =
+      Math.max(...forLenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
+      USER_PROMPT_ALLOWANCE +
+      // Only a review asked for a focus sends that section, so only it pays.
+      (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
+      (agentic ? AGENTIC_ALLOWANCE + config.review.agent.maxToolTokens : 0);
+    let plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
+    // Only a change that needs several passes gets the manifest, so only then
+    // is it paid for, and a single-pass review is planned exactly as before.
+    // Should the smaller budget ever leave one pass, the prompt simply omits
+    // the list.
+    const multiPass = plan.chunks.length > 1;
+    if (multiPass) {
+      overhead += MANIFEST_ALLOWANCE;
+      plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
+    }
+    return { overhead, plan, multiPass };
+  };
+  let { overhead, plan, multiPass } = planFor(planLenses);
   // Uncapped: the decision filters by kind, so a cap could hide the one area
   // it runs for behind others listed first.
   const deep = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
   const lenses = auto ? lensesFor(config, deep.run) : planLenses;
+  // Not decided again on the larger plan: a risky hunk that fits only without
+  // the specialists' overhead would be left out of the very passes it turned
+  // on, so it gets a standard review.
+  if (auto && !deep.run) ({ overhead, plan, multiPass } = planFor(lenses));
   const omissions: Omission[] = [...classified, ...plan.omissions];
 
   // The walkthrough runs alongside, so it is a stage only while the review

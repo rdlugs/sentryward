@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { parseRepoFile } from "../src/review/config/repoFile.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import { SPECIALISTS, configOverrideSchema, type Config, type ConfigOverride } from "../src/review/config/schema.ts";
+import { estimateTokens } from "../src/review/context/budget.ts";
+import { planChunks } from "../src/review/context/chunk.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
 import type { Finding, RiskyArea } from "../src/review/core/models.ts";
 import type { AgenticRequest, AgenticResponse, GenerateAgentic } from "../src/review/llm/agentic.ts";
@@ -9,7 +11,7 @@ import { SPECIALIST_INSTRUCTIONS, deepDecision, lensesFor } from "../src/review/
 import { reviewSystemPrompt } from "../src/review/llm/prompt.ts";
 import type { GenerateRequest } from "../src/review/llm/providers.ts";
 import { ModelCallError } from "../src/review/llm/providers.ts";
-import { runReview } from "../src/review/pipeline.ts";
+import { USER_PROMPT_ALLOWANCE, runReview } from "../src/review/pipeline.ts";
 import { mergeAcrossLenses, titleOverlap } from "../src/review/validate/lensDedupe.ts";
 import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { fakeModel, modelFinding } from "./helpers/model.ts";
@@ -207,6 +209,44 @@ describe("auto deep review", () => {
     expect(cut.requests.map(specialistOf)).toEqual([undefined]);
     expect(omitted.deepAuto).toEqual({ ran: false, matched: [] });
     expect(omitted.coverage.omissions).toContainEqual(expect.objectContaining({ path: server.path, reason: "budget" }));
+  });
+
+  it("plans a review it decided not to deepen for the general lens alone", async () => {
+    // One plain hunk, sized one token over what a pass fits beside the longest
+    // specialist prompt but within what the general prompt leaves.
+    const body = Array.from({ length: 2_000 }, (_, line) => `+const v${line} = 0;`).join("\n");
+    const file = { path: "src/app.ts", changeType: "modified" as const, patch: `@@ -0,0 +1,2000 @@\n${body}` };
+    const changeSet = makeChangeSet([file]);
+    const fits = (budget: number) => {
+      const plan = planChunks(changeSet.files, budget, 10);
+      return plan.omissions.length === 0 && plan.chunks.length === 1;
+    };
+    let low = 1;
+    let high = 60_000;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
+    }
+    const needed = low;
+
+    const base = auto();
+    const promptTokens = (runDeep: boolean) =>
+      Math.max(...lensesFor(base, runDeep).map((lens) => estimateTokens(reviewSystemPrompt(base, lens))));
+    expect(promptTokens(true)).toBeGreaterThan(promptTokens(false));
+    // diffTokenBudget: the ceiling less the overhead and its 2,000 safety tokens.
+    const contextBudget = needed - 1 + promptTokens(true) + USER_PROMPT_ALLOWANCE + 2_000;
+    const tight = { ...base, llm: { ...base.llm, contextBudget } };
+
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet, config: tight }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+    expect(result.coverage.omissions).toEqual([]);
+
+    // The same budget does leave it out of a deep review.
+    const forced = await runReview({ changeSet, config: { ...tight, review: { ...tight.review, deep: { ...tight.review.deep, enabled: true } } } }, { generate });
+    expect(forced.coverage.omissions).toContainEqual(expect.objectContaining({ path: file.path, reason: "too_large" }));
   });
 
   it("records nothing when deep review is simply on or off", async () => {
