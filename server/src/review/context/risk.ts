@@ -98,8 +98,15 @@ function reachedAreas(reach: ReachedCaller[]): RiskyArea[] {
   });
 }
 
+// Every area the diff shows, uncapped: a decision that filters by kind (auto
+// deep review) must see all of them, or ten api areas listed first would
+// hide the one auth area it runs for.
+export function diffAreas(files: ChangedFile[]): RiskyArea[] {
+  return files.flatMap(fileAreas);
+}
+
 export function riskyAreas(files: ChangedFile[], reach: ReachedCaller[] = []): RiskyArea[] {
-  return withReach(files.flatMap(fileAreas), reach);
+  return withReach(diffAreas(files), reach);
 }
 
 // One entry per kind and file, the diff's own first, as reach only adds

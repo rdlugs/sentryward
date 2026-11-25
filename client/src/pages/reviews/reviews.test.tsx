@@ -801,6 +801,24 @@ describe("Review detail page", () => {
     expect(depth).toHaveTextContent("Standard (auto: no risky changes)")
   })
 
+  it("shows an auto deep review that ran no specialist call as deep, scoped to the files reviewed again", async () => {
+    const result = {
+      ...detail.result!,
+      deepAuto: { ran: true, matched: [{ kind: "database" as const, path: "prisma/schema.prisma", reason: "changes the database schema" }] },
+      incremental: { fromSha: "a", toSha: "b", files: ["prisma/schema.prisma"], carried: 0 },
+    }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    const depth = within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")!
+    expect(depth).toHaveTextContent("Deep review (auto)")
+    expect(depth).not.toHaveTextContent("Standard")
+    expect(within(depth).getByTitle(/^Auto, for the files reviewed again: prisma\/schema\.prisma/)).toBeInTheDocument()
+  })
+
   it("names a trial's custom reviewer apart from the specialists, and marks the run as a trial", async () => {
     const result = {
       ...detail.result!,

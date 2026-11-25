@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { ConfigOverride } from "../src/review/config/schema.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
-import { floorBlastRadius, riskyAreas, withReach } from "../src/review/context/risk.ts";
+import { MAX_RISKY_AREAS, diffAreas, floorBlastRadius, riskyAreas, withReach } from "../src/review/context/risk.ts";
 import { runReview } from "../src/review/pipeline.ts";
 import { walkthroughMarkdown } from "../src/review/render/markdown.ts";
 import { makeChangeSet } from "./helpers/changeSet.ts";
@@ -39,6 +39,18 @@ describe("riskyAreas", () => {
       { kind: "database", path: "src/services/jobs.ts", reason: "changes a database write" },
       { kind: "database", path: "prisma/schema.prisma", reason: "changes the database schema" },
     ]);
+  });
+
+  it("caps the list it shows but not the diff's own areas", () => {
+    const many = makeChangeSet(
+      Array.from({ length: 12 }, (_, index) => ({
+        path: `src/routes/r${index}.ts`,
+        changeType: "modified" as const,
+        patch: '@@ -1,1 +1,2 @@\n export {};\n+app.get("/r", list);',
+      })),
+    ).files;
+    expect(riskyAreas(many)).toHaveLength(MAX_RISKY_AREAS);
+    expect(diffAreas(many)).toHaveLength(12);
   });
 
   it("adds handlers and auth modules reached only through callers", () => {

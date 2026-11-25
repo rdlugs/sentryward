@@ -3,6 +3,7 @@ import { verdictFor, blockingFindings } from "./core/verdict.ts";
 import {
   MAX_FOCUS,
   RESULT_SCHEMA_VERSION,
+  type ChangedFile,
   type ChangeSet,
   type Finding,
   type LlmUsage,
@@ -20,7 +21,7 @@ import { mapLimit } from "./core/mapLimit.ts";
 import { contextTokenBudget, estimateTokens, diffTokenBudget } from "./context/budget.ts";
 import { planChunks, type Chunk } from "./context/chunk.ts";
 import { gatherContext, type ContextSource, type ReachedCaller } from "./context/gather.ts";
-import { floorBlastRadius, riskyAreas, withReach } from "./context/risk.ts";
+import { diffAreas, floorBlastRadius, MAX_RISKY_AREAS, riskyAreas, withReach } from "./context/risk.ts";
 import { classifyFiles } from "./context/ignore.ts";
 import { MAX_MANIFEST_CHARS, MAX_REJECTED_CHARS, reviewSystemPrompt, type ManifestEntry } from "./llm/prompt.ts";
 import { reservedBudget, searchBudget } from "./agent/tools.ts";
@@ -116,6 +117,17 @@ const AGENTIC_ALLOWANCE = 2_000;
 
 // A tool finding the model also reported: same file and category, with
 // overlapping lines, or the very same fingerprint.
+// Each planned file with only the hunks some pass holds, in diff order: a
+// split file's hunks left out for size are not reviewed, so they do not count.
+function plannedFiles(chunks: Chunk[]): ChangedFile[] {
+  const files = new Map<string, ChangedFile>();
+  for (const part of chunks.flatMap((chunk) => chunk.parts)) {
+    const seen = files.get(part.file.path);
+    files.set(part.file.path, { ...part.file, hunks: [...(seen?.hunks ?? []), ...part.hunks] });
+  }
+  return [...files.values()];
+}
+
 function sameProblem(model: Finding, tool: Finding): boolean {
   if (model.fingerprint === tool.fingerprint) return true;
   return (
@@ -150,21 +162,25 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     warnings.push("Agentic context needs a code source and a tool-capable model call; passes used static context");
   }
   // What the diff alone shows. Found by pattern, without a model, so it is
-  // ready before planning: an auto deep review needs it to pick the lenses,
-  // and the walkthrough weighs it; callers traced below are added after.
+  // ready before planning; the walkthrough weighs it and callers traced
+  // below are added after.
   const diffRisks = riskyAreas(reviewable);
-  // Auto deep review decides on what this run reviews, so a push touching
-  // only docs is not reviewed deep because an earlier push touched auth.
-  // Areas reached through callers are found only after planning, which needs
-  // the lenses, so they cannot switch it on: a miss is a standard review.
-  const deep = deepDecision(config, increment ? riskyAreas(scoped) : diffRisks);
+  // An auto deep review decides on what this run's passes actually see, so a
+  // file left out for size cannot buy seven specialist passes over the docs
+  // that were planned, and an incremental push touching only docs is not
+  // reviewed deep because an earlier push touched auth. Planning needs the
+  // lens prompts and the lenses need that decision, so auto plans for the
+  // deep lenses (only the longest specialist instruction more) and the plan
+  // fits either outcome. Areas reached through callers are found only after
+  // planning, so they cannot switch it on: a miss is a standard review.
+  const auto = config.review.deep.enabled === "auto";
+  const planLenses = lensesFor(config, auto || config.review.deep.enabled === true);
   // Every lens reviews the same planned chunks, so context is gathered once
   // and each chunk fits the longest lens prompt.
-  const lenses = lensesFor(config, deep.run);
   // An agentic pass's conversation grows by what its tools return, so that
   // much of the window is kept free of diff.
   let overhead =
-    Math.max(...lenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
+    Math.max(...planLenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
     USER_PROMPT_ALLOWANCE +
     // Only a review asked for a focus sends that section, so only it pays.
     (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
@@ -178,6 +194,10 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     overhead += MANIFEST_ALLOWANCE;
     plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
   }
+  // Uncapped: the decision filters by kind, so a cap could hide the one area
+  // it runs for behind others listed first.
+  const deep = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
+  const lenses = auto ? lensesFor(config, deep.run) : planLenses;
   const omissions: Omission[] = [...classified, ...plan.omissions];
 
   // The walkthrough runs alongside, so it is a stage only while the review
@@ -521,7 +541,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     findings,
     ...(walkthrough ? { walkthrough } : {}),
     ...(input.focus ? { focus: input.focus } : {}),
-    ...(deep.auto ? { deepAuto: { ran: deep.run, matched: deep.auto.matched } } : {}),
+    ...(deep.auto ? { deepAuto: { ran: deep.run, matched: deep.auto.matched.slice(0, MAX_RISKY_AREAS) } } : {}),
     ...(increment
       ? {
           incremental: {

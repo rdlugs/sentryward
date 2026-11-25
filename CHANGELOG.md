@@ -13,7 +13,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Auto deep review. `review.deep.enabled: auto` (Deep review > Auto on the
   Finding Types tab) runs the specialist passes only when the reviewed files
   touch authorization, database writes or API routes, as found by the existing
-  risky-area detection, so low-risk changes skip the extra model calls.
+  risky-area detection, so low-risk changes skip the extra model calls. Files
+  or hunks left out of the review for size or budget do not count.
   `review.deep.auto_on` picks which of those kinds count (all three by default).
   An incremental review decides on the files it reviews again, and a run that
   asks for a deep review still gets one. The review result records the decision

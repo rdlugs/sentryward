@@ -2306,7 +2306,9 @@ export function ConfigFields(props: {
             inheritedHint={inheritedHint("review.deep.autoOn", inherited?.review.deep.autoOn)}
             effective={config && effective("review.deep.autoOn", config.review.deep.autoOn)}
             error={errors.autoOn}
-            disabled={locked("review.deep.autoOn") || autoOnOff}
+            // The schema refuses an empty list whatever deep review is set
+            // to, so a field holding that error stays usable to clear it.
+            disabled={locked("review.deep.autoOn") || (autoOnOff && !errors.autoOn)}
           />
         </Section>
         <FieldSeparator />

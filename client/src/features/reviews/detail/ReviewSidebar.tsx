@@ -157,10 +157,16 @@ function BranchRow({ label, branch }: { label: string; branch: string }) {
 }
 
 // The Depth row's tooltip: which specialists ran and, for an auto deep
-// review, what switched it on.
-function depthTitle(specialists: string[], deepAuto: ReviewResult["deepAuto"]) {
+// review, what switched it on. An incremental run decides on the files it
+// reviews again only, so the tooltip says so rather than look like the whole
+// change's risky areas.
+function depthTitle(specialists: string[], result: ReviewResult | null) {
   const lines = specialists.length ? [`Specialists: ${specialists.join(", ")}`] : []
-  if (deepAuto?.ran) lines.push(`Auto, for: ${deepAuto.matched.map((area) => `${area.path} ${area.reason}`).join("; ")}`)
+  const deepAuto = result?.deepAuto
+  if (deepAuto?.ran) {
+    const scope = result?.incremental ? "Auto, for the files reviewed again" : "Auto, for"
+    lines.push(`${scope}: ${deepAuto.matched.map((area) => `${area.path} ${area.reason}`).join("; ")}`)
+  }
   return lines.length ? lines.join("\n") : undefined
 }
 
@@ -232,9 +238,9 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             </span>
           </Row>
         )}
-        {(review.deep || specialists.length > 0) && (
+        {(review.deep || specialists.length > 0 || result?.deepAuto?.ran) && (
           <Row label="Depth">
-            <span title={depthTitle(specialists, result?.deepAuto)}>
+            <span title={depthTitle(specialists, result)}>
               Deep review
               {result?.deepAuto?.ran && !review.deep && " (auto)"}
               {specialists.length > 0 && ` (${specialists.length} specialist${specialists.length === 1 ? "" : "s"})`}
@@ -243,7 +249,7 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
         )}
         {/* Auto mode decided against it: say so, or a reader wonders why a
             repository set to deep review got a plain one. */}
-        {!review.deep && specialists.length === 0 && result?.deepAuto && (
+        {!review.deep && specialists.length === 0 && result?.deepAuto && !result.deepAuto.ran && (
           <Row label="Depth">
             <span title="Deep review is on auto and runs only on changes touching the kinds of code chosen in the settings">
               Standard (auto: no risky changes)

@@ -503,6 +503,27 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     )
   })
 
+  it("keeps the auto run kinds usable while they hold an error, even with deep review off", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Finding Types")
+    await userEvent.click(await screen.findByRole("combobox", { name: "Deep review" }))
+    await userEvent.click(screen.getByRole("option", { name: "Auto (risky changes only)" }))
+    await userEvent.click(screen.getByRole("button", { name: "No auto runs for" }))
+    await userEvent.click(screen.getByRole("combobox", { name: "Deep review" }))
+    await userEvent.click(screen.getByRole("option", { name: "Off" }))
+
+    expect(await screen.findByText("Choose at least one kind of change")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "All auto runs for" })).toBeEnabled()
+    const database = screen.getByRole("checkbox", { name: "database" })
+    expect(database).toBeEnabled()
+    await userEvent.click(database)
+    expect(screen.queryByText("Choose at least one kind of change")).not.toBeInTheDocument()
+    // Fixed, so it greys out again like any setting auto alone uses.
+    expect(screen.getByRole("checkbox", { name: "database" })).toBeDisabled()
+  })
+
   it("refuses to save deep review without a specialist", async () => {
     let saved = false
     mockApi(

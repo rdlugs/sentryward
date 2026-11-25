@@ -196,6 +196,9 @@ export interface ReviewResult {
   // Set when deep review was on auto: whether it ran, and the risky areas of
   // the reviewed files that switched it on.
   deepAuto?: { ran: boolean; matched: RiskyArea[] }
+  // Set when only the files changed since an earlier completed review were
+  // reviewed again (server worker/incremental.ts).
+  incremental?: { fromSha: string; toSha: string; files: string[]; carried: number }
   coverage: { reviewedFiles: string[]; omissions: Omission[]; passes: number }
   validation: { dropped: Record<string, number>; demoted: number }
   usage: {

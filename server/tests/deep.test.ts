@@ -147,6 +147,36 @@ describe("auto deep review", () => {
     expect(result.deepAuto).toEqual({ ran: false, matched: [] });
   });
 
+  it("decides on every risky area, not only the first ten it lists", async () => {
+    const routes = Array.from({ length: 12 }, (_, index) => ({
+      path: `src/routes/r${index}.ts`,
+      changeType: "modified" as const,
+      patch: ROUTE_PATCH,
+    }));
+    const auth = { path: "src/auth/session.ts", changeType: "modified" as const, patch: "@@ -1,1 +1,2 @@\n export {};\n+export const ttl = 60;" };
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: makeChangeSet([...routes, auth]), config: auto(["auth"]) }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined, "tests"]);
+    expect(result.deepAuto).toEqual({ ran: true, matched: [expect.objectContaining({ kind: "auth", path: "src/auth/session.ts" })] });
+
+    // What the result stores is capped like the walkthrough's list.
+    const all = await runReview({ changeSet: makeChangeSet(routes), config: auto() }, { generate });
+    expect(all.deepAuto?.ran).toBe(true);
+    expect(all.deepAuto?.matched).toHaveLength(10);
+  });
+
+  it("does not count a risky file the plan leaves out", async () => {
+    // One hunk larger than a whole pass, so the migration is never reviewed.
+    const body = Array.from({ length: 30_000 }, (_, index) => `+CREATE INDEX idx_${index} ON t (c${index});`).join("\n");
+    const migration = { path: "prisma/migrations/1/migration.sql", changeType: "added" as const, patch: `@@ -0,0 +1,30000 @@\n${body}` };
+    const docs = { path: "README.md", changeType: "modified" as const, patch: "@@ -1,1 +1,2 @@\n # Web\n+More docs." };
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: makeChangeSet([migration, docs]), config: auto() }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+    expect(result.coverage.omissions).toContainEqual(expect.objectContaining({ path: migration.path, reason: "too_large" }));
+  });
+
   it("records nothing when deep review is simply on or off", async () => {
     const { generate } = fakeModel({ code_review: { findings: [] } });
     expect((await runReview({ changeSet: routeChange(), config: deep(["tests"]) }, { generate })).deepAuto).toBeUndefined();

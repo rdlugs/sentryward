@@ -1558,7 +1558,8 @@ one kind of defect only:
 - `review.deep.enabled: auto` runs the specialists only when the reviewed files
   touch a kind of code listed in `review.deep.auto_on` (`auth`, `database`,
   `api`; all three by default): the same pattern-based risky areas the
-  walkthrough lists, found in the diff without a model call. Tests never count.
+  walkthrough lists, found in the diff without a model call. Tests never count,
+  and neither do files or hunks the review leaves out for size or budget.
   An incremental review decides on the files it reviews again, and callers
   reached only through context gathering do not switch it on. A run asked for a
   deep review still gets one. The review page's sidebar says whether auto ran it
