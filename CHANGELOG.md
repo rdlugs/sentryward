@@ -10,6 +10,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Resizable file tree on the review page. At `lg` and up, a handle between the
+  tree and the diff drags the tree column between 12rem and the smaller of 32rem
+  and 40% of the viewport; it is a focusable separator (arrow keys step 1rem,
+  Shift 4rem, Home/End jump to the bounds) and a double-click resets it to 15rem.
+  The chosen width is remembered across reviews and reloads (#301).
+
 - Global Expand all / Collapse all controls on the review Overview. Walkthrough
   sections and findings start collapsed, and the last global choice is remembered
   across reviews and reloads. Individual toggles and the findings toolbar remain
