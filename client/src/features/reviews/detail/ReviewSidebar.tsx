@@ -252,7 +252,7 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
         {!review.deep && specialists.length === 0 && result?.deepAuto && !result.deepAuto.ran && (
           <Row label="Depth">
             <span title="Deep review is on auto and runs only on changes touching the kinds of code chosen in the settings">
-              Standard (auto: no risky changes)
+              Standard (auto: no selected risky changes)
             </span>
           </Row>
         )}

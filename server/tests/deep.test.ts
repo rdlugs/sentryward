@@ -177,6 +177,38 @@ describe("auto deep review", () => {
     expect(result.coverage.omissions).toContainEqual(expect.objectContaining({ path: migration.path, reason: "too_large" }));
   });
 
+  it("counts a risky hunk of a split file only when its part is planned", async () => {
+    // Three added hunks of ~37k tokens each as rendered: no two fit one 60k
+    // pass, so the file is split into three parts. The route sits in the
+    // middle hunk, so the planned case fails unless the parts' hunks are
+    // merged (the last part alone would hide it), and one pass leaves exactly
+    // that hunk out.
+    const LINES = 5_000;
+    const hunk = (index: number, extra: string[] = []) => {
+      const lines = [...extra, ...Array.from({ length: LINES - extra.length }, (_, line) => `+const v${index}_${line} = 0;`)];
+      const start = index * LINES + 1;
+      return `@@ -${start - 1},0 +${start},${LINES} @@\n${lines.join("\n")}`;
+    };
+    const server = {
+      path: "src/server.ts",
+      changeType: "modified" as const,
+      patch: [hunk(0), hunk(1, ['+app.post("/users", createUser);']), hunk(2)].join("\n"),
+    };
+
+    const planned = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: makeChangeSet([server]), config: auto() }, { generate: planned.generate });
+    expect(planned.requests.map(specialistOf).sort()).toEqual(["tests", "tests", "tests", undefined, undefined, undefined]);
+    expect(result.deepAuto).toEqual({ ran: true, matched: [expect.objectContaining({ kind: "api", path: server.path })] });
+
+    const cut = fakeModel({ code_review: { findings: [] } });
+    const config = auto();
+    const onePass = { ...config, review: { ...config.review, maxChunks: 1 } };
+    const omitted = await runReview({ changeSet: makeChangeSet([server]), config: onePass }, { generate: cut.generate });
+    expect(cut.requests.map(specialistOf)).toEqual([undefined]);
+    expect(omitted.deepAuto).toEqual({ ran: false, matched: [] });
+    expect(omitted.coverage.omissions).toContainEqual(expect.objectContaining({ path: server.path, reason: "budget" }));
+  });
+
   it("records nothing when deep review is simply on or off", async () => {
     const { generate } = fakeModel({ code_review: { findings: [] } });
     expect((await runReview({ changeSet: routeChange(), config: deep(["tests"]) }, { generate })).deepAuto).toBeUndefined();

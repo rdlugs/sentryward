@@ -798,7 +798,7 @@ describe("Review detail page", () => {
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
     sidebar = await screen.findByRole("complementary", { name: "Review details" })
     depth = within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")!
-    expect(depth).toHaveTextContent("Standard (auto: no risky changes)")
+    expect(depth).toHaveTextContent("Standard (auto: no selected risky changes)")
   })
 
   it("shows an auto deep review that ran no specialist call as deep, scoped to the files reviewed again", async () => {
