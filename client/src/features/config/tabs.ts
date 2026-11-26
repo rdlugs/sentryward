@@ -49,6 +49,6 @@ export const TAB_ERRORS: Record<ConfigTab, (keyof FormErrors)[]> = {
   findings: ["categories", "maxFindings", "minConfidence", "impactDepth", "maxSteps", "maxToolTokens", "maxSearches"],
   files: ["ignorePaths", "maxChunks"],
   display: ["summaryInstructions", "maxInlineComments"],
-  triggers: ["ignoreTitles", "skipAuthors", "skipLabels", "skipSourceBranches", "skipTargetBranches"],
+  triggers: ["pauseAfterPushes", "pauseWindowMinutes", "ignoreTitles", "skipAuthors", "skipLabels", "skipSourceBranches", "skipTargetBranches"],
   guidance: ["instructions", "languageInstructions", "rules", "maxChars"],
 }

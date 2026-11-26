@@ -51,6 +51,7 @@ import { probeModel } from "../services/llmProbe.ts";
 import { prepareCapabilities, type Probe } from "./capabilities.ts";
 import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
+import { pushBurst } from "./burst.ts";
 import { incrementFor } from "./incremental.ts";
 import { progressRecorder, reviewSteps, type ProgressRecorder, type WriteProgress } from "./progress.ts";
 import {
@@ -286,7 +287,12 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     loaded = await loadConfig();
   }
   const config = withTrialReviewer(loaded.config, job);
-  const skip = skipReason(job, config, changeSet);
+  // Read only when it can matter, so other jobs pay no extra queries.
+  const burst =
+    job.trigger === "webhook" && job.event === "push" && config.triggers.pauseOnBurst
+      ? await pushBurst(job, config.triggers.pauseWindowMinutes)
+      : undefined;
+  const skip = skipReason(job, config, changeSet, burst);
   if (skip) {
     await complete(job.id, job.attempts, {
       status: "skipped",

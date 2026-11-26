@@ -126,6 +126,9 @@ export interface ConfigOverride {
     review?: ReviewTrigger
     reviewOnPush?: boolean
     fullReviewOnPush?: boolean
+    pauseOnBurst?: boolean
+    pauseAfterPushes?: number
+    pauseWindowMinutes?: number
     summary?: SummaryTrigger
     command?: boolean
     replies?: boolean
@@ -224,6 +227,9 @@ export interface EffectiveConfig {
     review: ReviewTrigger
     reviewOnPush: boolean
     fullReviewOnPush: boolean
+    pauseOnBurst: boolean
+    pauseAfterPushes: number
+    pauseWindowMinutes: number
     summary: SummaryTrigger
     command: boolean
     replies: boolean

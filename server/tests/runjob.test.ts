@@ -18,6 +18,8 @@ import {
   recordProgress,
 } from "../src/worker/queue.ts";
 import { runJob, skipReason, TRIAL_WARNING, walkthroughEnabled, type RunJobDeps } from "../src/worker/runJob.ts";
+import { pushBurst } from "../src/worker/burst.ts";
+import { BURST_PAUSED_REASON } from "../src/review/config/filters.ts";
 import { reviewSteps } from "../src/worker/progress.ts";
 import { DEFAULT_CONFIG } from "../src/review/config/schema.ts";
 import { fingerprint } from "../src/review/core/fingerprint.ts";
@@ -1527,6 +1529,25 @@ describe("skipReason", () => {
     expect(skipReason({ trigger: "comment" }, skipAll, change({ title: "WIP" }))).toBeNull();
   });
 
+  it("pauses pushes after a burst only when the pause is on", () => {
+    const pausing = triggers({ pauseOnBurst: true, pauseAfterPushes: 3 });
+    const quiet = { pushesInWindow: 2, pausedSinceRequest: false };
+    const burst = { pushesInWindow: 3, pausedSinceRequest: false };
+    const paused = { pushesInWindow: 1, pausedSinceRequest: true };
+    expect(skipReason(pushed, pausing, change(), quiet)).toBeNull();
+    expect(skipReason(pushed, pausing, change(), burst)).toBe(BURST_PAUSED_REASON);
+    expect(skipReason(pushed, pausing, change(), paused)).toBe(BURST_PAUSED_REASON);
+    // Off, without history, or for anything but a push, a burst changes nothing.
+    expect(skipReason(pushed, triggers({ pauseAfterPushes: 3 }), change(), burst)).toBeNull();
+    expect(skipReason(pushed, pausing, change())).toBeNull();
+    expect(skipReason(opened, pausing, change(), paused)).toBeNull();
+    expect(skipReason({ trigger: "comment" }, pausing, change(), paused)).toBeNull();
+    expect(skipReason({ trigger: "manual" }, pausing, change(), paused)).toBeNull();
+    // A more specific reason wins, so the change is not marked paused for it.
+    expect(skipReason(pushed, triggers({ pauseOnBurst: true, reviewOnPush: false }), change(), burst)).toMatch(/New commits/);
+    expect(skipReason(pushed, { ...pausing, triggers: { ...pausing.triggers, ignoreTitles: ["wip"] } }, change({ title: "WIP" }), burst)).toMatch(/title/);
+  });
+
   it("honours the command switch and never skips a manual review", () => {
     expect(skipReason({ trigger: "comment" }, triggers({ command: false }), change())).toMatch(/commands/);
     expect(skipReason({ trigger: "comment" }, DEFAULT_CONFIG, change({ isDraft: true }))).toBeNull();
@@ -1605,6 +1626,90 @@ describe("runJob with automatic triggers", () => {
     expect(pending).toBe(0);
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(stored.status).toBe("skipped");
+  });
+});
+
+describe("runJob with pauseOnBurst", () => {
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
+  let seeded = 0;
+  // History rows for change 42. Finished statuses, so claimNext never picks them.
+  async function seed(minutes: number, data: { trigger?: "webhook" | "manual" | "comment"; event?: string | null; status?: "superseded" | "completed" | "skipped"; error?: string; trial?: boolean } = {}) {
+    seeded += 1;
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 42,
+        headSha: `seed${seeded}`,
+        trigger: data.trigger ?? "webhook",
+        event: data.trigger && data.trigger !== "webhook" ? null : (data.event ?? "push"),
+        status: data.status ?? "superseded",
+        error: data.error ?? null,
+        trial: data.trial ?? false,
+        createdAt: minutesAgo(minutes),
+      },
+    });
+  }
+  const pauseSettings = (settings: Record<string, unknown> = {}) =>
+    prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { triggers: { pauseOnBurst: true, pauseAfterPushes: 3, pauseWindowMinutes: 15, ...settings } } },
+    });
+  async function runPush() {
+    await enqueue({ repositoryId, number: 42, headSha: "burst-head", trigger: "webhook", event: "push" });
+    const job = (await claimNext())!;
+    const { runDeps, model } = deps({}, {});
+    await runJob(job, runDeps);
+    return { stored: await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } }), model };
+  }
+  const at = (job: { createdAt: Date }) => ({ repositoryId, number: 42, createdAt: job.createdAt });
+
+  it("skips the push that completes a burst without calling the model", async () => {
+    await pauseSettings();
+    await seed(10);
+    await seed(5);
+
+    const { stored, model } = await runPush();
+
+    expect(stored).toMatchObject({ status: "skipped", error: BURST_PAUSED_REASON });
+    expect(model.requests).toHaveLength(0);
+  });
+
+  it("counts pushes inside the window only, and since the last request", async () => {
+    await seed(40);
+    await seed(20);
+    await seed(10);
+    expect(await pushBurst(at({ createdAt: new Date() }), 15)).toEqual({ pushesInWindow: 1, pausedSinceRequest: false });
+    expect(await pushBurst(at({ createdAt: new Date() }), 60)).toEqual({ pushesInWindow: 3, pausedSinceRequest: false });
+
+    await seed(15, { trigger: "comment", status: "completed" });
+    expect(await pushBurst(at({ createdAt: new Date() }), 60)).toEqual({ pushesInWindow: 1, pausedSinceRequest: false });
+  });
+
+  it("stays paused past the window until a review is requested", async () => {
+    await seed(120, { status: "skipped", error: BURST_PAUSED_REASON });
+    expect(await pushBurst(at({ createdAt: new Date() }), 15)).toEqual({ pushesInWindow: 0, pausedSinceRequest: true });
+
+    await seed(60, { trigger: "manual", status: "completed" });
+    expect(await pushBurst(at({ createdAt: new Date() }), 15)).toEqual({ pushesInWindow: 0, pausedSinceRequest: false });
+  });
+
+  it("ignores trials and judges a push by when it arrived", async () => {
+    await seed(120, { status: "skipped", error: BURST_PAUSED_REASON });
+    await seed(60, { trigger: "manual", status: "completed", trial: true });
+    await seed(5);
+    // Measured at 10 minutes ago: the push 5 minutes ago came later.
+    expect(await pushBurst(at({ createdAt: minutesAgo(10) }), 15)).toEqual({ pushesInWindow: 0, pausedSinceRequest: true });
+  });
+
+  it("does nothing while the setting is off", async () => {
+    await seed(10);
+    await seed(5);
+    await seed(1, { status: "skipped", error: BURST_PAUSED_REASON });
+    await pauseSettings({ pauseOnBurst: false });
+
+    const { stored } = await runPush();
+
+    expect(stored.error).not.toBe(BURST_PAUSED_REASON);
   });
 });
 

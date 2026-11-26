@@ -252,6 +252,15 @@ const FLAG_INFO: Record<FlagName, { label: string; description: ReactNode; cost?
     label: "Full review on push",
     description: "Review every file of the PR/MR on push, not only the files the new commits touched.",
   },
+  pauseOnBurst: {
+    label: "Pause after a burst of pushes",
+    description: (
+      <>
+        After this many pushes within the window, stop reviewing new commits automatically until someone comments{" "}
+        <code>/sentryward review</code> or starts a review from the dashboard.
+      </>
+    ),
+  },
   command: {
     label: "Allow review command",
     description: (
@@ -631,6 +640,8 @@ const NUMBER_INFO: Record<NumberName, { label: string; description: string }> = 
     description:
       'At most this many inline comments on the change, the most severe first, counting those earlier reviews posted. The rest are written out in the summary comment. "none" posts every one.',
   },
+  pauseAfterPushes: { label: "Pushes", description: "How many pushes within the window start a pause, the latest included." },
+  pauseWindowMinutes: { label: "Window (minutes)", description: "How far back pushes are counted." },
 }
 
 // "x (from y)" for any config value, e.g. "critical (from global config)".
@@ -1785,6 +1796,7 @@ export function ConfigFields(props: {
   const postSummaryOn = shownFlag("postSummary")
   const postInlineOn = shownFlag("postInline")
   const reviewOnPushOn = shownFlag("reviewOnPush")
+  const pauseOnBurstOn = shownFlag("pauseOnBurst")
   const toolFindingsOn = shownFlag("toolFindings")
   const highLevelSummaryOn = walkthroughOn && shownFlag("highLevelSummary")
   const inheritedSummaryInstructions = inherited?.output.highLevelSummaryInstructions
@@ -2534,7 +2546,16 @@ export function ConfigFields(props: {
           <ToggleList>
             {toggles(["reviewOnPush"], reviewManual)}
             {/* Only a push that is reviewed at all can be a full review. */}
-            <Nested>{toggles(["fullReviewOnPush"], reviewManual || !reviewOnPushOn)}</Nested>
+            <Nested>
+              {toggles(["fullReviewOnPush", "pauseOnBurst"], reviewManual || !reviewOnPushOn)}
+              {/* The limits only matter while pushes are reviewed and the pause is on. */}
+              <Nested>
+                <div className="grid gap-4 @md/field-group:grid-cols-2">
+                  {numberField("pauseAfterPushes", undefined, reviewManual || !reviewOnPushOn || !pauseOnBurstOn)}
+                  {numberField("pauseWindowMinutes", undefined, reviewManual || !reviewOnPushOn || !pauseOnBurstOn)}
+                </div>
+              </Nested>
+            </Nested>
           </ToggleList>
           <ToggleList>{toggles(["abortOnClose"])}</ToggleList>
         </Section>
@@ -2688,6 +2709,9 @@ export function ConfigFields(props: {
           review={reviewChoice}
           reviewOnPush={resolvedFlag("reviewOnPush")}
           fullReviewOnPush={resolvedFlag("fullReviewOnPush")}
+          pauseOnBurst={resolvedFlag("pauseOnBurst")}
+          pauseAfterPushes={resolvedNumber("pauseAfterPushes")}
+          pauseWindowMinutes={resolvedNumber("pauseWindowMinutes")}
           summary={resolvedChoice("summary")}
           walkthroughOff={walkthroughKnownOff}
           command={resolvedFlag("command")}

@@ -10,6 +10,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Pause on a burst of pushes. `triggers.pause_on_burst` (**Pause after a burst
+  of pushes** on the Triggers tab, off by default) stops automatic push reviews
+  of a change once it receives `pause_after_pushes` pushes (default 5) within
+  `pause_window_minutes` (default 15). The change stays paused until someone
+  comments `/sentryward review` or starts a review from the dashboard, after
+  which pushes are counted again. A paused push is recorded as skipped with
+  the reason, and the Triggers summary shows the limits.
+
 - Coding-agent instruction files as review guidance. `review.agent_files.enabled`
   (**Coding-agent instruction files** on the Guidance tab) shows every review
   pass the `CLAUDE.md` and `AGENTS.md` files from the repository root and the

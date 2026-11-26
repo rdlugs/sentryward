@@ -25,6 +25,9 @@ export interface TriggersSummaryProps {
   review?: string
   reviewOnPush?: boolean
   fullReviewOnPush?: boolean
+  pauseOnBurst?: boolean
+  pauseAfterPushes?: number
+  pauseWindowMinutes?: number
   summary?: string
   walkthroughOff: boolean
   command?: boolean
@@ -92,6 +95,11 @@ export function TriggersSummary(props: TriggersSummaryProps) {
         : props.fullReviewOnPush
           ? "Every file"
           : "New commits"
+  // The check below has no push history, so the pause is only described here.
+  const pause =
+    push === "Off" || push === UNKNOWN || !props.pauseOnBurst
+      ? null
+      : `Pauses after ${props.pauseAfterPushes ?? UNKNOWN} pushes in ${props.pauseWindowMinutes ?? UNKNOWN} min`
   const summary = props.walkthroughOff
     ? "Off, PR summary is off"
     : manual
@@ -115,6 +123,7 @@ export function TriggersSummary(props: TriggersSummaryProps) {
         <dl className="divide-y">
           <Row label="On open or ready">{reviewLabel(props.review)}</Row>
           <Row label="On push">{push}</Row>
+          {pause && <Row label="Burst of pushes">{pause}</Row>}
           <Row label="PR summary">{summary}</Row>
           <Row label="Review command">{onOff(props.command)}</Row>
           <Row label="Replies">{onOff(props.replies)}</Row>

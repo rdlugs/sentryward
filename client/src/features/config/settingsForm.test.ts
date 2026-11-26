@@ -86,6 +86,9 @@ const schema: ConfigSchema = {
       review: "published",
       reviewOnPush: true,
       fullReviewOnPush: false,
+      pauseOnBurst: false,
+      pauseAfterPushes: 5,
+      pauseWindowMinutes: 15,
       summary: "published",
       command: true,
       replies: true,
@@ -233,6 +236,21 @@ describe("toSettings", () => {
     const uncapped = { output: { maxInlineComments: null } }
     expect(toForm(uncapped).numbers.maxInlineComments).toBe("none")
     expect(toSettings({}, { ...toForm({}), numbers: { ...toForm({}).numbers, maxInlineComments: "None" } })).toEqual(uncapped)
+  })
+
+  it("round-trips the burst pause and holds back limits out of range", () => {
+    const saved = { triggers: { pauseOnBurst: true, pauseAfterPushes: 4, pauseWindowMinutes: 30 } }
+    const form = toForm(saved)
+    expect(form.flags.pauseOnBurst).toBe(true)
+    expect(form.numbers.pauseAfterPushes).toBe("4")
+    expect(toSettings(saved, form)).toEqual(saved)
+
+    const numbers = (pauseAfterPushes: string, pauseWindowMinutes: string) => ({
+      ...toForm({}),
+      numbers: { ...toForm({}).numbers, pauseAfterPushes, pauseWindowMinutes },
+    })
+    expect(validateForm(numbers("1", "")).pauseAfterPushes).toBe("Must be between 2 and 50")
+    expect(validateForm(numbers("", "1441")).pauseWindowMinutes).toBe("Must be between 1 and 1440")
   })
 
   it("holds back an inline cap out of range or not a number", () => {
