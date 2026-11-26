@@ -128,6 +128,10 @@ function deps(
     freshFiles?: FileDiffInput[];
     // What compareCommits answers; recorded as "compare:<from>..<to>".
     compare?: string[] | null | Error;
+    // The base getChange reports, and what comparing two base revisions
+    // answers (a compare whose `to` is that base).
+    base?: string;
+    baseCompare?: string[] | null | Error;
     // What getToolAnnotations answers; each call is recorded in toolReads.
     tools?: { annotations: ToolAnnotation[]; warnings: string[] } | Error;
     // What getChange throws instead of answering.
@@ -152,11 +156,15 @@ function deps(
         ...change,
         title: options.title ?? change.title,
         author: "alice",
-        forgeRef: { ...change.forgeRef, headSha: options.head ?? "newhead" },
+        forgeRef: { ...change.forgeRef, headSha: options.head ?? "newhead", ...(options.base ? { baseSha: options.base } : {}) },
       };
     },
     compareCommits: async (_p: string, from: string, to: string) => {
       reads.push(`compare:${from}..${to}`);
+      if (options.base && to === options.base) {
+        if (options.baseCompare instanceof Error) throw options.baseCompare;
+        return options.baseCompare === undefined ? [] : options.baseCompare;
+      }
       if (options.compare instanceof Error) throw options.compare;
       return options.compare === undefined ? [] : options.compare;
     },
@@ -1689,6 +1697,86 @@ describe("runJob on a push after a completed review", () => {
     expect(second.reads).toContain("base:web/AGENTS.md");
     expect(second.reads.filter((read) => read.includes("api"))).toEqual([]);
     expect(reviewPrompts(second.model)).not.toContain("API rules.");
+  });
+
+  describe("with agent instruction files on", () => {
+    async function reviewFirstWithAgentFiles(enabled = true) {
+      // Set before the first run: changed settings would force a full review.
+      await prisma.repository.update({
+        where: { id: repositoryId },
+        data: { settings: { review: { blockOn: "major", agentFiles: { enabled } } } },
+      });
+      await reviewFirst();
+    }
+
+    it("reviews everything when an instruction file changed on the base branch since then", async () => {
+      await reviewFirstWithAgentFiles();
+      const second = deps({}, both, { anthropic: "k" }, {
+        head: "h2",
+        files: FILES,
+        compare: ["src/util.ts"],
+        base: "base2",
+        baseCompare: ["README.md", "server/CLAUDE.md"],
+      });
+      const { job, stored } = await push("h2");
+
+      await runJob(job, second.runDeps);
+
+      expect(second.reads).toContain("compare:base..base2");
+      expect(second.reads).not.toContain("compare:h1..h2");
+      const result = (await stored()).result as { incremental?: unknown; warnings: string[] };
+      expect(result.incremental).toBeUndefined();
+      expect(result.warnings).toContain(
+        "Full review: agent instruction files changed on the base branch since the last review",
+      );
+    });
+
+    it("stays incremental when the base moved without touching instruction files", async () => {
+      await reviewFirstWithAgentFiles();
+      const second = deps({}, fixed, { anthropic: "k" }, {
+        head: "h2",
+        files: FILES,
+        compare: ["src/util.ts"],
+        base: "base2",
+        baseCompare: ["README.md", "src/CLAUDE.ts"],
+      });
+      const { job, stored } = await push("h2");
+
+      await runJob(job, second.runDeps);
+
+      expect(second.reads).toContain("compare:base..base2");
+      expect(((await stored()).result as { incremental?: unknown }).incremental).toBeDefined();
+    });
+
+    it("reviews everything when the last review's base is unknown", async () => {
+      await reviewFirstWithAgentFiles();
+      await prisma.reviewJob.updateMany({ where: { repositoryId, headSha: "h1" }, data: { baseSha: null } });
+      const second = deps({}, both, { anthropic: "k" }, { head: "h2", files: FILES, compare: ["src/util.ts"] });
+      const { job, stored } = await push("h2");
+
+      await runJob(job, second.runDeps);
+
+      const result = (await stored()).result as { incremental?: unknown; warnings: string[] };
+      expect(result.incremental).toBeUndefined();
+      expect(result.warnings.join("\n")).toMatch(/Full review: the last review's base revision is unknown/);
+    });
+
+    it("does not compare the bases while agent files are off", async () => {
+      await reviewFirstWithAgentFiles(false);
+      const second = deps({}, fixed, { anthropic: "k" }, {
+        head: "h2",
+        files: FILES,
+        compare: ["src/util.ts"],
+        base: "base2",
+        baseCompare: ["CLAUDE.md"],
+      });
+      const { job, stored } = await push("h2");
+
+      await runJob(job, second.runDeps);
+
+      expect(second.reads).not.toContain("compare:base..base2");
+      expect(((await stored()).result as { incremental?: unknown }).incremental).toBeDefined();
+    });
   });
 
   it("reviews everything again after a force push", async () => {

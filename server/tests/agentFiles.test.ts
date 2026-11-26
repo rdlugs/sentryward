@@ -105,7 +105,7 @@ describe("loadAgentFiles", () => {
     const deep = Array.from({ length: MAX_AGENT_DIRS + 3 }, (_, index) => `d${index}`).join("/");
     const result = await loadAgentFiles(input(adapter, ["dist/app.js", `${deep}/file.ts`], { ignorePaths: ["dist/**"] }));
     expect(result.warnings).toEqual([
-      `4 folders above changed files were not checked for agent instruction files (at most ${MAX_AGENT_DIRS} are)`,
+      `4 folders above changed files were not checked for agent instruction files (at most ${MAX_AGENT_DIRS} are): d0/d1/d2/d3, d0/d1/d2, d0/d1 and 1 more`,
     ]);
     const listed = reads.filter((read) => read.startsWith("dir:")).map((read) => read.slice("dir:base:".length));
     expect(listed).not.toContain("dist");
@@ -192,6 +192,19 @@ describe("loadAgentFiles", () => {
 
     const outside = forge({ "AGENTS.md": "../../etc/passwd" }, { symlinks: ["AGENTS.md"], provider: "gitlab" });
     expect((await loadAgentFiles(input(outside.adapter, ["app.ts"]))).files).toEqual([]);
+  });
+
+  it("follows a GitLab symlink to a target dropped on its own, and reads the target once", async () => {
+    // The rule does not apply to this change, so its own entry is dropped; the
+    // AGENTS.md link to it still stands, as it would on GitHub.
+    const rule = "---\nglobs: docs/**\n---\nrule body";
+    const { adapter, reads } = forge(
+      { "AGENTS.md": ".cursor/rules/style.mdc", ".cursor/rules/style.mdc": rule },
+      { symlinks: ["AGENTS.md"], provider: "gitlab" },
+    );
+    const result = await loadAgentFiles(input(adapter, ["src/app.ts"]));
+    expect(result.files).toEqual([{ path: "AGENTS.md", text: rule }]);
+    expect(reads.filter((read) => read === "base:.cursor/rules/style.mdc")).toHaveLength(1);
   });
 
   it("tries the files directly when a listing is truncated", async () => {
@@ -310,12 +323,57 @@ describe("loadAgentFiles", () => {
     ]);
   });
 
+  it("ignores a file renamed into an ignored path, old folder and Cursor globs included", async () => {
+    const { adapter, reads } = forge({
+      "src/payments/CLAUDE.md": "payments",
+      ".cursor/rules/payments.mdc": "---\nglobs: src/payments/**\n---\npayments rule",
+    });
+    const result = await loadAgentFiles(
+      input(adapter, [], {
+        changedFiles: [changedFile("vendor/x.ts", { changeType: "renamed", previousPath: "src/payments/x.ts" })],
+        ignorePaths: ["vendor/**"],
+      }),
+    );
+    expect(result.files).toEqual([]);
+    expect(reads).not.toContain("dir:base:src/payments");
+  });
+
+  it("keeps a folder above many changed files over deeper leaves when the cap is reached", async () => {
+    const { adapter } = forge({ "server/CLAUDE.md": "server" });
+    // Each file sits in its own leaf, two levels below server/: the leaves and
+    // their parents outnumber the cap, and server/ is above all of them.
+    const changed = Array.from({ length: MAX_AGENT_DIRS }, (_, index) => `server/m${index}/sub/file.ts`);
+    const result = await loadAgentFiles(input(adapter, changed));
+    expect(result.files).toEqual([{ path: "server/CLAUDE.md", text: "server" }]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toMatch(/not checked for agent instruction files \(at most 12 are\): .+ and \d+ more$/);
+  });
+
+  it("warns about a rule whose globs could not be read", async () => {
+    const { adapter } = forge({ ".cursor/rules/odd.mdc": "---\nglobs:\n  nested: true\n---\nbody" });
+    const result = await loadAgentFiles(input(adapter, ["src/a.ts"]));
+    expect(result.files).toEqual([]);
+    expect(result.warnings).toEqual([".cursor/rules/odd.mdc has globs that could not be read; the rule was not used"]);
+  });
+
+  it("stops reading once the review is cancelled, without calling it a failed read", async () => {
+    const { adapter, reads } = forge({ "CLAUDE.md": "root" });
+    const controller = new AbortController();
+    controller.abort();
+    const result = await loadAgentFiles(input(adapter, ["src/a.ts"], { signal: controller.signal }));
+    expect(reads).toEqual([]);
+    expect(result).toEqual({ files: [], warnings: [] });
+  });
+
   it("fits the files to maxChars, cutting the one that crosses it and warning about the rest", async () => {
     const { adapter } = forge({ "a/CLAUDE.md": "a".repeat(600), "CLAUDE.md": "r".repeat(2000), "AGENTS.md": "agents" });
     const result = await loadAgentFiles(input(adapter, ["a/x.ts"], { maxChars: 1000 }));
     expect(result.files.map((file) => file.path)).toEqual(["a/CLAUDE.md", "CLAUDE.md"]);
     expect(result.files[1]!.text).toMatch(/\n\[truncated\]$/);
-    expect(result.warnings).toEqual(["1 agent instruction file was left out to stay within review.agent_files.max_chars"]);
+    expect(result.warnings).toEqual([
+      "CLAUDE.md was cut to stay within review.agent_files.max_chars",
+      "1 agent instruction file was left out to stay within review.agent_files.max_chars",
+    ]);
   });
 });
 
@@ -337,15 +395,27 @@ describe("parseCursorRule", () => {
     expect(parseCursorRule("---\nalwaysApply: true\nglobs: a/*, b/*\n---\nbody")).toEqual({
       alwaysApply: true,
       globs: ["a/*", "b/*"],
+      unreadGlobs: false,
       body: "body",
     });
-    expect(parseCursorRule("---\n: [\n---\nbody")).toEqual({ alwaysApply: false, globs: [], body: "body" });
-    expect(parseCursorRule("plain")).toEqual({ alwaysApply: false, globs: [], body: "plain" });
+    expect(parseCursorRule("---\n: [\n---\nbody")).toEqual({ alwaysApply: false, globs: [], unreadGlobs: false, body: "body" });
+    expect(parseCursorRule("plain")).toEqual({ alwaysApply: false, globs: [], unreadGlobs: false, body: "plain" });
     expect(parseCursorRule("---\nglobs: *.ts,*.tsx\nalwaysApply: true\n---\nbody")).toEqual({
       alwaysApply: true,
       globs: ["*.ts", "*.tsx"],
+      unreadGlobs: false,
       body: "body",
     });
+  });
+
+  it("reads block and flow list globs when the frontmatter is not valid YAML", () => {
+    // `description: a: b` is invalid YAML, so the line-by-line reader runs.
+    expect(parseCursorRule("---\ndescription: a: b\nglobs:\n  - src/**\n  - '*.ts'\nalwaysApply: false\n---\nbody")).toMatchObject({
+      globs: ["src/**", "*.ts"],
+      unreadGlobs: false,
+    });
+    expect(parseCursorRule('---\ndescription: a: b\nglobs: [src/**, "*.{ts,tsx}"]\n---\nbody').globs).toEqual(["src/**", "*.{ts,tsx}"]);
+    expect(parseCursorRule("---\ndescription: a: b\nglobs:\n---\nbody")).toMatchObject({ globs: [], unreadGlobs: false });
   });
 
   it("splits globs only outside brace sets", () => {

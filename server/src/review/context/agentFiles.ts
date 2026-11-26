@@ -33,6 +33,8 @@ export interface LoadAgentFilesInput {
   ignorePaths: string[];
   maxChars: number;
   cache?: ForgeCache;
+  // The review's cancel signal: once it fires, no more forge reads are made.
+  signal?: AbortSignal;
 }
 
 // Read in every folder above a changed file, as agents do for nested files.
@@ -58,21 +60,41 @@ export const MAX_CURSOR_DIRS = 8;
 const MAX_FILE_BYTES = 64 * 1024;
 const CONCURRENCY = 4;
 
+// Whether a repository path is one the loader may read, built from the same
+// names so the two cannot drift. Used to tell whether the guidance a review
+// was given has changed since.
+export function isAgentFilePath(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return (
+    (FOLDER_FILES as readonly string[]).includes(name) ||
+    (ROOT_FILES as readonly string[]).includes(path) ||
+    path === COPILOT_FILE ||
+    (path.startsWith(`${CURSOR_RULES_DIR}/`) && path.endsWith(".mdc"))
+  );
+}
+
 function parentFolders(path: string): string[] {
   const parts = path.split("/").slice(0, -1);
   return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
-// Deepest first, then by name, so the cap keeps the most specific folders and
-// the order is stable across runs.
-function candidateFolders(reviewedPaths: string[]): { folders: string[]; dropped: number } {
-  const folders = new Set<string>();
+const depth = (folder: string) => folder.split("/").length;
+const deepestFirst = (a: string, b: string) => depth(b) - depth(a) || a.localeCompare(b);
+
+// The cap keeps the folders above the most reviewed files: a package folder
+// (`server/`) speaks for more of the change than a leaf holding one file, and
+// ranking by depth alone would drop it as soon as many leaves changed. Equal
+// coverage keeps the deeper, more specific folder, then sorts by name so the
+// same folders are kept on every run. The kept folders come back deepest
+// first, so the nearest file still leads the prompt.
+function candidateFolders(reviewedPaths: string[]): { folders: string[]; dropped: string[] } {
+  const coverage = new Map<string, number>();
   for (const path of reviewedPaths) {
-    for (const folder of parentFolders(path)) folders.add(folder);
+    for (const folder of parentFolders(path)) coverage.set(folder, (coverage.get(folder) ?? 0) + 1);
   }
-  const sorted = [...folders].sort((a, b) => b.split("/").length - a.split("/").length || a.localeCompare(b));
-  const nested = sorted.slice(0, MAX_AGENT_DIRS - 1);
-  return { folders: [...nested, ""], dropped: sorted.length - nested.length };
+  const ranked = [...coverage.keys()].sort((a, b) => coverage.get(b)! - coverage.get(a)! || deepestFirst(a, b));
+  const nested = ranked.slice(0, MAX_AGENT_DIRS - 1).sort(deepestFirst);
+  return { folders: [...nested, ""], dropped: ranked.slice(MAX_AGENT_DIRS - 1).sort(deepestFirst) };
 }
 
 const join = (folder: string, name: string) => (folder ? `${folder}/${name}` : name);
@@ -109,17 +131,42 @@ function symlinkTarget(linkPath: string, text: string): string | null {
 interface CursorRule {
   alwaysApply: boolean;
   globs: string[];
+  // The frontmatter names globs, but none could be read from it: the rule
+  // can then never apply, which the loader reports rather than hide.
+  unreadGlobs: boolean;
   body: string;
 }
 
+const unquote = (value: string) => value.replace(/^(["'])(.*)\1$/, "$2");
+
 function looseFrontmatter(text: string): Record<string, unknown> {
   const record: Record<string, unknown> = {};
-  for (const line of text.split(/\r?\n/)) {
-    const pair = /^(globs|alwaysApply):[ \t]*(.*?)[ \t]*$/.exec(line);
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const pair = /^(globs|alwaysApply):[ \t]*(.*?)[ \t]*$/.exec(lines[index]!);
     if (!pair) continue;
-    const value = pair[2]!.replace(/^(["'])(.*)\1$/, "$2");
-    if (pair[1] === "globs") record.globs = value;
-    else record.alwaysApply = value.toLowerCase() === "true";
+    const value = unquote(pair[2]!);
+    if (pair[1] === "alwaysApply") {
+      record.alwaysApply = value.toLowerCase() === "true";
+      continue;
+    }
+    // A flow list (`[a, b]`) on the same line, or a block list on the lines
+    // that follow; anything else is Cursor's comma-separated string.
+    const flow = /^\[(.*)\]$/.exec(value);
+    if (flow) {
+      record.globs = splitGlobs(flow[1]!).map((glob) => unquote(glob.trim()));
+    } else if (value) {
+      record.globs = value;
+    } else {
+      const items: string[] = [];
+      for (let next = index + 1; next < lines.length; next++) {
+        const item = /^[ \t]*-[ \t]+(.*?)[ \t]*$/.exec(lines[next]!);
+        if (!item) break;
+        items.push(unquote(item[1]!));
+        index = next;
+      }
+      record.globs = items;
+    }
   }
   return record;
 }
@@ -130,7 +177,7 @@ function looseFrontmatter(text: string): Record<string, unknown> {
 // description, which a review cannot reproduce.
 export function parseCursorRule(text: string): CursorRule {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
-  if (!match) return { alwaysApply: false, globs: [], body: text };
+  if (!match) return { alwaysApply: false, globs: [], unreadGlobs: false, body: text };
   let meta: unknown;
   try {
     meta = parse(match[1]!, { maxAliasCount: 10 });
@@ -149,7 +196,10 @@ export function parseCursorRule(text: string): CursorRule {
   // A quoted "true" is valid YAML for a string, but the line-by-line reader
   // accepts it, so both readers must agree on it.
   const alwaysApply = record.alwaysApply === true || (typeof record.alwaysApply === "string" && record.alwaysApply.toLowerCase() === "true");
-  return { alwaysApply, globs, body: text.slice(match[0].length) };
+  // An empty `globs:` is how Cursor writes "no globs", so only a value that
+  // is there but yields nothing counts as unread.
+  const hasValue = Array.isArray(rawGlobs) ? rawGlobs.length > 0 : typeof rawGlobs === "string" ? rawGlobs.trim() !== "" : rawGlobs != null;
+  return { alwaysApply, globs, unreadGlobs: hasValue && !globs.length, body: text.slice(match[0].length) };
 }
 
 // Cursor separates globs with commas, but a brace set (`*.{ts,tsx}`) has
@@ -185,8 +235,13 @@ export function renderAgentFiles(files: AgentFile[]): string {
 
 // Whole files in order until one does not fit; that one is cut to the room
 // left, and the rest are left out. The result is exactly what the prompt holds,
-// so the review can list the files it used and plan its budget exactly.
-export function fitAgentFiles(files: AgentFile[], maxChars: number): { files: AgentFile[]; left: number } {
+// so the review can list the files it used and plan its budget exactly. The
+// cut file stays listed (part of it reached the model) and is named in
+// `truncated`, so the review can say the rest did not.
+export function fitAgentFiles(
+  files: AgentFile[],
+  maxChars: number,
+): { files: AgentFile[]; left: number; truncated?: string } {
   const fitted: AgentFile[] = [];
   let used = 0;
   for (const [index, file] of files.entries()) {
@@ -198,8 +253,9 @@ export function fitAgentFiles(files: AgentFile[], maxChars: number): { files: Ag
       continue;
     }
     // A sliver of a file is noise; only cut one when a useful part fits.
-    if (room >= 200) fitted.push({ path: file.path, text: `${file.text.slice(0, room - 12)}\n[truncated]` });
-    return { files: fitted, left: files.length - index - (room >= 200 ? 1 : 0) };
+    if (room < 200) return { files: fitted, left: files.length - index };
+    fitted.push({ path: file.path, text: `${file.text.slice(0, room - 12)}\n[truncated]` });
+    return { files: fitted, left: files.length - index - 1, truncated: file.path };
   }
   return { files: fitted, left: 0 };
 }
@@ -210,34 +266,56 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
   let failed: string | null = null;
   // One failed read is reported once and leaves the rest of the files in use:
   // the review still runs on the dashboard guidance and defaults.
+  // A cancelled review stops reading: what is left is skipped, not reported
+  // as unreadable, since the review will not run anyway.
   const attempt = async <T>(fn: () => Promise<T>): Promise<T | null> => {
+    if (input.signal?.aborted) return null;
     try {
       return await fn();
     } catch (err) {
+      if (input.signal?.aborted) return null;
       failed ??= err instanceof Error ? err.message.split("\n")[0]! : "unknown error";
       return null;
     }
   };
   const listDir = (path: string) =>
     attempt(() => cached(cache, cacheKey("dir", adapter.host, project, path, ref), () => adapter.listDirAtRef(project, path, ref)));
-  const readFile = (path: string) =>
-    attempt(() => cached(cache, cacheKey("file", adapter.host, project, path, ref), () => adapter.getFileAtRef(project, path, ref)));
+  // Memoised here as well as in the forge cache: a symlink and its target are
+  // both read, and the forge cache is off when review.disableCache is set.
+  const reads = new Map<string, Promise<string | null>>();
+  const readFile = (path: string) => {
+    let read = reads.get(path);
+    if (!read) {
+      read = attempt(() =>
+        cached(cache, cacheKey("file", adapter.host, project, path, ref), () => adapter.getFileAtRef(project, path, ref)),
+      );
+      reads.set(path, read);
+    }
+    return read;
+  };
 
   // Files the review leaves out neither add folders nor match Cursor globs:
   // the same ones classifyFiles omits (ignored, deleted, binary, patch
-  // withheld, or no hunks, as in a pure rename). An edited rename keeps its old
-  // path: the file is still reviewed, and the conventions of the folder it left
-  // may still apply.
+  // withheld, or no hunks, as in a pure rename). Whether a file is ignored is
+  // decided by its new path, as classifyFiles does: a file moved into an
+  // ignored folder is not reviewed, so its old folder adds nothing. An edited
+  // rename otherwise keeps its old path: the file is still reviewed, and the
+  // conventions of the folder it left may still apply.
   const ignored = ignoreMatcher(input.ignorePaths);
   const reviewedPaths = input.changedFiles
-    .filter((file) => file.changeType !== "deleted" && !file.isBinary && !file.patchUnavailable && file.hunks.length > 0)
+    .filter(
+      (file) =>
+        file.changeType !== "deleted" && !file.isBinary && !file.patchUnavailable && file.hunks.length > 0 && !ignored(file.path),
+    )
     .flatMap((file) => [file.path, file.previousPath])
     .filter((path): path is string => !!path && !ignored(path));
 
   const { folders, dropped } = candidateFolders(reviewedPaths);
-  if (dropped > 0) {
+  if (dropped.length > 0) {
+    const named = dropped.slice(0, 3).join(", ");
+    const more = dropped.length > 3 ? ` and ${dropped.length - 3} more` : "";
     warnings.push(
-      `${dropped} ${dropped === 1 ? "folder" : "folders"} above changed files ${dropped === 1 ? "was" : "were"} not checked for agent instruction files (at most ${MAX_AGENT_DIRS} are)`,
+      `${dropped.length} ${dropped.length === 1 ? "folder" : "folders"} above changed files ${dropped.length === 1 ? "was" : "were"} not checked for agent instruction files (at most ${MAX_AGENT_DIRS} are): ${named}${more}`,
     );
   }
   const listings = await mapLimit(folders, CONCURRENCY, async (folder) => {
@@ -318,8 +396,11 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
   const toRead = [...wanted, ...cursorRules.slice(0, MAX_CURSOR_RULE_READS)];
   // A forge that reads a symlink as its target's content needs nothing more,
   // and its text must not be taken for a path even when it looks like one.
-  // GitLab reads a symlink as its target path: follow it one hop. A target
-  // already being read is left to its own entry.
+  // GitLab reads a symlink as its target path: follow it one hop, even to a
+  // target with an entry of its own. That entry may still be dropped (a rule
+  // that does not apply, a file over the size limit), and the link must then
+  // stand as it does on GitHub; when both are used, the repeated text is
+  // dropped below like any other.
   const readsTarget = FORGE_INFO[adapter.provider].symlinkReadsAs === "target";
   const readResolved = async (path: string): Promise<string | null> => {
     const text = await readFile(path);
@@ -330,7 +411,7 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
     if (known) {
       // The text is a path, never guidance: a link that cannot be followed is
       // dropped rather than shown to the model as a "convention".
-      if (!target || toRead.includes(target)) return null;
+      if (!target) return null;
       return readFile(target);
     }
     // The mode is unknown (a truncated listing): text that names a file which
@@ -338,7 +419,6 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
     // naming somewhere outside the repository could never be followed, so it
     // is more likely the file's own content (`/api/v2`) than a link.
     if (target === null || target === "") return text;
-    if (toRead.includes(target)) return null;
     return (await readFile(target)) ?? text;
   };
   const texts = await mapLimit(toRead, CONCURRENCY, async (path) => ({
@@ -366,7 +446,10 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
       const globs = rule.globs.map((glob) => (glob.includes("/") ? glob : `**/${glob}`));
       const matches = globs.length ? picomatch(globs, { dot: true }) : null;
       const applies = rule.alwaysApply || (!!matches && reviewedPaths.some((changed) => matches(changed)));
-      if (!applies) continue;
+      if (!applies) {
+        if (rule.unreadGlobs) warnings.push(`${path} has globs that could not be read; the rule was not used`);
+        continue;
+      }
       body = rule.body;
     }
     body = body.trim();
@@ -392,6 +475,9 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
 
   if (failed) warnings.push(`Some agent instruction files could not be read: ${failed}`);
   const fitted = fitAgentFiles(files, input.maxChars);
+  if (fitted.truncated) {
+    warnings.push(`${fitted.truncated} was cut to stay within review.agent_files.max_chars`);
+  }
   if (fitted.left > 0) {
     warnings.push(
       `${fitted.left} agent instruction ${fitted.left === 1 ? "file was" : "files were"} left out to stay within review.agent_files.max_chars`,

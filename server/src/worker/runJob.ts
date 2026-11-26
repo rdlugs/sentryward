@@ -533,27 +533,31 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     warnings,
   });
 
-  // From the base revision, like the repository file: a change must not be
-  // able to steer its own review. Off means no forge calls at all. An
-  // incremental review takes guidance only for the files it reviews again, so
-  // folders it leaves alone neither cost reads nor use up maxChars.
-  let agentFiles: AgentFile[] | undefined;
-  if (config.review.agentFiles.enabled) {
-    const loadedFiles = await loadAgentFiles({
-      adapter: forge,
-      project: repo.fullPath,
-      ref: changeSet.forgeRef.baseSha,
-      changedFiles: increment ? changeSet.files.filter((file) => increment.paths.has(file.path)) : changeSet.files,
-      ignorePaths: config.ignorePaths,
-      maxChars: config.review.agentFiles.maxChars,
-      cache: fileCache,
-    });
-    agentFiles = loadedFiles.files;
-    warnings.push(...loadedFiles.warnings);
-  }
-
   let result;
   try {
+    // From the base revision, like the repository file: a change must not be
+    // able to steer its own review. Off means no forge calls at all. An
+    // incremental review takes guidance only for the files it reviews again, so
+    // folders it leaves alone neither cost reads nor use up maxChars. Loaded
+    // inside the try so a failure still stops the watch and keeps what the
+    // capability probes learned; the watch's signal stops the reads if the
+    // review is cancelled meanwhile.
+    let agentFiles: AgentFile[] | undefined;
+    if (config.review.agentFiles.enabled) {
+      const loadedFiles = await loadAgentFiles({
+        adapter: forge,
+        project: repo.fullPath,
+        ref: changeSet.forgeRef.baseSha,
+        changedFiles: increment ? changeSet.files.filter((file) => increment.paths.has(file.path)) : changeSet.files,
+        ignorePaths: config.ignorePaths,
+        maxChars: config.review.agentFiles.maxChars,
+        cache: fileCache,
+        signal: watch.signal,
+      });
+      agentFiles = loadedFiles.files;
+      warnings.push(...loadedFiles.warnings);
+    }
+
     result = await runReview(
       {
         changeSet,
