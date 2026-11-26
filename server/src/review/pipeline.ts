@@ -203,12 +203,23 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   let { overhead, plan, multiPass } = planFor(planLenses);
   // Uncapped: the decision filters by kind, so a cap could hide the one area
   // it runs for behind others listed first.
-  const deep = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
+  let deep = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
   const lenses = auto ? lensesFor(config, deep.run) : planLenses;
-  // Not decided again on the larger plan: a risky hunk that fits only without
-  // the specialists' overhead would be left out of the very passes it turned
-  // on, so it gets a standard review.
-  if (auto && !deep.run) ({ overhead, plan, multiPass } = planFor(lenses));
+  if (auto && !deep.run) {
+    ({ overhead, plan, multiPass } = planFor(lenses));
+    // Decided again on the larger plan only to report it, never to turn the
+    // specialists on: a risky hunk that fits only without their overhead would
+    // be left out of the very passes it turned on, so it gets a standard
+    // review. The result still names it, rather than claim no risk was
+    // reviewed.
+    const late = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
+    if (late.auto?.matched.length) {
+      deep = { run: false, auto: late.auto };
+      warnings.push(
+        "Deep review was skipped: selected risky code fits a pass only without the specialists' longer prompts, so it had a standard review",
+      );
+    }
+  }
   const omissions: Omission[] = [...classified, ...plan.omissions];
 
   // The walkthrough runs alongside, so it is a stage only while the review

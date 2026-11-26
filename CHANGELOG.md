@@ -16,7 +16,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   risky-area detection, so low-risk changes skip the extra model calls. Files
   or hunks left out of the review for size or budget do not count, and when
   auto decides against a deep review the change is planned for the general pass
-  alone, so the specialists' longer prompts never leave a hunk out.
+  alone, so the specialists' longer prompts never leave a hunk out. Risky code
+  that fits only that general-lens plan still gets a standard review, and the
+  result, a warning and the sidebar say so instead of reporting no risk.
   `review.deep.auto_on` picks which of those kinds count (all three by default).
   An incremental review decides on the files it reviews again, and a run that
   asks for a deep review still gets one. The review result records the decision

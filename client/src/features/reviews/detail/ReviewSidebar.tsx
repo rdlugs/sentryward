@@ -251,9 +251,19 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             repository set to deep review got a plain one. */}
         {!review.deep && specialists.length === 0 && result?.deepAuto && !result.deepAuto.ran && (
           <Row label="Depth">
-            <span title="Deep review is on auto and runs only on changes touching the kinds of code chosen in the settings">
-              Standard (auto: no selected risky changes)
-            </span>
+            {result.deepAuto.matched.length > 0 ? (
+              // Auto found risky code only once the plan dropped the
+              // specialists' overhead, so that code got the general pass.
+              <span
+                title={`Selected risky code fit a pass only without the specialists' longer prompts: ${result.deepAuto.matched.map((area) => `${area.path} ${area.reason}`).join("; ")}`}
+              >
+                Standard (auto: selected risk fit only a standard pass)
+              </span>
+            ) : (
+              <span title="Deep review is on auto and runs only when the reviewed code touches the kinds of code chosen in the settings">
+                Standard (auto: no selected risk in reviewed code)
+              </span>
+            )}
           </Row>
         )}
         {customReviewers.length > 0 && (

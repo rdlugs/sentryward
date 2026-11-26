@@ -249,6 +249,39 @@ describe("auto deep review", () => {
     expect(forced.coverage.omissions).toContainEqual(expect.objectContaining({ path: file.path, reason: "too_large" }));
   });
 
+  it("reports risky code that fits only the general-lens plan, without deepening", async () => {
+    // As above, but one line of the hunk changes an API route: the deep-budget
+    // plan leaves it out and finds nothing, the general plan reviews it.
+    const lines = Array.from({ length: 2_000 }, (_, line) => `+const v${line} = 0;`);
+    lines[1_000] = '+app.post("/users", createUser);';
+    const file = { path: "src/app.ts", changeType: "modified" as const, patch: `@@ -0,0 +1,2000 @@\n${lines.join("\n")}` };
+    const changeSet = makeChangeSet([file]);
+    const fits = (budget: number) => {
+      const plan = planChunks(changeSet.files, budget, 10);
+      return plan.omissions.length === 0 && plan.chunks.length === 1;
+    };
+    let low = 1;
+    let high = 60_000;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
+    }
+
+    const base = auto();
+    const promptTokens = (runDeep: boolean) =>
+      Math.max(...lensesFor(base, runDeep).map((lens) => estimateTokens(reviewSystemPrompt(base, lens))));
+    const contextBudget = low - 1 + promptTokens(true) + USER_PROMPT_ALLOWANCE + 2_000;
+    const tight = { ...base, llm: { ...base.llm, contextBudget } };
+
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet, config: tight }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [expect.objectContaining({ kind: "api", path: file.path })] });
+    expect(result.coverage.omissions).toEqual([]);
+    expect(result.warnings).toContainEqual(expect.stringContaining("Deep review was skipped"));
+  });
+
   it("records nothing when deep review is simply on or off", async () => {
     const { generate } = fakeModel({ code_review: { findings: [] } });
     expect((await runReview({ changeSet: routeChange(), config: deep(["tests"]) }, { generate })).deepAuto).toBeUndefined();

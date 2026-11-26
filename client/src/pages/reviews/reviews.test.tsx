@@ -795,10 +795,24 @@ describe("Review detail page", () => {
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, deepAuto: { ran: false, matched: [] } } } },
       [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
     })
+    const { unmount: unmount2 } = renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+    sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    depth = within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")!
+    expect(depth).toHaveTextContent("Standard (auto: no selected risk in reviewed code)")
+    unmount2()
+
+    // Risky code that fit only the general-lens plan: still a standard
+    // review, but the sidebar names what was found.
+    const late = { ran: false, matched: [{ kind: "api" as const, path: "src/routes.ts", reason: "changes an API route" }] }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, deepAuto: late } } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
     renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
     sidebar = await screen.findByRole("complementary", { name: "Review details" })
     depth = within(sidebar).getByText("Depth", { selector: "dt" }).closest("div")!
-    expect(depth).toHaveTextContent("Standard (auto: no selected risky changes)")
+    expect(depth).toHaveTextContent("Standard (auto: selected risk fit only a standard pass)")
+    expect(within(depth).getByTitle(/src\/routes\.ts changes an API route/)).toBeInTheDocument()
   })
 
   it("shows an auto deep review that ran no specialist call as deep, scoped to the files reviewed again", async () => {
