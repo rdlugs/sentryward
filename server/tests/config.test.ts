@@ -394,6 +394,17 @@ describe("parseRepoFile", () => {
     expect(parseRepoFile(".sentryward.yaml", "# nothing yet\n")).toEqual({ override: {}, warnings: [] });
   });
 
+  it("reads the burst pause settings and rejects values out of range", () => {
+    const yaml = "triggers:\n  pause_on_burst: true\n  pause_after_pushes: 4\n  pause_window_minutes: 30\n";
+    expect(parseRepoFile(".sentryward.yaml", yaml)).toEqual({
+      override: { triggers: { pauseOnBurst: true, pauseAfterPushes: 4, pauseWindowMinutes: 30 } },
+      warnings: [],
+    });
+    expect(parseRepoFile(".sentryward.yaml", "triggers:\n  pause_after_pushes: 1\n").override).toBeUndefined();
+    expect(parseRepoFile(".sentryward.yaml", "triggers:\n  pause_window_minutes: 0\n").override).toBeUndefined();
+    expect(DEFAULT_CONFIG.triggers).toMatchObject({ pauseOnBurst: false, pauseAfterPushes: 5, pauseWindowMinutes: 15 });
+  });
+
   it("reads review.verify and rejects an unknown mode", () => {
     expect(parseRepoFile(".sentryward.yaml", "review:\n  verify: all\n")).toEqual({
       override: { review: { verify: "all" } },

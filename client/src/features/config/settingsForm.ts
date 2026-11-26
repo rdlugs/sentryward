@@ -35,6 +35,7 @@ export const FLAGS = [
   { name: "walkthroughBlastRadius", section: "output" },
   { name: "reviewOnPush", section: "triggers" },
   { name: "fullReviewOnPush", section: "triggers" },
+  { name: "pauseOnBurst", section: "triggers" },
   { name: "command", section: "triggers" },
   { name: "replies", section: "triggers" },
   { name: "abortOnClose", section: "triggers" },
@@ -92,10 +93,12 @@ export type NumberName =
   | "maxSearches"
   | "maxInlineComments"
   | "maxChars"
+  | "pauseAfterPushes"
+  | "pauseWindowMinutes"
 
 export interface NumberSpec {
   name: NumberName
-  section: "llm" | "review" | "review.agent" | "review.agentFiles" | "output"
+  section: "llm" | "review" | "review.agent" | "review.agentFiles" | "output" | "triggers"
   min: number
   max?: number
   step: number
@@ -123,6 +126,8 @@ export const NUMBERS: NumberSpec[] = [
   { name: "maxSearches", section: "review.agent", min: 0, max: 10, step: 1, integer: true },
   // null posts every inline comment.
   { name: "maxInlineComments", section: "output", min: 1, max: 100, step: 1, integer: true, nullable: "none" },
+  { name: "pauseAfterPushes", section: "triggers", min: 2, max: 50, step: 1, integer: true },
+  { name: "pauseWindowMinutes", section: "triggers", min: 1, max: 1440, step: 1, integer: true },
   { name: "maxChars", section: "review.agentFiles", min: 1000, max: 32000, step: 1000, integer: true },
 ]
 

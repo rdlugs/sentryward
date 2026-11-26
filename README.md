@@ -826,6 +826,7 @@ age and repository.
 | `triggers.review` | `manual`, `published` (default), `all` | What is reviewed automatically when it opens, reopens or leaves draft: nothing, non-drafts, or drafts too |
 | `triggers.review_on_push` | boolean | Whether new commits are reviewed again |
 | `triggers.full_review_on_push` | boolean | Review the whole change on every push instead of incrementally |
+| `triggers.pause_on_burst` | boolean (default off) | After `pause_after_pushes` pushes (default 5, 2 to 50) within `pause_window_minutes` (default 15, up to 1440), skip automatic push reviews of that change until someone comments `/sentryward review` or starts a review from the dashboard; the count then starts again |
 | `triggers.command` | boolean | Turns `/sentryward review` off when `false` |
 | `triggers.summary` | `published` (default), `manual` | Limits the PR summary in automatic reviews; `manual` leaves it to requested reviews |
 | `triggers.abort_on_close` | boolean (default on) | Cancel and stop reviews when the PR/MR is closed or merged |
@@ -1759,6 +1760,9 @@ triggers:
   review: published         # manual | published | all (drafts too)
   review_on_push: true      # review new commits pushed to an open PR/MR
   full_review_on_push: false  # on push, review every file, not only those the new commits touched
+  pause_on_burst: false     # pause push reviews after a burst, until "/sentryward review"
+  pause_after_pushes: 5     # pushes within the window that start a pause
+  pause_window_minutes: 15  # how far back pushes are counted
   summary: published        # manual | published: PR summary in automatic reviews
   command: true             # allow "/sentryward review" in a comment
   replies: true             # answer replies on Sentryward's inline comments, and "/sentryward ignore"

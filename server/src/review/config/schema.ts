@@ -238,6 +238,14 @@ const triggersShape = {
   // Review the whole change on push, instead of only the files the new commits
   // touched since the last completed review (worker/incremental.ts).
   fullReviewOnPush: z.boolean(),
+  // A burst of quick pushes (fix-ups, rebases) would otherwise start one
+  // review each, and a running review is not superseded, so each still spends
+  // a model call and churns the change's comments. Once a change receives
+  // pauseAfterPushes pushes within pauseWindowMinutes, automatic push reviews
+  // stop until someone asks for one (worker/burst.ts).
+  pauseOnBurst: z.boolean(),
+  pauseAfterPushes: z.number().int().min(2).max(50),
+  pauseWindowMinutes: z.number().int().min(1).max(1440),
   // Legacy, from before `review` existed: onPush turned all automatic reviews
   // on or off and drafts included drafts. Still accepted so older files and
   // saved settings keep validating; resolve.ts maps them onto `review`.
@@ -627,6 +635,9 @@ export const DEFAULT_CONFIG: Config = {
     review: "published",
     reviewOnPush: true,
     fullReviewOnPush: false,
+    pauseOnBurst: false,
+    pauseAfterPushes: 5,
+    pauseWindowMinutes: 15,
     onPush: true,
     drafts: false,
     summary: "published",

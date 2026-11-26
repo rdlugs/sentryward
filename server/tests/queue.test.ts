@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { lockChange } from "../src/lib/changeLock.ts";
 import { prisma } from "../src/lib/prisma.ts";
+import { BURST_PAUSED_REASON } from "../src/review/config/filters.ts";
 import {
   ACCESS_LOST_REASON,
   CLOSED_REASON,
@@ -89,6 +90,84 @@ describe("enqueue", () => {
 
     expect(second.id).toBe(first.id);
     expect(await prisma.reviewJob.count()).toBe(1);
+  });
+
+  describe("a request for a head a push job is reviewing", () => {
+    const push = () => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "webhook", event: "push" });
+    const request = (trigger: "comment" | "manual" = "comment") =>
+      enqueue({ repositoryId, number: 7, headSha: "aaa", trigger });
+    const stored = (id: string) => prisma.reviewJob.findUniqueOrThrow({ where: { id } });
+    const pause = () =>
+      prisma.reviewJob.create({
+        data: {
+          repositoryId,
+          number: 7,
+          headSha: "paused",
+          trigger: "webhook",
+          event: "push",
+          status: "skipped",
+          error: BURST_PAUSED_REASON,
+          createdAt: HOUR_AGO(),
+        },
+      });
+
+    it("is stamped on a queued push, so the burst pause cannot skip it", async () => {
+      const pushed = await push();
+      const asked = await request();
+
+      expect(asked.id).toBe(pushed.id);
+      expect(await stored(pushed.id)).toMatchObject({ status: "queued", requestedBy: "comment" });
+      expect((await stored(pushed.id)).requestedAt).toBeInstanceOf(Date);
+      expect(await prisma.reviewJob.count()).toBe(1);
+    });
+
+    it("is stamped on a running push", async () => {
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running" } });
+
+      expect((await request()).id).toBe(pushed.id);
+      expect(await stored(pushed.id)).toMatchObject({ status: "running", requestedBy: "comment" });
+    });
+
+    it("keeps a manual stamp over a later review command", async () => {
+      const pushed = await push();
+      await request("manual");
+      await request("comment");
+      expect((await stored(pushed.id)).requestedBy).toBe("manual");
+    });
+
+    it("gets a single review with an old pause marker on the change", async () => {
+      // The pause setting may be off by now; a second job would review the
+      // same head twice once the running push is not skipped.
+      await pause();
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running" } });
+
+      expect((await request()).id).toBe(pushed.id);
+      expect(await prisma.reviewJob.count({ where: { status: { in: ["queued", "running"] } } })).toBe(1);
+    });
+
+    it("lets the paused skip of a stamped push match nothing", async () => {
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running", attempts: 1 } });
+      await request();
+
+      const skipped = await complete(pushed.id, 1, { status: "skipped", verdict: null, error: BURST_PAUSED_REASON, unrequested: true });
+
+      expect(skipped).toBe(false);
+      expect((await stored(pushed.id)).status).toBe("running");
+    });
+
+    it("gets a job of its own once the push was skipped as paused", async () => {
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running", attempts: 1 } });
+      await complete(pushed.id, 1, { status: "skipped", verdict: null, error: BURST_PAUSED_REASON, unrequested: true });
+
+      const asked = await request();
+
+      expect(asked.id).not.toBe(pushed.id);
+      expect(asked.trigger).toBe("comment");
+    });
   });
 
   it("queues the same head again when it is asked for with a different focus", async () => {

@@ -72,6 +72,26 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
       },
     });
     if (existing) {
+      // A push job answers a person's request only if the burst pause cannot
+      // skip it, so the request is stamped on the job and the worker never
+      // pauses a stamped push (worker/burst.ts). Guessing here whether the
+      // pause will apply cannot work: the push may be the one that starts it,
+      // and only the worker knows the change's resolved settings. The update
+      // is guarded on status because complete() does not take this lock: a
+      // push the worker finished (or skipped as paused, which checks the stamp
+      // in the same row update) meanwhile matches nothing, and the request is
+      // queued on its own. A manual stamp is kept over a later comment one,
+      // since the worker honours a comment only while commands are on.
+      if (existing.trigger === "webhook" && existing.event === "push" && input.trigger !== "webhook") {
+        const { count } = await tx.reviewJob.updateMany({
+          where: { id: existing.id, status: { in: ["queued", "running"] } },
+          data: {
+            requestedAt: existing.requestedAt ?? new Date(),
+            ...(existing.requestedBy !== "manual" ? { requestedBy: input.trigger } : {}),
+          },
+        });
+        if (count === 0) return supersedeAndCreate(tx, input);
+      }
       return existing;
     }
 
@@ -252,13 +272,18 @@ export interface CompleteInput {
 // the attempt that holds it (see claimState): a run that stalled past the lock
 // timeout and woke after recovery handed its job to a later attempt must not
 // finish that attempt's job, or the later run's own result would be dropped.
+//
+// `unrequested` finishes the job only while no request is stamped on it (the
+// burst pause, see enqueue): the row lock orders this update against
+// enqueue's stamp, so either the stamp lands first and the job is not
+// skipped, or the skip lands first and the request gets a job of its own.
 export async function complete(
   id: string,
   attempts: number,
-  input: CompleteInput & Partial<Pick<ReviewJob, "headSha" | "baseSha">>,
+  input: CompleteInput & Partial<Pick<ReviewJob, "headSha" | "baseSha">> & { unrequested?: boolean },
 ): Promise<boolean> {
   const { count } = await prisma.reviewJob.updateMany({
-    where: { id, status: "running", attempts },
+    where: { id, status: "running", attempts, ...(input.unrequested ? { requestedAt: null } : {}) },
     data: {
       headSha: input.headSha,
       baseSha: input.baseSha,

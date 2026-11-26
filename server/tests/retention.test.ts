@@ -9,6 +9,7 @@ import {
   purgeStaleChanges,
   runRetention,
 } from "../src/worker/retention.ts";
+import { BURST_PAUSED_REASON } from "../src/review/config/filters.ts";
 import { createUser } from "./helpers/users.ts";
 
 const NOW = new Date("2026-06-01T00:00:00Z");
@@ -118,6 +119,32 @@ describe("pruneReviews", () => {
       });
     }
     expect((await prisma.finding.findUnique({ where: { id: finding.id } }))!.lastJobId).toBe(old[0]!.id);
+  });
+
+  it("deletes the burst pauses a request ended along with that request", async () => {
+    const marker = (createdAt: Date) =>
+      job("skipped", RECENT, { trigger: "webhook", event: "push", error: BURST_PAUSED_REASON, createdAt });
+    // Made before the request but finished after it, so it outlives it.
+    const ended = await marker(new Date("2026-03-01T00:00:00Z"));
+    const later = await marker(new Date("2026-04-15T00:00:00Z"));
+    const request = await job("superseded", OLD, { createdAt: new Date("2026-03-15T00:00:00Z") });
+    // A request that was never answered ends nothing.
+    await job("skipped", OLD, { trigger: "comment", number: 8, createdAt: new Date("2026-03-15T00:00:00Z") });
+    const untouched = await job("skipped", RECENT, {
+      number: 8,
+      trigger: "webhook",
+      event: "push",
+      error: BURST_PAUSED_REASON,
+      createdAt: new Date("2026-03-01T00:00:00Z"),
+    });
+
+    const pruned = await pruneReviews(30, { now: NOW });
+
+    expect(pruned.deleted).toBe(3);
+    expect(await load(request.id)).toBeNull();
+    expect(await load(ended.id)).toBeNull();
+    expect(await load(later.id)).not.toBeNull();
+    expect(await load(untouched.id)).not.toBeNull();
   });
 
   it("keeps recent runs and runs still in flight untouched", async () => {

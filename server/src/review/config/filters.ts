@@ -33,21 +33,39 @@ export function skipFilterReason(triggers: Config["triggers"], change: Change, a
   return null;
 }
 
+// Matched exactly by worker/burst.ts to tell that a change is still paused, so
+// the wording is part of the behaviour.
+export const BURST_PAUSED_REASON =
+  "Automatic reviews are paused after a burst of pushes; comment /sentryward review to resume";
+
+// The change's push history, read by the worker (worker/burst.ts): pushes
+// since the window opened (or since the last requested review, if later),
+// counting this one, and whether a pause began after that request.
+export type PushBurst = { pushesInWindow: number; pausedSinceRequest: boolean };
+
 // Decided by the worker rather than in the webhook handler, because only then
 // is the full configuration known, including the repository file. A manual
 // review is never skipped; someone asked for it, and so did a permitted review
-// command.
+// command. Without `burst` (the trigger check, which has no history) a push is
+// never paused.
 export function skipReason(
   job: { trigger: ReviewTrigger; event?: string | null; actor?: string | null },
   config: Config,
   change: Parameters<typeof skipFilterReason>[1] & { isDraft: boolean },
+  burst?: PushBurst,
 ): string | null {
   const { triggers } = config;
   if (job.trigger === "webhook") {
     if (triggers.review === "manual") return "Automatic reviews are turned off for this repository";
     if (change.isDraft && triggers.review !== "all") return "Draft changes are not reviewed automatically";
     if (job.event === "push" && !triggers.reviewOnPush) return "New commits are not reviewed automatically";
-    return skipFilterReason(triggers, change, job.actor);
+    const filtered = skipFilterReason(triggers, change, job.actor);
+    if (filtered) return filtered;
+    // Checked last, so a change the filters skip anyway is not marked paused.
+    if (job.event === "push" && triggers.pauseOnBurst && burst) {
+      if (burst.pausedSinceRequest || burst.pushesInWindow >= triggers.pauseAfterPushes) return BURST_PAUSED_REASON;
+    }
+    return null;
   }
   if (job.trigger === "comment" && !triggers.command) {
     return "Review commands are turned off for this repository";

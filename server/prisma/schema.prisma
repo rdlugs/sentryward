@@ -488,6 +488,15 @@ model ReviewJob {
   // the trigger layer turns review.deep on. Kept by retention like focus, so a
   // re-run asks for the same depth.
   deep            Boolean        @default(false)
+  // A person asked for this head (dashboard or "/sentryward review") while
+  // this push job was queued or running, so enqueue() returned it instead of
+  // queueing a second review. The job then answers that request: the burst
+  // pause never skips it, and it ends a pause like a requested review does
+  // (worker/burst.ts). requestedBy is the request's trigger, so a review
+  // command sent while commands are turned off is not honoured; the worker
+  // clears a stamp it does not honour.
+  requestedAt     DateTime?      @map("requested_at") @db.Timestamptz
+  requestedBy     ReviewTrigger? @map("requested_by")
   // A trial of a custom reviewer that is not saved yet: the run reviews the
   // change with the draft in place of the saved custom reviewers, stores the
   // result for the dashboard and posts nothing. A trial never speaks for the change, so every query that asks

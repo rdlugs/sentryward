@@ -76,6 +76,9 @@ const effective = {
     review: "published",
     reviewOnPush: true,
     fullReviewOnPush: false,
+    pauseOnBurst: false,
+    pauseAfterPushes: 5,
+    pauseWindowMinutes: 15,
     summary: "published",
     command: true,
     replies: true,
@@ -1722,6 +1725,25 @@ describe("Triggers tab", { timeout: 20_000 }, () => {
     expect(within(summary).getByText("Every file")).toBeInTheDocument()
     expect(within(summary).getByText("1 rule")).toBeInTheDocument()
     expect(within(summary).getByText("WIP", { exact: false })).toBeInTheDocument()
+  })
+
+  it("enables the burst limits only with the pause on, and summarises them", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration?tab=triggers" })
+
+    const pause = await screen.findByRole("switch", { name: "Pause after a burst of pushes" })
+    await waitFor(() => expect(pause).toBeEnabled())
+    expect(screen.getByLabelText("Pushes")).toBeDisabled()
+    expect(screen.getByLabelText("Window (minutes)")).toBeDisabled()
+
+    await userEvent.click(pause)
+    expect(screen.getByLabelText("Pushes")).toBeEnabled()
+    const summary = screen.getByRole("region", { name: "Triggers summary" })
+    expect(within(summary).getByText("Pauses after 5 pushes in 15 min")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole("switch", { name: "Review automatically on push" }))
+    expect(pause).toBeDisabled()
+    expect(screen.getByLabelText("Pushes")).toBeDisabled()
   })
 
   it("greys out what automatic reviews use while they are off", async () => {
