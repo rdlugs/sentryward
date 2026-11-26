@@ -18,11 +18,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   from the base revision, wrapped as untrusted, ranked below the team rules and
   never block a review. `review.agent_files.max_chars` caps their total per pass
   (8000 by default, nearest folder first); files left out or unreadable are
-  warnings. Cursor globs work as in Cursor (unquoted, and slashless globs
-  match at any depth); up to 30 rules are checked and at most 10 that apply
+  warnings. Cursor globs work as in Cursor (unquoted, comma-separated with
+  brace sets such as `**/*.{ts,tsx}` kept whole, and slashless globs match at
+  any depth, with a quoted `alwaysApply: "true"` honoured); up to 30 rules are checked and at most 10 that apply
   are used, from at most 8 rule folders; rules or folders past their caps are warnings. A symlinked
   `AGENTS.md` is followed on GitLab as on GitHub. An incremental review uses
-  only the instruction files for the files it reviews again. Off by default. The review result lists the files used
+  only the instruction files for the files it reviews again, and files the
+  review leaves out (pure renames, withheld patches) do not pick folders or
+  match rules. Reviews stored before the setting existed still allow an
+  incremental review. Off by default. The review result lists the files used
   (`agentFiles`) and the review page's sidebar shows them.
 
 - Auto deep review. `review.deep.enabled: auto` (Deep review > Auto on the

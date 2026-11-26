@@ -29,7 +29,7 @@ export interface LoadAgentFilesInput {
   project: string;
   // The base revision, never the head.
   ref: string;
-  changedFiles: Pick<ChangedFile, "path" | "previousPath" | "changeType" | "isBinary">[];
+  changedFiles: Pick<ChangedFile, "path" | "previousPath" | "changeType" | "isBinary" | "patchUnavailable" | "hunks">[];
   ignorePaths: string[];
   maxChars: number;
   cache?: ForgeCache;
@@ -142,11 +142,33 @@ export function parseCursorRule(text: string): CursorRule {
   }
   const record = typeof meta === "object" && meta !== null ? (meta as Record<string, unknown>) : {};
   const rawGlobs = record.globs;
-  const globs = (Array.isArray(rawGlobs) ? rawGlobs : typeof rawGlobs === "string" ? rawGlobs.split(",") : [])
+  const globs = (Array.isArray(rawGlobs) ? rawGlobs : typeof rawGlobs === "string" ? splitGlobs(rawGlobs) : [])
     .filter((glob): glob is string => typeof glob === "string")
     .map((glob) => glob.trim())
     .filter(Boolean);
-  return { alwaysApply: record.alwaysApply === true, globs, body: text.slice(match[0].length) };
+  // A quoted "true" is valid YAML for a string, but the line-by-line reader
+  // accepts it, so both readers must agree on it.
+  const alwaysApply = record.alwaysApply === true || (typeof record.alwaysApply === "string" && record.alwaysApply.toLowerCase() === "true");
+  return { alwaysApply, globs, body: text.slice(match[0].length) };
+}
+
+// Cursor separates globs with commas, but a brace set (`*.{ts,tsx}`) has
+// commas of its own that picomatch expands: split only outside braces.
+function splitGlobs(value: string): string[] {
+  const globs: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index];
+    if (char === "{") depth++;
+    else if (char === "}") depth = Math.max(0, depth - 1);
+    else if (char === "," && depth === 0) {
+      globs.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  globs.push(value.slice(start));
+  return globs;
 }
 
 const HEADING = (path: string) => `### ${path}\n`;
@@ -201,12 +223,14 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
   const readFile = (path: string) =>
     attempt(() => cached(cache, cacheKey("file", adapter.host, project, path, ref), () => adapter.getFileAtRef(project, path, ref)));
 
-  // Files the review leaves out (ignored, deleted, binary) neither add folders
-  // nor match Cursor globs. A rename keeps its old path: the file is still
-  // reviewed, and the conventions of the folder it left may still apply.
+  // Files the review leaves out neither add folders nor match Cursor globs:
+  // the same ones classifyFiles omits (ignored, deleted, binary, patch
+  // withheld, or no hunks, as in a pure rename). An edited rename keeps its old
+  // path: the file is still reviewed, and the conventions of the folder it left
+  // may still apply.
   const ignored = ignoreMatcher(input.ignorePaths);
   const reviewedPaths = input.changedFiles
-    .filter((file) => file.changeType !== "deleted" && !file.isBinary)
+    .filter((file) => file.changeType !== "deleted" && !file.isBinary && !file.patchUnavailable && file.hunks.length > 0)
     .flatMap((file) => [file.path, file.previousPath])
     .filter((path): path is string => !!path && !ignored(path));
 
@@ -310,9 +334,11 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
       return readFile(target);
     }
     // The mode is unknown (a truncated listing): text that names a file which
-    // reads is taken as a link to it; anything else is the file itself.
-    if (target === null) return text;
-    if (target === "" || toRead.includes(target)) return null;
+    // reads is taken as a link to it; anything else is the file itself. Text
+    // naming somewhere outside the repository could never be followed, so it
+    // is more likely the file's own content (`/api/v2`) than a link.
+    if (target === null || target === "") return text;
+    if (toRead.includes(target)) return null;
     return (await readFile(target)) ?? text;
   };
   const texts = await mapLimit(toRead, CONCURRENCY, async (path) => ({

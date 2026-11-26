@@ -1847,6 +1847,21 @@ describe("runJob on a push after a completed review", () => {
     expect(((await stored()).result as { incremental?: unknown }).incremental).toBeDefined();
   });
 
+  it("still reviews incrementally after a review stored before agent files existed", async () => {
+    await reviewFirst();
+    const last = await prisma.reviewJob.findFirstOrThrow({ where: { repositoryId, headSha: "h1" } });
+    const resolved = structuredClone(last.resolvedConfig) as { config: { review: { agentFiles?: unknown } } };
+    delete resolved.config.review.agentFiles;
+    await prisma.reviewJob.update({ where: { id: last.id }, data: { resolvedConfig: resolved as object } });
+    const second = deps({}, fixed, { anthropic: "k" }, { head: "h2", files: FILES, compare: ["src/util.ts"] });
+    const { job, stored } = await push("h2");
+
+    await runJob(job, second.runDeps);
+
+    expect(second.reads).toContain("compare:h1..h2");
+    expect(((await stored()).result as { incremental?: unknown }).incremental).toBeDefined();
+  });
+
   it("keeps the areas the last review reached through callers", async () => {
     await reviewFirst();
     const last = await prisma.reviewJob.findFirstOrThrow({ where: { repositoryId, headSha: "h1" } });

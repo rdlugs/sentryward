@@ -55,12 +55,20 @@ function forge(
   return { adapter, reads };
 }
 
+// Any real hunk: a changed file without one is a pure rename, which the review
+// leaves out.
+const HUNKS = makeChangeSet().files[0]!.hunks;
+
+function changedFile(path: string, extra: Partial<LoadAgentFilesInput["changedFiles"][number]> = {}): LoadAgentFilesInput["changedFiles"][number] {
+  return { path, changeType: "modified", isBinary: false, patchUnavailable: false, hunks: HUNKS, ...extra };
+}
+
 function input(adapter: LoadAgentFilesInput["adapter"], changed: string[], extra: Partial<LoadAgentFilesInput> = {}): LoadAgentFilesInput {
   return {
     adapter,
     project: "acme/web",
     ref: "base",
-    changedFiles: changed.map((path) => ({ path, changeType: "modified" as const, isBinary: false })),
+    changedFiles: changed.map((path) => changedFile(path)),
     ignorePaths: [],
     maxChars: 8000,
     ...extra,
@@ -141,6 +149,19 @@ describe("loadAgentFiles", () => {
     expect(result.files).toEqual([{ path: ".cursor/rules/react.mdc", text: "react rule" }]);
   });
 
+  it("keeps brace sets in Cursor globs whole", async () => {
+    const { adapter } = forge({
+      ".cursor/rules/unquoted.mdc": "---\nglobs: **/*.{ts,tsx}, docs/*\n---\nunquoted rule",
+      ".cursor/rules/quoted.mdc": '---\nglobs: "src/**/*.{ts,tsx}"\n---\nquoted rule',
+      ".cursor/rules/py.mdc": '---\nglobs: "**/*.{py,pyi}"\n---\npy rule',
+    });
+    const result = await loadAgentFiles(input(adapter, ["src/App.tsx"]));
+    expect(result.files).toEqual([
+      { path: ".cursor/rules/quoted.mdc", text: "quoted rule" },
+      { path: ".cursor/rules/unquoted.mdc", text: "unquoted rule" },
+    ]);
+  });
+
   it("caps the Cursor rules used after checking which apply, and warns about the rest", async () => {
     const rules: Record<string, string> = {};
     // Rules that do not apply sort first and must not use up the cap.
@@ -177,6 +198,12 @@ describe("loadAgentFiles", () => {
     const { adapter } = forge({ "src/CLAUDE.md": "src claude", "src/x.ts": "" }, { truncated: ["src"] });
     const result = await loadAgentFiles(input(adapter, ["src/x.ts"]));
     expect(result.files).toEqual([{ path: "src/CLAUDE.md", text: "src claude" }]);
+  });
+
+  it("keeps a GitLab file past a truncated listing whose text names a path outside the repository", async () => {
+    const { adapter } = forge({ "src/CLAUDE.md": "/api/v2", "src/x.ts": "" }, { truncated: ["src"], provider: "gitlab" });
+    const result = await loadAgentFiles(input(adapter, ["src/x.ts"]));
+    expect(result.files).toEqual([{ path: "src/CLAUDE.md", text: "/api/v2" }]);
   });
 
   it("drops a GitLab symlink whose target cannot be read rather than use its path as guidance", async () => {
@@ -246,27 +273,31 @@ describe("loadAgentFiles", () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it("leaves deleted and binary files out of the folders and the Cursor globs", async () => {
+  it("leaves deleted, binary, unpatched and pure-rename files out of the folders and the Cursor globs", async () => {
     const { adapter, reads } = forge({
       "img/CLAUDE.md": "img",
       "src/CLAUDE.md": "src",
+      "big/CLAUDE.md": "big",
+      "legacy/CLAUDE.md": "legacy",
       ".cursor/rules/png.mdc": '---\nglobs: "**/*.png"\n---\npng rule',
+      ".cursor/rules/legacy.mdc": '---\nglobs: "legacy/**"\n---\nlegacy rule',
     });
     const deep = Array.from({ length: MAX_AGENT_DIRS + 3 }, (_, index) => `d${index}`).join("/");
     const result = await loadAgentFiles(
       input(adapter, [], {
         changedFiles: [
-          { path: `${deep}/old.ts`, changeType: "deleted", isBinary: false },
-          { path: "img/logo.png", changeType: "modified", isBinary: true },
-          { path: "src/a.ts", changeType: "modified", isBinary: false },
+          changedFile(`${deep}/old.ts`, { changeType: "deleted" }),
+          changedFile("img/logo.png", { isBinary: true }),
+          changedFile("big/generated.ts", { patchUnavailable: true, hunks: [] }),
+          changedFile("moved/x.ts", { previousPath: "legacy/x.ts", changeType: "renamed", hunks: [] }),
+          changedFile("src/a.ts"),
         ],
       }),
     );
     expect(result.files).toEqual([{ path: "src/CLAUDE.md", text: "src" }]);
     expect(result.warnings).toEqual([]);
     const listed = reads.filter((read) => read.startsWith("dir:")).map((read) => read.slice("dir:base:".length));
-    expect(listed).not.toContain("img");
-    expect(listed).not.toContain("d0");
+    for (const folder of ["img", "d0", "big", "legacy", "moved"]) expect(listed).not.toContain(folder);
   });
 
   it("warns about an oversized file and a failed read, and keeps what it could read", async () => {
@@ -315,6 +346,17 @@ describe("parseCursorRule", () => {
       globs: ["*.ts", "*.tsx"],
       body: "body",
     });
+  });
+
+  it("splits globs only outside brace sets", () => {
+    expect(parseCursorRule('---\nglobs: "src/**/*.{ts,tsx}"\n---\nbody').globs).toEqual(["src/**/*.{ts,tsx}"]);
+    expect(parseCursorRule("---\nglobs: **/*.{ts,tsx}, docs/*\n---\nbody").globs).toEqual(["**/*.{ts,tsx}", "docs/*"]);
+  });
+
+  it("reads a quoted alwaysApply the same with valid and loose frontmatter", () => {
+    expect(parseCursorRule('---\nalwaysApply: "true"\n---\nbody').alwaysApply).toBe(true);
+    expect(parseCursorRule('---\nalwaysApply: "TRUE"\nglobs: *.ts\n---\nbody').alwaysApply).toBe(true);
+    expect(parseCursorRule('---\nalwaysApply: "false"\n---\nbody').alwaysApply).toBe(false);
   });
 });
 

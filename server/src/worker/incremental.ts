@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
-import type { Config } from "../review/config/schema.ts";
+import { DEFAULT_CONFIG, type Config } from "../review/config/schema.ts";
 import { reviewResultSchema, type ChangeSet } from "../review/core/models.ts";
 import type { ForgeCache } from "../review/forge/cache.ts";
 import type { ForgeAdapter } from "../review/forge/types.ts";
@@ -88,12 +88,18 @@ export async function incrementFor({
   if (!parsed.success || parsed.data.status !== "completed") return undefined;
   const previous = parsed.data;
   const stored = storedConfig(last.resolvedConfig);
-  // Configs stored before review.impactDepth existed have none; caller
-  // context only adds evidence to findings, so they do not force a full
-  // review.
+  // Configs stored before review.impactDepth or review.agentFiles existed
+  // have none. Caller context only adds evidence to findings, so it does not
+  // force a full review. Agent files were off for every review stored before
+  // the setting existed, so the default (off) is what that review used:
+  // turning them on since still forces one.
   const lastConfig = stored && {
     ...stored,
-    review: { ...stored.review, impactDepth: stored.review.impactDepth ?? config.review.impactDepth },
+    review: {
+      ...stored.review,
+      impactDepth: stored.review.impactDepth ?? config.review.impactDepth,
+      agentFiles: stored.review.agentFiles ?? DEFAULT_CONFIG.review.agentFiles,
+    },
   };
   if (!lastConfig || !isDeepStrictEqual(reviewSettings(lastConfig), reviewSettings(config))) {
     warnings.push("Full review: the review settings changed since the last review");
