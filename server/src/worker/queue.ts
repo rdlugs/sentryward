@@ -7,6 +7,7 @@ import { loadDashboardConfigs } from "../review/config/load.ts";
 import type { CustomReviewer } from "../review/config/schema.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { normalizeFocus, type ReviewProgress } from "../review/core/models.ts";
+import { pausedAt } from "./burst.ts";
 
 export interface EnqueueInput {
   repositoryId: string;
@@ -71,7 +72,16 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
         ...(input.deep ? { deep: true } : {}),
       },
     });
-    if (existing) {
+    // On a change paused after a burst of pushes, a push job cannot answer a
+    // person's request: it is judged by when it arrived, so the pause skips it
+    // (worker/burst.ts). Queue the request in its place (a queued push is
+    // superseded, a running one runs first under the change's lease). Only a
+    // live pause marker does this, so other changes keep the single review.
+    if (
+      existing &&
+      !(existing.trigger === "webhook" && input.trigger !== "webhook" &&
+        (await pausedAt(tx, input.repositoryId, input.number, new Date())))
+    ) {
       return existing;
     }
 

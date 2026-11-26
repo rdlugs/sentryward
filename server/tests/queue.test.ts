@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { lockChange } from "../src/lib/changeLock.ts";
 import { prisma } from "../src/lib/prisma.ts";
+import { BURST_PAUSED_REASON } from "../src/review/config/filters.ts";
 import {
   ACCESS_LOST_REASON,
   CLOSED_REASON,
@@ -89,6 +90,50 @@ describe("enqueue", () => {
 
     expect(second.id).toBe(first.id);
     expect(await prisma.reviewJob.count()).toBe(1);
+  });
+
+  describe("on a change paused after a burst of pushes", () => {
+    const push = () => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "webhook", event: "push" });
+    const request = () => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "comment" });
+    const pause = () =>
+      prisma.reviewJob.create({
+        data: {
+          repositoryId,
+          number: 7,
+          headSha: "paused",
+          trigger: "webhook",
+          event: "push",
+          status: "skipped",
+          error: BURST_PAUSED_REASON,
+          createdAt: HOUR_AGO(),
+        },
+      });
+
+    it("queues a request in place of the push job the pause would skip", async () => {
+      await pause();
+      const pushed = await push();
+      const asked = await request();
+
+      // Returning the push would swallow the request: the pause skips it.
+      expect(asked.id).not.toBe(pushed.id);
+      expect(asked.trigger).toBe("comment");
+      expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: pushed.id } })).status).toBe("superseded");
+    });
+
+    it("queues it behind a push that is already running", async () => {
+      await pause();
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running" } });
+      const asked = await request();
+
+      expect(asked.id).not.toBe(pushed.id);
+      expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: pushed.id } })).status).toBe("running");
+    });
+
+    it("still answers a request with the push job when nothing is paused", async () => {
+      const pushed = await push();
+      expect((await request()).id).toBe(pushed.id);
+    });
   });
 
   it("queues the same head again when it is asked for with a different focus", async () => {
