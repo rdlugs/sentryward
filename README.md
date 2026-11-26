@@ -688,12 +688,26 @@ it finishes it publishes, each step independently:
   | --- | --- |
   | `output.estimate_effort` | The review effort estimate |
   | `output.sequence_diagrams` | A Mermaid sequence diagram of the main flow |
-  | `output.assess_linked_issues` | How well the change addresses the issues it closes ("fixes #12" style references on GitHub, GitLab's own closing issues on GitLab) |
+  | `output.assess_linked_issues` | How well the change addresses the issues it closes ("fixes #12" style references on GitHub, GitLab's own closing issues on GitLab), with a table of each issue's requirements marked met, partly met, missing or unclear, the changed file and line that meet them, and a fix for the rest. Each missing requirement is also reported as a `requirement_gap` finding |
   | `output.related_issues` | Possibly related issues found by searching the tracker for the title's keywords |
   | `output.walkthrough_labels` | The labels segment of the PR summary's meta line |
   | `output.walkthrough_blast_radius` | The blast radius segment of the meta line |
 
-  Only issues the forge returned are ever shown. Hiding the labels or blast
+  Only issues the forge returned are ever shown, and a requirement's file and
+  line are kept only when the review covers that file (not one `ignore_paths`
+  leaves out) and the diff shows that line. Missing requirements are listed
+  under "Requirements not met" and tracked on the change like other findings.
+  One is resolved only when a run splits its issue into requirements again and
+  no longer finds it, or when the change no longer links the issue; a run whose
+  summary failed, whose tracker could not be read, that skipped that issue, or
+  that hit `max_findings` leaves it open. They are `major` with confidence 0.5,
+  so `severity_floor` and `min_confidence` apply to them (`categories` does
+  not), and they block only when `block_on` is `major` or lower. Their identity
+  ignores the file named for them, and earlier gaps are shown to the model so
+  it keeps their wording, so dismissing one keeps it out of later runs. They
+  are not added to the branch backlog when the change merges.
+
+  Hiding the labels or blast
   radius segments only changes the comment text, not the native labels below.
   What each part adds to the PR summary's model call: a sequence diagram and
   the high-level summary make the model write more, linked and related issues

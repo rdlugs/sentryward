@@ -80,6 +80,16 @@ describe("Backlog page", () => {
     expect(within(row).getByText("Open")).toBeInTheDocument()
   })
 
+  it("names the linked issue instead of an empty file", async () => {
+    const gap: BacklogItem = { ...item, title: "#12: Log each export", file: "", startLine: 1, endLine: 1, kind: "requirement_gap" }
+    mockApi({ "GET /api/backlog/stats": stats, [OPEN]: page([gap]) })
+    renderWithProviders(<App />, { route: "/backlog" })
+
+    const row = (await screen.findByText("#12: Log each export")).closest("tr")!
+    expect(within(row).getByText("Linked issue")).toBeInTheDocument()
+    expect(within(row).queryByText(":1")).not.toBeInTheDocument()
+  })
+
   it("counts only the selected repository's items in the stats", async () => {
     mockApi({
       "GET /api/backlog/stats": stats,

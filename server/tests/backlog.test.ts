@@ -194,6 +194,9 @@ describe("recording and applying a merge", () => {
     await finding(7, "fp-later", { state: "ignored", ignoreReason: "fix_later", ignoreNote: "after launch" });
     await finding(7, "fp-false", { state: "ignored", ignoreReason: "false_positive" });
     await finding(7, "fp-fixed", { state: "resolved", lifecycle: "fixed" });
+    // What a linked issue still asks for stays with the change: no later
+    // review could ever resolve it in the backlog.
+    await finding(7, "fp-gap", { kind: "requirement_gap", file: "", startLine: 1, endLine: 1 });
 
     expect(await merge(7)).toEqual({ promoted: 2, fixed: 0, invalidated: 0 });
     const stored = await items();

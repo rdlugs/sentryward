@@ -1,12 +1,12 @@
 import { useMemo, type ReactNode } from "react"
-import { BookOpen, ChevronRight, FileCode, ShieldAlert } from "lucide-react"
+import { BookOpen, ChevronRight, CircleCheck, CircleDashed, CircleHelp, CircleX, FileCode, ShieldAlert, type LucideIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { MermaidDiagram } from "@/components/MermaidDiagram"
 import { ForgeMarkdown } from "@/features/config/ForgeMarkdown"
 import { cn } from "@/lib/utils"
-import type { IssueAssessment, IssueRef, ReviewResult, RiskyArea } from "../types"
+import type { IssueAssessment, IssueRef, IssueRequirement, ReviewResult, RiskyArea } from "../types"
 import type { OverviewExpansion } from "./useOverviewExpansion"
 
 const MAX_EFFORT = 5
@@ -16,6 +16,48 @@ const ASSESSMENT_LABEL: Record<IssueAssessment, string> = {
   partial: "Partly addressed",
   not_addressed: "Not addressed",
   unclear: "Unclear",
+}
+
+const REQUIREMENT_STATUS: Record<IssueRequirement["status"], { label: string; icon: LucideIcon; className: string }> = {
+  met: { label: "Met", icon: CircleCheck, className: "text-emerald-700 dark:text-emerald-400" },
+  partial: { label: "Partly met", icon: CircleDashed, className: "text-amber-600 dark:text-amber-400" },
+  missing: { label: "Missing", icon: CircleX, className: "text-destructive" },
+  unclear: { label: "Unclear", icon: CircleHelp, className: "text-muted-foreground" },
+}
+
+function RequirementList({ requirements }: { requirements: IssueRequirement[] }) {
+  const met = requirements.filter((requirement) => requirement.status === "met").length
+  return (
+    <div className="flex flex-col gap-1 pt-1">
+      <p className="text-xs text-muted-foreground">
+        {met} of {requirements.length} requirements met
+      </p>
+      <ul className="flex flex-col gap-1.5" aria-label="Requirements">
+        {requirements.map((requirement, index) => {
+          const status = REQUIREMENT_STATUS[requirement.status]
+          const Icon = status.icon
+          return (
+            <li key={index} className="flex gap-2">
+              <Icon className={cn("mt-0.5 size-4 shrink-0", status.className)} aria-label={status.label} role="img" />
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span>
+                  {requirement.text}
+                  {requirement.file && (
+                    <span className="font-mono text-xs break-all text-muted-foreground">
+                      {" "}
+                      {requirement.file}
+                      {requirement.line ? `:${requirement.line}` : ""}
+                    </span>
+                  )}
+                </span>
+                {requirement.fix && <span className="text-muted-foreground">{requirement.fix}</span>}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
 }
 
 const RISK_LABEL: Record<RiskyArea["kind"], string> = {
@@ -200,6 +242,9 @@ export function WalkthroughCard({
                     <Badge variant="outline">{ASSESSMENT_LABEL[issue.assessment]}</Badge>
                   </div>
                   {issue.note && <p className="text-muted-foreground">{issue.note}</p>}
+                  {issue.requirements && issue.requirements.length > 0 && (
+                    <RequirementList requirements={issue.requirements} />
+                  )}
                 </li>
               ))}
             </ul>

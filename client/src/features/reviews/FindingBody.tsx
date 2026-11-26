@@ -5,6 +5,7 @@ import { copyToClipboard } from "@/lib/clipboard"
 import { findingPrompt } from "./agentPrompt"
 import { findingLines, forgeFileUrl } from "./links"
 import type { Finding, ReviewResult, Verification } from "./types"
+import { NO_FILE_LABEL } from "./findingLocation"
 
 const VERIFICATION: Record<Verification, { label: string; title: string; variant: "secondary" | "outline" }> = {
   verified: { label: "Verified", title: "Confirmed by a second, independent model check", variant: "secondary" },
@@ -47,15 +48,19 @@ export function FindingBody({ finding, change }: { finding: Finding; change: Rev
             </span>
           </>
         )}
-        <a
-          href={forgeFileUrl(change, finding.file, finding.startLine, finding.endLine)}
-          target="_blank"
-          rel="noreferrer"
-          className="ml-auto inline-flex items-center gap-1 font-mono text-xs text-muted-foreground hover:underline"
-        >
-          {finding.file}:{lines}
-          <ExternalLink className="size-3" />
-        </a>
+        {finding.file ? (
+          <a
+            href={forgeFileUrl(change, finding.file, finding.startLine, finding.endLine)}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto inline-flex items-center gap-1 font-mono text-xs text-muted-foreground hover:underline"
+          >
+            {finding.file}:{lines}
+            <ExternalLink className="size-3" />
+          </a>
+        ) : (
+          <span className="ml-auto text-xs text-muted-foreground">{NO_FILE_LABEL}</span>
+        )}
       </div>
       {/* Model text is shown as plain text; it is never rendered as HTML. */}
       <p className="text-sm whitespace-pre-wrap">{finding.body}</p>

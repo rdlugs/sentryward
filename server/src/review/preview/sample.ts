@@ -188,7 +188,22 @@ const SAMPLE_WALKTHROUGH: FullWalkthroughOutput = {
   ].join("\n"),
   highLevelSummary: "**New Features**\n- Look up a single user with `GET /users/:id`.\n\n**Documentation**\n- The README describes the new lookup endpoint.",
   linkedIssues: [
-    { ref: "#12", assessment: "partial", note: "The lookup is added, but an unknown id fails instead of returning 404." },
+    {
+      ref: "#12",
+      assessment: "partial",
+      note: "The lookup is added, but an unknown id fails instead of returning 404.",
+      requirements: [
+        { text: "Add GET /users/:id returning the user's id and name", status: "met", file: "src/api/users.ts", line: 7, fix: "" },
+        {
+          text: "Return 404 for an unknown id",
+          status: "missing",
+          file: "src/api/users.ts",
+          line: 10,
+          fix: "Check that a row came back and respond with 404 when none did.",
+        },
+        { text: "Document the endpoint in the README", status: "met", file: "README.md", line: 0, fix: "" },
+      ],
+    },
   ],
   relatedIssues: [{ ref: "#31", reason: "Profile endpoints build on this user lookup." }],
 };

@@ -12,6 +12,7 @@ import { useIsBelowSm } from "@/hooks/use-mobile"
 import type { Sort } from "@/hooks/use-sort"
 import { formatDate, timeAgo } from "@/lib/time"
 import { SeverityBadge } from "@/features/reviews/badges"
+import { findingLocation } from "@/features/reviews/findingLocation"
 import { changeLabel } from "@/features/reviews/links"
 import { useSetBacklogState } from "./api"
 import { BacklogStateBadge } from "./BacklogStateBadge"
@@ -124,7 +125,7 @@ function BacklogCard({ item }: { item: BacklogItem }) {
         <div className="min-w-0 flex-1">
           <div className="font-medium break-words">{item.title}</div>
           <div className="font-mono text-xs break-all text-muted-foreground">
-            {item.file}:{lines(item)}
+            {findingLocation(item.file, lines(item))}
           </div>
         </div>
         <BacklogActions item={item} />
@@ -186,7 +187,7 @@ export function BacklogTable({
             <TableCell className="max-w-md whitespace-normal">
               <div className="font-medium">{item.title}</div>
               <div className="truncate font-mono text-xs text-muted-foreground">
-                {item.file}:{lines(item)}
+                {findingLocation(item.file, lines(item))}
               </div>
             </TableCell>
             <TableCell title={item.repository.fullPath}>{repoName(item.repository.fullPath)}</TableCell>
