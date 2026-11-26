@@ -18,7 +18,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   from the base revision, wrapped as untrusted, ranked below the team rules and
   never block a review. `review.agent_files.max_chars` caps their total per pass
   (8000 by default, nearest folder first); files left out or unreadable are
-  warnings. Off by default. The review result lists the files used
+  warnings. Cursor globs work as in Cursor (unquoted, and slashless globs
+  match at any depth); up to 30 rules are checked and at most 10 that apply
+  are used, and rules or folders past their caps are warnings. A symlinked
+  `AGENTS.md` is followed on GitLab as on GitHub. Off by default. The review result lists the files used
   (`agentFiles`) and the review page's sidebar shows them.
 
 - Auto deep review. `review.deep.enabled: auto` (Deep review > Auto on the

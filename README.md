@@ -1647,7 +1647,11 @@ review:
   folders of ignored files do not count), plus `.cursorrules`,
   `.github/copilot-instructions.md` and the `.cursor/rules/**/*.mdc` rules that
   apply: those with `alwaysApply: true` or `globs` matching a changed file.
-  Rules Cursor attaches by hand or by description are left out.
+  Globs are read as Cursor reads them: unquoted (`globs: *.ts,*.tsx`) works,
+  and a glob without a slash matches at any depth. Up to 30 rules are checked
+  and at most 10 that apply are used. Rules Cursor attaches by hand or by
+  description are left out. A symlinked file is read as its target on both
+  GitHub and GitLab.
 - **Base revision only,** like `.sentryward.yaml`: a change cannot add or edit
   the instructions its own review follows.
 - **Guidance, never rules:** they go into the prompt as low-priority hints,
@@ -1658,8 +1662,8 @@ review:
   suppress findings).
 - **Size:** the nearest folder's files come first, so when `max_chars` is
   reached the least specific text is cut. A file over 64 KB is skipped. Files
-  left out, and files that could not be read, show as warnings on the review;
-  the review itself always runs.
+  left out, folders or Cursor rules past their caps, and files that could not
+  be read, show as warnings on the review; the review itself always runs.
 - **Cost:** a few forge reads per review (one directory listing per folder,
   then the files found, cached per commit) and up to `max_chars / 4` more
   prompt tokens per pass. The review page's sidebar lists the files it used.

@@ -5,6 +5,7 @@ import type { ConfigOverride } from "../src/review/config/schema.ts";
 import { planChunks } from "../src/review/context/chunk.ts";
 import {
   MAX_AGENT_DIRS,
+  MAX_CURSOR_RULES,
   fitAgentFiles,
   loadAgentFiles,
   parseCursorRule,
@@ -86,7 +87,10 @@ describe("loadAgentFiles", () => {
   it("skips the folders of ignored files and caps the folders listed, keeping the deepest", async () => {
     const { adapter, reads } = forge({ "dist/CLAUDE.md": "built" });
     const deep = Array.from({ length: MAX_AGENT_DIRS + 3 }, (_, index) => `d${index}`).join("/");
-    await loadAgentFiles(input(adapter, ["dist/app.js", `${deep}/file.ts`], { ignorePaths: ["dist/**"] }));
+    const result = await loadAgentFiles(input(adapter, ["dist/app.js", `${deep}/file.ts`], { ignorePaths: ["dist/**"] }));
+    expect(result.warnings).toEqual([
+      `4 folders above changed files were not checked for agent instruction files (at most ${MAX_AGENT_DIRS} are)`,
+    ]);
     const listed = reads.filter((read) => read.startsWith("dir:")).map((read) => read.slice("dir:base:".length));
     expect(listed).not.toContain("dist");
     expect(listed).toHaveLength(MAX_AGENT_DIRS);
@@ -118,6 +122,47 @@ describe("loadAgentFiles", () => {
     const { adapter } = forge({ "CLAUDE.md": "same", "AGENTS.md": "same" }, { symlinks: ["AGENTS.md"] });
     const result = await loadAgentFiles(input(adapter, ["app.ts"]));
     expect(result.files).toEqual([{ path: "CLAUDE.md", text: "same" }]);
+  });
+
+  it("matches unquoted and slashless Cursor globs at any depth, as Cursor does", async () => {
+    const { adapter } = forge({
+      ".cursor/rules/react.mdc": "---\ndescription: React: components\nglobs: *.tsx,*.jsx\nalwaysApply: false\n---\nreact rule",
+      ".cursor/rules/root.mdc": "---\nglobs: \"src/*.ts\"\n---\nroot-only rule",
+    });
+    const result = await loadAgentFiles(input(adapter, ["client/src/App.tsx"]));
+    expect(result.files).toEqual([{ path: ".cursor/rules/react.mdc", text: "react rule" }]);
+  });
+
+  it("caps the Cursor rules used after checking which apply, and warns about the rest", async () => {
+    const rules: Record<string, string> = {};
+    // Rules that do not apply sort first and must not use up the cap.
+    for (let index = 0; index < 12; index++) rules[`.cursor/rules/a${String(index).padStart(2, "0")}.mdc`] = `---\nglobs: "**/*.py"\n---\npy ${index}`;
+    rules[".cursor/rules/b.mdc"] = '---\nglobs: "**/*.ts"\n---\nts rule';
+    const { adapter } = forge(rules);
+    const one = await loadAgentFiles(input(adapter, ["src/a.ts"]));
+    expect(one.files).toEqual([{ path: ".cursor/rules/b.mdc", text: "ts rule" }]);
+    expect(one.warnings).toEqual([]);
+
+    const many = await loadAgentFiles(input(adapter, ["src/a.ts", "tools/x.py"]));
+    expect(many.files.filter((file) => file.path.endsWith(".mdc"))).toHaveLength(MAX_CURSOR_RULES);
+    expect(many.warnings).toEqual(["3 matching Cursor rules were left out (at most 10 are used)"]);
+  });
+
+  it("does not apply Cursor rules for ignored files", async () => {
+    const { adapter } = forge({ ".cursor/rules/dist.mdc": '---\nglobs: "dist/**"\n---\ndist rule' });
+    const result = await loadAgentFiles(input(adapter, ["dist/bundle.js", "src/a.ts"], { ignorePaths: ["dist/**"] }));
+    expect(result.files).toEqual([]);
+  });
+
+  it("follows a symlink a forge reads as its target path (GitLab), once", async () => {
+    const same = forge({ "CLAUDE.md": "claude text", "AGENTS.md": "CLAUDE.md" }, { symlinks: ["AGENTS.md"] });
+    expect((await loadAgentFiles(input(same.adapter, ["app.ts"]))).files).toEqual([{ path: "CLAUDE.md", text: "claude text" }]);
+
+    const elsewhere = forge({ "src/AGENTS.md": "../docs/agents.md", "docs/agents.md": "agents text", "src/a.ts": "" }, { symlinks: ["src/AGENTS.md"] });
+    expect((await loadAgentFiles(input(elsewhere.adapter, ["src/a.ts"]))).files).toEqual([{ path: "src/AGENTS.md", text: "agents text" }]);
+
+    const outside = forge({ "AGENTS.md": "../../etc/passwd" }, { symlinks: ["AGENTS.md"] });
+    expect((await loadAgentFiles(input(outside.adapter, ["app.ts"]))).files).toEqual([]);
   });
 
   it("tries the files directly when a listing is truncated", async () => {
@@ -167,6 +212,11 @@ describe("parseCursorRule", () => {
     });
     expect(parseCursorRule("---\n: [\n---\nbody")).toEqual({ alwaysApply: false, globs: [], body: "body" });
     expect(parseCursorRule("plain")).toEqual({ alwaysApply: false, globs: [], body: "plain" });
+    expect(parseCursorRule("---\nglobs: *.ts,*.tsx\nalwaysApply: true\n---\nbody")).toEqual({
+      alwaysApply: true,
+      globs: ["*.ts", "*.tsx"],
+      body: "body",
+    });
   });
 });
 
