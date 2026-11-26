@@ -45,6 +45,10 @@ function overviewDiff(files: ChangedFile[]): string {
 export interface WalkthroughIssues {
   linked?: IssueContext[];
   candidates?: IssueContext[];
+  // Titles of the requirement gaps earlier runs reported on this change
+  // ("#12: ..."), so the model can word the same requirement the same way and
+  // the gap keeps its identity (its fingerprint follows the wording).
+  knownGaps?: string[];
 }
 
 // A diagram is kept only when it is one; anything else the model wrote there
@@ -61,10 +65,15 @@ function diagramSource(text: string | undefined): string | undefined {
 type ModelRequirement = NonNullable<FullWalkthroughOutput["linkedIssues"]>[number]["requirements"][number];
 
 // The model reads a trimmed overview of the diff, so a location it gives is
-// checked rather than trusted: a file must be one the change touches, and a
-// line one the diff shows. Anything else is dropped, never guessed at.
-function checkedRequirements(entries: ModelRequirement[] | undefined, changeSet: ChangeSet): IssueRequirement[] {
-  const known = new Set(changeSet.files.map((file) => file.path));
+// checked rather than trusted: a file must be one the review covers (not one
+// ignore_paths leaves out, which nothing read), and a line one the diff shows.
+// Anything else is dropped, never guessed at.
+function checkedRequirements(
+  entries: ModelRequirement[] | undefined,
+  files: ChangedFile[],
+  changeSet: ChangeSet,
+): IssueRequirement[] {
+  const known = new Set(files.map((file) => file.path));
   return (entries ?? []).flatMap((entry) => {
     const text = entry.text.trim();
     if (!text) return [];
@@ -101,6 +110,7 @@ export async function generateWalkthrough(
       ? settings.highLevelSummaryInstructions.trim() || DEFAULT_HIGH_LEVEL_SUMMARY_INSTRUCTIONS
       : undefined,
     linkedIssues: linked,
+    ...(linked && issues.knownGaps?.length ? { knownGaps: issues.knownGaps } : {}),
     candidateIssues: candidates,
     ...(risky.length ? { riskFacts: riskFacts(risky) } : {}),
   };
@@ -133,6 +143,22 @@ export async function generateWalkthrough(
   const linkedByRef = new Map((linked ?? []).map((issue) => [issue.ref, issue]));
   const candidateByRef = new Map((candidates ?? []).map((issue) => [issue.ref, issue]));
   const issueRef = ({ body: _body, ...ref }: IssueContext) => ref;
+  const linkedIssues = linked
+    ? (output.linkedIssues ?? []).flatMap((entry) => {
+        const issue = linkedByRef.get(entry.ref.trim());
+        if (!issue) return [];
+        linkedByRef.delete(issue.ref);
+        const requirements = checkedRequirements(entry.requirements, files, changeSet);
+        return [
+          {
+            ...issueRef(issue),
+            assessment: entry.assessment,
+            note: entry.note.trim(),
+            ...(requirements.length ? { requirements } : {}),
+          },
+        ];
+      })
+    : undefined;
   return {
     walkthrough: {
       overview: output.overview.trim(),
@@ -142,22 +168,17 @@ export async function generateWalkthrough(
       blastRadius: output.blastRadius,
       ...(diagram ? { sequenceDiagram: diagram } : {}),
       ...(extras.highLevelSummary !== undefined && summary ? { highLevelSummary: summary } : {}),
-      ...(linked
+      ...(linkedIssues ? { linkedIssues } : {}),
+      // Set whenever the tracker was read, even with nothing linked: an issue
+      // no longer linked is how its gaps resolve. An issue the model left out
+      // or gave no requirements for is linked but not assessed, which says
+      // nothing about its gaps.
+      ...(settings.assessLinkedIssues && issues.linked
         ? {
-            linkedIssues: (output.linkedIssues ?? []).flatMap((entry) => {
-              const issue = linkedByRef.get(entry.ref.trim());
-              if (!issue) return [];
-              linkedByRef.delete(issue.ref);
-              const requirements = checkedRequirements(entry.requirements, changeSet);
-              return [
-                {
-                  ...issueRef(issue),
-                  assessment: entry.assessment,
-                  note: entry.note.trim(),
-                  ...(requirements.length ? { requirements } : {}),
-                },
-              ];
-            }),
+            requirementChecks: {
+              linked: issues.linked.map((issue) => issue.ref),
+              assessed: (linkedIssues ?? []).filter((issue) => issue.requirements?.length).map((issue) => issue.ref),
+            },
           }
         : {}),
       ...(candidates

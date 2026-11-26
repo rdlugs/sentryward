@@ -520,8 +520,8 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const patternRules = checkPatternRules(scoped, changeSet, config, input.ignoredFingerprints, guardedOnly);
   // Missing requirements of linked issues, from the walkthrough. Recomputed
   // every run (an incremental one too), so they are never carried over.
-  const gaps = requirementGapFindings(walkthrough, changeSet, input.ignoredFingerprints);
-  const reviewed = [...verified.findings, ...toolFindings, ...patternRules.findings, ...gaps].sort(compareFindings);
+  const gaps = requirementGapFindings(walkthrough, changeSet, config, input.ignoredFingerprints);
+  const reviewed = [...verified.findings, ...toolFindings, ...patternRules.findings, ...gaps.findings].sort(compareFindings);
   // The cap covers model, tool and rule findings together; the model's own
   // were already capped after the claim checks.
   const overLimit = Math.max(0, reviewed.length - config.review.maxFindings);
@@ -548,6 +548,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     ...(Object.entries(verified.dropped) as [DropReason, number][]),
     ...(Object.entries(tools?.dropped ?? {}) as [DropReason, number][]),
     ...(Object.entries(patternRules.dropped) as [DropReason, number][]),
+    ...(Object.entries(gaps.dropped) as [DropReason, number][]),
     ["duplicate", toolDuplicates],
     ["over_limit", overLimit],
   ];

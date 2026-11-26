@@ -326,10 +326,17 @@ export async function applyMerge(repositoryId: string, number: number): Promise<
 // Adds a merged change's unaddressed findings to the backlog and returns the
 // fingerprints added or reopened. Ignored for any other reason than "fix
 // later" (a false positive, intentional) is a decision already made about the
-// finding, not work left to do.
+// finding, not work left to do. Requirement gaps stay with the change: what a
+// linked issue still asks for is the issue's to track, and a backlog item
+// resolves only when a later review reads its file, which a gap does not have.
 async function promote(tx: Tx, repositoryId: string, number: number, branch: string, mergedAt: Date): Promise<string[]> {
   const findings = await tx.finding.findMany({
-    where: { repositoryId, number, OR: [{ state: "open" }, { state: "ignored", ignoreReason: "fix_later" }] },
+    where: {
+      repositoryId,
+      number,
+      kind: { not: "requirement_gap" },
+      OR: [{ state: "open" }, { state: "ignored", ignoreReason: "fix_later" }],
+    },
   });
   if (!findings.length) return [];
   const existing = await tx.backlogItem.findMany({

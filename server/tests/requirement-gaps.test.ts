@@ -38,7 +38,13 @@ describe("repairWalkthroughOutput requirements", () => {
             ref: "#1",
             assessment: "partial",
             note: "n",
-            requirements: [{ requirement: "Export CSV", status: "Done-ish", path: "src/app.ts", line: "11" }, { status: "met" }],
+            requirements: [
+              { requirement: "Export CSV", status: "Done-ish", path: "src/app.ts", line: "11" },
+              { status: "met" },
+              { text: "Log it", status: "Not met" },
+              { text: "Count it", status: "completed" },
+              { text: "Page it", status: "partly-met" },
+            ],
           },
           { ref: "#2", assessment: "addressed", note: "n" },
         ],
@@ -51,7 +57,13 @@ describe("repairWalkthroughOutput requirements", () => {
         ref: "#1",
         assessment: "partial",
         note: "n",
-        requirements: [{ text: "Export CSV", status: "unclear", file: "src/app.ts", line: 11, fix: "" }],
+        requirements: [
+          { text: "Export CSV", status: "unclear", file: "src/app.ts", line: 11, fix: "" },
+          // Common wordings repair to the status they mean, so a gap is not lost to unclear.
+          { text: "Log it", status: "missing", file: "", line: 0, fix: "" },
+          { text: "Count it", status: "met", file: "", line: 0, fix: "" },
+          { text: "Page it", status: "partial", file: "", line: 0, fix: "" },
+        ],
       },
       { ref: "#2", assessment: "addressed", note: "n", requirements: [] },
     ]);
@@ -95,6 +107,44 @@ describe("generateWalkthrough requirements", () => {
     const model = fakeModel({ walkthrough: walkthroughWith([]) });
     const { walkthrough } = await generateWalkthrough(model.generate, change, change.files, config(), { linked: [issue("#1")] });
     expect(walkthrough.linkedIssues![0]).not.toHaveProperty("requirements");
+    // Linked, but not split into requirements, so not assessed.
+    expect(walkthrough.requirementChecks).toEqual({ linked: ["#1"], assessed: [] });
+  });
+
+  it("does not place a requirement in a file the review ignores", async () => {
+    const model = fakeModel({ walkthrough: walkthroughWith([requirement("Logs it", "missing", "src/app.ts", 11)]) });
+    // src/app.ts is changed but not among the files the review covers.
+    const { walkthrough } = await generateWalkthrough(model.generate, change, [], config(), { linked: [issue("#1")] });
+    expect(walkthrough.linkedIssues![0]!.requirements).toEqual([{ text: "Logs it", status: "missing" }]);
+  });
+
+  it("records which linked issues it assessed, even when none are linked", async () => {
+    const model = fakeModel({ walkthrough: walkthroughWith([requirement("Logs it", "missing")]) });
+    const linked = await generateWalkthrough(model.generate, change, change.files, config(), { linked: [issue("#1"), issue("#2")] });
+    // #2 was left out by the model: linked, not assessed.
+    expect(linked.walkthrough.requirementChecks).toEqual({ linked: ["#1", "#2"], assessed: ["#1"] });
+
+    const none = await generateWalkthrough(model.generate, change, change.files, config(), { linked: [] });
+    expect(none.walkthrough.requirementChecks).toEqual({ linked: [], assessed: [] });
+
+    // An unreadable tracker or the setting off made no check at all.
+    const unread = await generateWalkthrough(model.generate, change, change.files, config(), {});
+    expect(unread.walkthrough).not.toHaveProperty("requirementChecks");
+    const off = await generateWalkthrough(model.generate, change, change.files, config({ output: { assessLinkedIssues: false } }), {
+      linked: [issue("#1")],
+    });
+    expect(off.walkthrough).not.toHaveProperty("requirementChecks");
+  });
+
+  it("asks the model to keep the wording of earlier gaps", async () => {
+    const model = fakeModel({ walkthrough: walkthroughWith([]) });
+    await generateWalkthrough(model.generate, change, change.files, config(), { linked: [issue("#1")], knownGaps: ["#1: Logs each export"] });
+    expect(model.requests[0]!.prompt).toContain("use its text exactly");
+    expect(model.requests[0]!.prompt).toContain("#1: Logs each export");
+
+    const fresh = fakeModel({ walkthrough: walkthroughWith([]) });
+    await generateWalkthrough(fresh.generate, change, change.files, config(), { linked: [issue("#1")] });
+    expect(fresh.requests[0]!.prompt).not.toContain("use its text exactly");
   });
 });
 
@@ -120,8 +170,11 @@ describe("requirementGapFindings", () => {
     ],
   };
 
+  const gapsOf = (w: Walkthrough | undefined, ignored?: Set<string>, override: ConfigOverride = {}) =>
+    requirementGapFindings(w, change, config(override), ignored).findings;
+
   it("turns each missing requirement into a major gap, partial ones not", () => {
-    const gaps = requirementGapFindings(walkthrough, change);
+    const gaps = gapsOf(walkthrough);
     expect(gaps.map((gap) => [gap.title, gap.file, gap.startLine])).toEqual([
       ["#1: Logs it", "", 1],
       ["#1: Guards c", "src/app.ts", 12],
@@ -134,20 +187,39 @@ describe("requirementGapFindings", () => {
       body: "#1 (Export) asks for this, and the change does not do it. Add a log line.",
     });
     // Stable across runs, so the backlog keeps one row per gap.
-    expect(requirementGapFindings(walkthrough, change).map((gap) => gap.fingerprint)).toEqual(gaps.map((gap) => gap.fingerprint));
+    expect(gapsOf(walkthrough).map((gap) => gap.fingerprint)).toEqual(gaps.map((gap) => gap.fingerprint));
+  });
+
+  it("keeps a gap's identity when the model places it in another file or none", () => {
+    const moved = (file?: string): Walkthrough => ({
+      ...walkthrough,
+      linkedIssues: [{ ...walkthrough.linkedIssues![0]!, requirements: [{ text: "Logs it", status: "missing", ...(file ? { file } : {}) }] }],
+    });
+    const [none] = gapsOf(moved());
+    const [placed] = gapsOf(moved("src/app.ts"));
+    expect(placed!.file).toBe("src/app.ts");
+    expect(placed!.fingerprint).toBe(none!.fingerprint);
+    // So a dismissal made while it had no file still holds once it has one.
+    expect(gapsOf(moved("src/app.ts"), new Set([none!.fingerprint]))).toEqual([]);
+  });
+
+  it("holds gaps to the workspace's floor and minimum confidence, not its categories", () => {
+    const floor = requirementGapFindings(walkthrough, change, config({ review: { severityFloor: "critical" } }));
+    expect(floor).toEqual({ findings: [], dropped: { below_floor: 2 } });
+    const confidence = requirementGapFindings(walkthrough, change, config({ review: { minConfidence: 0.6 } }));
+    expect(confidence).toEqual({ findings: [], dropped: { low_confidence: 2 } });
+    expect(gapsOf(walkthrough, undefined, { review: { categories: ["security"] } })).toHaveLength(2);
   });
 
   it("skips a gap the team dismissed", () => {
-    const [dismissed] = requirementGapFindings(walkthrough, change);
-    const gaps = requirementGapFindings(walkthrough, change, new Set([dismissed!.fingerprint]));
+    const [dismissed] = gapsOf(walkthrough);
+    const gaps = gapsOf(walkthrough, new Set([dismissed!.fingerprint]));
     expect(gaps.map((gap) => gap.title)).toEqual(["#1: Guards c"]);
   });
 
   it("has nothing to say without linked issues or requirements", () => {
-    expect(requirementGapFindings(undefined, change)).toEqual([]);
-    expect(requirementGapFindings({ ...walkthrough, linkedIssues: [{ ...walkthrough.linkedIssues![0]!, requirements: undefined }] }, change)).toEqual(
-      [],
-    );
+    expect(gapsOf(undefined)).toEqual([]);
+    expect(gapsOf({ ...walkthrough, linkedIssues: [{ ...walkthrough.linkedIssues![0]!, requirements: undefined }] })).toEqual([]);
   });
 });
 
@@ -191,11 +263,11 @@ describe("runReview with requirement gaps", () => {
 });
 
 describe("findingTransitions for requirement gaps", () => {
-  const gap = (fingerprint: string, file = ""): KnownFinding => ({
+  const gap = (fingerprint: string, file = "", ref = "#1"): KnownFinding => ({
     fingerprint,
     state: "open",
     file,
-    title: `#1: ${fingerprint}`,
+    title: `${ref}: ${fingerprint}`,
     startLine: 1,
     severity: "major",
     category: "logic",
@@ -217,5 +289,34 @@ describe("findingTransitions for requirement gaps", () => {
     // A failed walkthrough (or an unreadable tracker) says nothing about them.
     const { walkthrough: _walkthrough, ...unassessed } = result;
     expect(findingTransitions(existing, unassessed).resolved).toEqual([]);
+  });
+
+  const checked = async (linked: string[], assessed: string[], dropped: Record<string, number> = {}) => {
+    const result = await runReview(
+      { changeSet: makeChangeSet(), config: config(), issues: { linked: [issue("#1")] } },
+      {
+        generate: fakeModel({ code_review: { findings: [] }, walkthrough: walkthroughWith([requirement("Logs it", "met")]) }).generate,
+        now: () => new Date("2026-10-04T12:00:00Z"),
+      },
+    );
+    return {
+      ...result,
+      walkthrough: { ...result.walkthrough!, requirementChecks: { linked, assessed } },
+      validation: { ...result.validation, dropped: { ...result.validation.dropped, ...dropped } },
+    };
+  };
+
+  it("resolves a gap only for an issue this run checked again or no longer links", async () => {
+    const existing = [gap("aaaaaaaaaaaaaaaa", "", "#1"), gap("bbbbbbbbbbbbbbbb", "", "#2"), gap("cccccccccccccccc", "", "#3")];
+    // #1 assessed again, #2 linked but left out by the model, #3 no longer linked.
+    expect(findingTransitions(existing, await checked(["#1", "#2"], ["#1"])).resolved).toEqual([
+      "aaaaaaaaaaaaaaaa",
+      "cccccccccccccccc",
+    ]);
+  });
+
+  it("resolves no gap when max_findings may have cut it", async () => {
+    const existing = [gap("aaaaaaaaaaaaaaaa")];
+    expect(findingTransitions(existing, await checked(["#1"], ["#1"], { over_limit: 1 })).resolved).toEqual([]);
   });
 });

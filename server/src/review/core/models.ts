@@ -351,6 +351,12 @@ export const walkthroughSchema = z.object({
     )
     .optional(),
   relatedIssues: z.array(issueRefSchema.extend({ reason: z.string() })).optional(),
+  // What this run's linked-issue check covered, for the gap lifecycle
+  // (worker/syncFindings.ts), kept apart from linkedIssues, which is what is
+  // shown. linked: every issue the forge returned, even none; assessed: the
+  // ones the model split into requirements. Absent when the check did not run
+  // (setting off, tracker unreadable) and on results from before it existed.
+  requirementChecks: z.object({ linked: z.array(z.string()), assessed: z.array(z.string()) }).optional(),
   // Optional: results stored before it existed have none.
   riskyAreas: z.array(riskyAreaSchema).optional(),
 });

@@ -193,6 +193,32 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
   return (allowed as readonly string[]).includes(normalised) ? (normalised as T) : fallback;
 }
 
+// Ways a model says a requirement's status other than the four it was given.
+// Without them, "not met" would repair to unclear and a gap would go unreported.
+const REQUIREMENT_STATUS_SYNONYMS: Record<string, (typeof REQUIREMENT_STATUSES)[number]> = {
+  not_met: "missing",
+  unmet: "missing",
+  not_addressed: "missing",
+  not_done: "missing",
+  absent: "missing",
+  todo: "missing",
+  done: "met",
+  complete: "met",
+  completed: "met",
+  satisfied: "met",
+  addressed: "met",
+  partially_met: "partial",
+  partly_met: "partial",
+  partially: "partial",
+};
+
+function requirementStatus(value: unknown): (typeof REQUIREMENT_STATUSES)[number] {
+  const exact = enumValue(value, REQUIREMENT_STATUSES);
+  if (exact) return exact;
+  const key = enumValue(value, Object.keys(REQUIREMENT_STATUS_SYNONYMS));
+  return key ? REQUIREMENT_STATUS_SYNONYMS[key]! : "unclear";
+}
+
 function numberValue(value: unknown): unknown {
   if (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value))) return Number(value);
   return value;
@@ -277,7 +303,7 @@ export function repairWalkthroughOutput(raw: unknown): unknown {
                   const line = Number(numberValue(item.line ?? item.startLine));
                   return {
                     text: String(item.text ?? item.requirement),
-                    status: enumValue(item.status, REQUIREMENT_STATUSES, "unclear"),
+                    status: requirementStatus(item.status),
                     file: typeof (item.file ?? item.path) === "string" ? String(item.file ?? item.path) : "",
                     line: Number.isFinite(line) ? line : 0,
                     fix: typeof item.fix === "string" ? item.fix : "",

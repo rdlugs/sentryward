@@ -17,11 +17,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   a one-sentence fix for the rest. A file is kept only when the change touches
   it and a line only when the diff shows it. Each missing requirement is also a
   `requirement_gap` finding under "Requirements not met": severity major, so
-  it blocks only when `block_on` is `major` or lower, tracked across runs, and
-  resolved only by a run that assessed the linked issues again. Gaps placed in
-  no changed file show "Linked issue" instead of a path. The review page's
-  walkthrough card lists the requirements, and results stored before this
-  change still render as before.
+  it blocks only when `block_on` is `major` or lower, and subject to
+  `severity_floor` and `min_confidence` (not `categories`). Gaps are tracked
+  across runs by issue and requirement text, not by the file the model names,
+  and earlier gaps are passed back to the model so it keeps their wording. A
+  gap is resolved only by a run that split its own issue into requirements
+  again, or once the change stops linking the issue; a failed summary, an
+  unreadable tracker, a skipped issue or a run that hit `max_findings` leaves
+  it open. Gaps are not promoted to the branch backlog on merge, and a
+  requirement is never placed in a file `ignore_paths` excludes. Statuses like
+  "not met" or "done" are read as missing or met. Gaps placed in no changed
+  file show "Linked issue" instead of a path, on the backlog page too. The
+  review page's walkthrough card lists the requirements, and results stored
+  before this change still render as before.
 
 - Pause on a burst of pushes. `triggers.pause_on_burst` (**Pause after a burst
   of pushes** on the Triggers tab, off by default) stops automatic push reviews

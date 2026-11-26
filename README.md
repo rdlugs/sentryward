@@ -694,12 +694,18 @@ it finishes it publishes, each step independently:
   | `output.walkthrough_blast_radius` | The blast radius segment of the meta line |
 
   Only issues the forge returned are ever shown, and a requirement's file and
-  line are kept only when the change touches that file and the diff shows that
-  line. Missing requirements are listed under "Requirements not met" and
-  tracked in the findings backlog like other findings: a run that assessed the
-  linked issues and no longer finds one resolves it, while a run whose summary
-  failed leaves it open. They are `major`, so they block only when `block_on`
-  is `major` or lower, and dismissing one keeps it out of later runs.
+  line are kept only when the review covers that file (not one `ignore_paths`
+  leaves out) and the diff shows that line. Missing requirements are listed
+  under "Requirements not met" and tracked on the change like other findings.
+  One is resolved only when a run splits its issue into requirements again and
+  no longer finds it, or when the change no longer links the issue; a run whose
+  summary failed, whose tracker could not be read, that skipped that issue, or
+  that hit `max_findings` leaves it open. They are `major` with confidence 0.5,
+  so `severity_floor` and `min_confidence` apply to them (`categories` does
+  not), and they block only when `block_on` is `major` or lower. Their identity
+  ignores the file named for them, and earlier gaps are shown to the model so
+  it keeps their wording, so dismissing one keeps it out of later runs. They
+  are not added to the branch backlog when the change merges.
 
   Hiding the labels or blast
   radius segments only changes the comment text, not the native labels below.

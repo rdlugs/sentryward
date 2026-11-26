@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.ts";
 import { normaliseTitle } from "../review/core/fingerprint.ts";
+import { gapIssueRef } from "../review/core/requirementGaps.ts";
 import type { InvalidatedReason, Lifecycle, ReviewResult } from "../review/core/models.ts";
 import type { Severity } from "../review/core/severity.ts";
 
@@ -97,6 +98,26 @@ function movedFindings(existing: KnownFinding[], result: ReviewResult): Map<stri
   return moved;
 }
 
+// Whether a run that no longer reports an open requirement gap settles it. A
+// gap comes from the walkthrough's linked-issue check, not from reading its
+// file, so only that check can: its issue was split into requirements again
+// without it, or the change no longer links the issue. A failed walkthrough,
+// an unreadable tracker or the setting turned off made no check
+// (requirementChecks absent), and an issue the model left out or gave no
+// requirements for was not checked either. A run that hit max_findings may
+// have cut the gap rather than not found it.
+function gapSettledBy(result: ReviewResult): (row: KnownFinding) => boolean {
+  const checks = result.walkthrough?.requirementChecks;
+  if (!checks || (result.validation.dropped.over_limit ?? 0) > 0) return () => false;
+  const linked = new Set(checks.linked);
+  const assessed = new Set(checks.assessed);
+  return (row) => {
+    const ref = gapIssueRef(row.title);
+    if (ref === undefined) return false;
+    return !linked.has(ref) || assessed.has(ref);
+  };
+}
+
 // Which findings one run moves between open and resolved. A finding is resolved
 // only when this run actually read its file (or the file left the change, or
 // the change deletes it, or the finding moved to another file); a partial run
@@ -110,16 +131,13 @@ export function findingTransitions(existing: KnownFinding[], result: ReviewResul
   const deleted = new Set(result.files.filter((file) => file.changeType === "deleted").map((file) => file.path));
   const reported = new Set(result.findings.map((finding) => finding.fingerprint));
   const moved = movedFindings(existing, result);
-  // A requirement gap comes from the walkthrough's linked-issue check, not
-  // from reading its file, so only a run that made that check can say it is
-  // met. A failed walkthrough or an unreadable tracker says nothing.
-  const issuesAssessed = result.walkthrough?.linkedIssues !== undefined;
+  const gapSettled = gapSettledBy(result);
   return {
     resolved: existing
       .filter((row) => row.state === "open" && !reported.has(row.fingerprint))
       .filter((row) =>
         row.kind === "requirement_gap"
-          ? issuesAssessed
+          ? gapSettled(row)
           : reviewed.has(row.file) || !changed.has(row.file) || deleted.has(row.file) || moved.has(row.fingerprint),
       )
       .map((row) => row.fingerprint),

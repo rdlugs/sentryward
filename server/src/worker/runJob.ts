@@ -68,6 +68,9 @@ import { findingLifecycle, findingTransitions, KNOWN_FINDING, syncFindings, thre
 // How many recent dismissals to feed into the review prompt; bounded so a noisy
 // repository cannot grow the prompt without limit.
 const MAX_REJECTED_FINDINGS = 20;
+// Earlier requirement gaps listed to the walkthrough so it keeps their
+// wording: enough for a few linked issues' worth (8 requirements each).
+const MAX_KNOWN_GAPS = 24;
 
 export interface RunJobDeps {
   adapterFor: (connection: ForgeConnection) => Forge;
@@ -113,13 +116,31 @@ function message(err: unknown): string {
 
 // Issues for the walkthrough, best effort: a tracker the token cannot read
 // (or one that is turned off) costs a warning, never the review.
-async function walkthroughIssues(forge: Forge, changeSet: ChangeSet, config: Config, warnings: string[]): Promise<WalkthroughIssues> {
+async function walkthroughIssues(
+  forge: Forge,
+  changeSet: ChangeSet,
+  config: Config,
+  warnings: string[],
+  change: { repositoryId: string; number: number },
+): Promise<WalkthroughIssues> {
   const issues: WalkthroughIssues = {};
   if (config.output.assessLinkedIssues) {
-    issues.linked = await forge.getLinkedIssues(changeSet).catch((err: unknown) => {
-      warnings.push(`Linked issues could not be read: ${message(err)}`);
-      return undefined;
-    });
+    const [linked, known] = await Promise.all([
+      forge.getLinkedIssues(changeSet).catch((err: unknown) => {
+        warnings.push(`Linked issues could not be read: ${message(err)}`);
+        return undefined;
+      }),
+      // Every state: a resolved gap that comes back, or a dismissed one the
+      // model words afresh, must keep its fingerprint too.
+      prisma.finding.findMany({
+        where: { ...change, kind: "requirement_gap" },
+        orderBy: { lastSeenAt: "desc" },
+        take: MAX_KNOWN_GAPS,
+        select: { title: true },
+      }),
+    ]);
+    issues.linked = linked;
+    if (known.length) issues.knownGaps = known.map((row) => row.title);
   }
   if (config.output.relatedIssues) {
     const terms = searchTerms(changeSet.title);
@@ -481,7 +502,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     }
   }
 
-  const issues = walkthrough ? await walkthroughIssues(forge, changeSet, config, warnings) : undefined;
+  const issues = walkthrough
+    ? await walkthroughIssues(forge, changeSet, config, warnings, { repositoryId: repo.id, number: job.number })
+    : undefined;
   // Probed with the fallbacks the policy allows, not every configured one.
   const capabilities = await prepareCapabilities({
     workspaceId: repo.connection.workspaceId,
