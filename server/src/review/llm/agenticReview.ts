@@ -2,6 +2,7 @@ import { agentTools, readsContext, type SearchBudget } from "../agent/tools.ts";
 import type { Config } from "../config/schema.ts";
 import type { ChangeSet, RejectedFinding } from "../core/models.ts";
 import type { Chunk } from "../context/chunk.ts";
+import type { AgentFile } from "../context/agentFiles.ts";
 import type { ContextSource } from "../context/gather.ts";
 import { ToolsUnsupportedError, agenticSystemPrompt, type AgenticResponse, type GenerateAgentic } from "./agentic.ts";
 import type { Lens } from "./lenses.ts";
@@ -39,6 +40,7 @@ export async function reviewChunkAgentic(
   manifest?: ManifestEntry[],
   focus?: string,
   lens?: Lens,
+  agentFiles?: AgentFile[],
 ): Promise<AgenticChunkReview> {
   const models = modelChain(config.llm, "review");
   const errors: unknown[] = [];
@@ -53,7 +55,7 @@ export async function reviewChunkAgentic(
       response = await generateAgentic({
         model,
         system,
-        prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest, focus),
+        prompt: reviewUserPrompt(changeSet, chunk, totalChunks, config, rejected, manifest, focus, agentFiles),
         schema,
         schemaName: "code_review",
         repair: repairReviewOutput,

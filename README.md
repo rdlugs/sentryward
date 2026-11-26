@@ -62,6 +62,7 @@ statuses. The dashboard tracks reviews and findings across runs.
   [model capabilities](#model-capabilities) ·
   [thinking and agentic context](#thinking-and-agentic-context) ·
   [deep review](#deep-review) ·
+  [coding-agent instruction files](#coding-agent-instruction-files) ·
   [Ollama](#ollama) ·
   [`.sentryward.yaml`](#sentrywardyaml-reference) ·
   [review rules](#review-rules) ·
@@ -1627,6 +1628,42 @@ name (`· reviewer API contracts`). Each takes:
   reviews, and it sends no notifications, but its model calls count towards
   usage. Re-running a trial tries the same draft again.
 
+### Coding-agent instruction files
+
+`review.agent_files` shows the review the conventions a repository already
+writes for coding agents, so they do not have to be copied into the Guidance
+settings. Off by default; turn it on with **Coding-agent instruction files** on
+the Guidance tab, or in `.sentryward.yaml`:
+
+```yaml
+review:
+  agent_files:
+    enabled: true
+    max_chars: 8000   # 1000-32000, the total each review pass is shown
+```
+
+- **Which files:** `CLAUDE.md` and `AGENTS.md` in the repository root and in
+  every folder above a changed file (at most 12 folders, the deepest first;
+  folders of ignored files do not count), plus `.cursorrules`,
+  `.github/copilot-instructions.md` and the `.cursor/rules/**/*.mdc` rules that
+  apply: those with `alwaysApply: true` or `globs` matching a changed file.
+  Rules Cursor attaches by hand or by description are left out.
+- **Base revision only,** like `.sentryward.yaml`: a change cannot add or edit
+  the instructions its own review follows.
+- **Guidance, never rules:** they go into the prompt as low-priority hints,
+  ranked below the team rules, the categories and Sentryward's own
+  instructions, and they cannot block or fail a review. Anyone with push
+  access wrote them, so they are wrapped as untrusted text and the model is told
+  to ignore anything that addresses an agent (run a command, skip files,
+  suppress findings).
+- **Size:** the nearest folder's files come first, so when `max_chars` is
+  reached the least specific text is cut. A file over 64 KB is skipped. Files
+  left out, and files that could not be read, show as warnings on the review;
+  the review itself always runs.
+- **Cost:** a few forge reads per review (one directory listing per folder,
+  then the files found, cached per commit) and up to `max_chars / 4` more
+  prompt tokens per pass. The review page's sidebar lists the files it used.
+
 ### Ollama
 
 Add Ollama under LLM Connections and enter its OpenAI-compatible base URL. For
@@ -1685,6 +1722,9 @@ review:
     enabled: false          # true | false | auto: one more model call per pass for each specialist below
     auto_on: [auth, database, api]  # with auto: the risky changes that switch it on
     specialists: [naming, invariants, boundaries, contracts, tests, leaks, consistency]
+  agent_files:              # CLAUDE.md, AGENTS.md, Cursor and Copilot rules as guidance (see Coding-agent instruction files)
+    enabled: false          # read from the base revision; never rules, never blocking
+    max_chars: 8000         # what each pass is shown, nearest folder first (1000-32000)
 output:
   walkthrough: true         # the PR summary
   post_inline: true

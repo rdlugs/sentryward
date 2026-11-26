@@ -870,6 +870,17 @@ describe("Review detail page", () => {
     expect(within(sidebar).getByText("Focus", { selector: "dt" }).closest("div")).toHaveTextContent("the auth logic")
   })
 
+  it("lists the coding-agent instruction files the review used", async () => {
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: { review: { ...detail, result: { ...detail.result!, agentFiles: ["src/AGENTS.md", "CLAUDE.md"] } } },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(within(sidebar).getByText("Agent files", { selector: "dt" }).closest("div")).toHaveTextContent("src/AGENTS.md, CLAUDE.md")
+  })
+
   it("falls back to the branches the review recorded when the forge cannot be read", async () => {
     const result = { ...detail.result!, change: { ...detail.result!.change, headRef: "fix/login", baseRef: "develop" } }
     mockApi({

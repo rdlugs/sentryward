@@ -43,6 +43,7 @@ const effective = {
     context: "static",
     agent: { maxSteps: 8, maxToolTokens: 30000, maxSearches: 5 },
     deep: { enabled: false, autoOn: ["auth", "database", "api"], specialists: ["naming", "tests"] },
+    agentFiles: { enabled: false, maxChars: 8000 },
   },
   // The server's quiet defaults (DEFAULT_CONFIG in server/src/review/config/schema.ts).
   output: {
@@ -475,6 +476,30 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
 
     await waitFor(() => expect(body).toMatchObject({ settings: { review: { deep: { enabled: true, specialists: ["tests"] } } } }))
+  })
+
+  it("turns on coding-agent instruction files with a character cap on the Guidance tab", async () => {
+    let body: unknown
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          body = JSON.parse(String(init?.body))
+          return jsonResponse(200, globalConfig((body as { settings: Record<string, unknown> }).settings))
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Guidance")
+    await userEvent.click(await screen.findByRole("combobox", { name: "Coding-agent instruction files" }))
+    await userEvent.click(screen.getByRole("option", { name: "On" }))
+    const cap = screen.getByLabelText("Max instruction characters")
+    await userEvent.clear(cap)
+    await userEvent.type(cap, "4000")
+    await selectConnectionOnLlmTab()
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+
+    await waitFor(() => expect(body).toMatchObject({ settings: { review: { agentFiles: { enabled: true, maxChars: 4000 } } } }))
   })
 
   it("sets deep review to auto and picks the kinds of change it runs for", async () => {

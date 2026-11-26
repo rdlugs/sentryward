@@ -3,6 +3,7 @@ import type { ForgeConnection, IgnoreReason, ReviewJob } from "../generated/pris
 import { prisma } from "../lib/prisma.ts";
 import { skipReason, walkthroughEnabled } from "../review/config/filters.ts";
 import { loadDashboardConfigs, loadReviewConfig } from "../review/config/load.ts";
+import { loadAgentFiles, type AgentFile } from "../review/context/agentFiles.ts";
 import { customReviewerSchema, type Config } from "../review/config/schema.ts";
 import type { ChangeSet, RejectedFinding, ToolAnnotation } from "../review/core/models.ts";
 import { priceUsage } from "../review/core/pricing/pricing.ts";
@@ -522,6 +523,23 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   const tools = config.review.toolFindings ? await toolAnnotations(forge, changeSet, warnings) : undefined;
 
+  // From the base revision, like the repository file: a change must not be
+  // able to steer its own review. Off means no forge calls at all.
+  let agentFiles: AgentFile[] | undefined;
+  if (config.review.agentFiles.enabled) {
+    const loadedFiles = await loadAgentFiles({
+      adapter: forge,
+      project: repo.fullPath,
+      ref: changeSet.forgeRef.baseSha,
+      changedFiles: changeSet.files,
+      ignorePaths: config.ignorePaths,
+      maxChars: config.review.agentFiles.maxChars,
+      cache: fileCache,
+    });
+    agentFiles = loadedFiles.files;
+    warnings.push(...loadedFiles.warnings);
+  }
+
   const increment = await incrementFor({
     job,
     project: repo.fullPath,
@@ -545,6 +563,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
         increment,
         toolAnnotations: tools,
         ...(job.focus ? { focus: job.focus } : {}),
+        ...(agentFiles?.length ? { agentFiles } : {}),
       },
       {
         generate: abortableGenerate(generate, watch.signal),

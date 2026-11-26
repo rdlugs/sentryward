@@ -108,6 +108,15 @@ const agentShape = {
   maxSearches: z.number().int().min(0).max(10),
 };
 
+// Instruction files written for coding agents (CLAUDE.md, AGENTS.md, Cursor
+// and Copilot rules), read from the base revision and shown to every review
+// pass as low-priority, untrusted hints (context/agentFiles.ts). Never rules:
+// they cannot block or fail a review. maxChars caps their total per pass.
+const agentFilesShape = {
+  enabled: z.boolean(),
+  maxChars: z.number().int().min(1000).max(32_000),
+};
+
 const reviewShape = {
   categories: z.array(categorySchema).min(1),
   // What is reported at all.
@@ -156,6 +165,7 @@ const reviewShape = {
   context: z.enum(CONTEXT_MODES),
   agent: z.strictObject(agentShape),
   deep: z.strictObject(deepShape),
+  agentFiles: z.strictObject(agentFilesShape),
 };
 
 export const SUMMARY_LOCATIONS = ["dynamic", "description", "comment"] as const;
@@ -467,6 +477,7 @@ export const configOverrideSchema = z
         ...reviewShape,
         agent: z.strictObject(agentShape).partial(),
         deep: z.strictObject(deepShape).partial(),
+        agentFiles: z.strictObject(agentFilesShape).partial(),
       })
       .partial(),
     output: z.strictObject(outputShape).partial(),
@@ -580,6 +591,7 @@ export const DEFAULT_CONFIG: Config = {
     context: "static",
     agent: { maxSteps: 8, maxToolTokens: 30_000, maxSearches: 5 },
     deep: { enabled: false, autoOn: [...RISK_KINDS], specialists: [...SPECIALISTS] },
+    agentFiles: { enabled: false, maxChars: 8000 },
   },
   // The quiet setup the Display tab offers as its Standard preset: findings
   // inline and in one summary comment with a short PR summary, without the

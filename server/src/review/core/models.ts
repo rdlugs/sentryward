@@ -423,6 +423,9 @@ export const reviewResultSchema = z.object({
   // The area this run was asked to look hardest at (ReviewJob.focus). The
   // requester's text, so it is escaped wherever it is rendered.
   focus: z.string().optional(),
+  // Coding-agent instruction files the review passes were shown as guidance
+  // (review.agentFiles), as repository paths. Absent when none were used.
+  agentFiles: z.array(z.string()).optional(),
   // Set when review.deep.enabled was "auto": whether the specialists ran, and
   // the selected risky areas considered by the decision. `matched` may be
   // non-empty with `ran: false` when risk fits only the general-lens plan.

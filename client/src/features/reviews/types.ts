@@ -197,6 +197,9 @@ export interface ReviewResult {
   // areas considered by the decision. `matched` can be non-empty with
   // `ran: false` when risk fit only the standard-pass plan.
   deepAuto?: { ran: boolean; matched: RiskyArea[] }
+  // Coding-agent instruction files the review passes were shown as guidance
+  // (review.agentFiles), as repository paths.
+  agentFiles?: string[]
   // Set when only the files changed since an earlier completed review were
   // reviewed again (server worker/incremental.ts).
   incremental?: { fromSha: string; toSha: string; files: string[]; carried: number }

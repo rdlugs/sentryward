@@ -54,6 +54,7 @@ const schema: ConfigSchema = {
       context: "static",
       agent: { maxSteps: 8, maxToolTokens: 30000, maxSearches: 5 },
       deep: { enabled: false, autoOn: ["auth", "database", "api"], specialists: ["naming", "tests"] },
+      agentFiles: { enabled: false, maxChars: 8000 },
     },
     output: {
       walkthrough: true,
@@ -157,6 +158,16 @@ describe("toSettings", () => {
     expect(toSettings({}, { ...form, choices: { ...form.choices, deepReview: "true" } }).review?.deep?.enabled).toBe(true)
   })
 
+  it("round-trips coding-agent instruction files and their character cap", () => {
+    const saved = { review: { agentFiles: { enabled: true, maxChars: 4000 } } }
+    const form = toForm(saved)
+    expect(form.choices.agentFiles).toBe("true")
+    expect(form.numbers.maxChars).toBe("4000")
+    expect(toSettings(saved, form)).toEqual(saved)
+    // Back to inherit for both drops the section.
+    expect(toSettings(saved, { ...form, choices: { ...form.choices, agentFiles: INHERIT }, numbers: { ...form.numbers, maxChars: "" } })).toEqual({})
+  })
+
   it("saves the trigger choices and skip lists", () => {
     const form = toForm({})
     const inherit = {
@@ -171,6 +182,7 @@ describe("toSettings", () => {
       thinkingSupport: INHERIT,
       toolSupport: INHERIT,
       deepReview: INHERIT,
+      agentFiles: INHERIT,
     }
     expect(form.choices).toEqual(inherit)
     const next = {

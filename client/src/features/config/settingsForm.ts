@@ -58,6 +58,7 @@ export const CHOICES = [
   { name: "thinkingSupport", key: "thinking", section: "llm.capabilities" },
   { name: "toolSupport", key: "tools", section: "llm.capabilities", boolean: true },
   { name: "deepReview", key: "enabled", section: "review.deep", boolean: true },
+  { name: "agentFiles", key: "enabled", section: "review.agentFiles", boolean: true },
 ] as const satisfies readonly { name: string; key?: string; section: string; boolean?: boolean }[]
 
 export type ChoiceName = (typeof CHOICES)[number]["name"]
@@ -90,10 +91,11 @@ export type NumberName =
   | "maxToolTokens"
   | "maxSearches"
   | "maxInlineComments"
+  | "maxChars"
 
 export interface NumberSpec {
   name: NumberName
-  section: "llm" | "review" | "review.agent" | "output"
+  section: "llm" | "review" | "review.agent" | "review.agentFiles" | "output"
   min: number
   max?: number
   step: number
@@ -121,6 +123,7 @@ export const NUMBERS: NumberSpec[] = [
   { name: "maxSearches", section: "review.agent", min: 0, max: 10, step: 1, integer: true },
   // null posts every inline comment.
   { name: "maxInlineComments", section: "output", min: 1, max: 100, step: 1, integer: true, nullable: "none" },
+  { name: "maxChars", section: "review.agentFiles", min: 1000, max: 32000, step: 1000, integer: true },
 ]
 
 // Router ids such as "openai/cx/gpt-5.6-sol(medium)" keep slashes and
@@ -707,6 +710,7 @@ export function baseConfig(schema: ConfigSchema, profile: string = schema.defaul
       ...preset.review,
       agent: { ...defaults.review.agent, ...preset.review?.agent },
       deep: { ...defaults.review.deep, ...preset.review?.deep },
+      agentFiles: { ...defaults.review.agentFiles, ...preset.review?.agentFiles },
     },
     output: { ...defaults.output, ...preset.output },
     triggers: { ...defaults.triggers, ...preset.triggers },
