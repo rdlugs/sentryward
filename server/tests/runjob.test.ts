@@ -143,6 +143,7 @@ function deps(
   const toolReads: string[] = [];
   const published: Published = { inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] };
   const forge = {
+    provider: "github" as const,
     getChange: async (_p: string, _n: number, cache?: ForgeCache) => {
       reads.push(cache ? "change:cached" : "change");
       if (options.changeError) throw options.changeError;

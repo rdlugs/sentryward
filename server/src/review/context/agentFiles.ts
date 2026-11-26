@@ -1,6 +1,7 @@
 import picomatch from "picomatch";
 import { parse } from "yaml";
 import { cacheKey, cached, type ForgeCache } from "../forge/cache.ts";
+import { FORGE_INFO } from "../forge/providers.ts";
 import type { ForgeAdapter } from "../forge/types.ts";
 import type { ChangedFile } from "../core/models.ts";
 import { mapLimit } from "../core/mapLimit.ts";
@@ -24,11 +25,11 @@ export interface AgentFilesResult {
 }
 
 export interface LoadAgentFilesInput {
-  adapter: Pick<ForgeAdapter, "host" | "getFileAtRef" | "listDirAtRef">;
+  adapter: Pick<ForgeAdapter, "provider" | "host" | "getFileAtRef" | "listDirAtRef">;
   project: string;
   // The base revision, never the head.
   ref: string;
-  changedFiles: Pick<ChangedFile, "path" | "previousPath">[];
+  changedFiles: Pick<ChangedFile, "path" | "previousPath" | "changeType" | "isBinary">[];
   ignorePaths: string[];
   maxChars: number;
   cache?: ForgeCache;
@@ -48,8 +49,9 @@ export const MAX_AGENT_DIRS = 12;
 // cannot crowd out ones that do.
 export const MAX_CURSOR_RULE_READS = 30;
 export const MAX_CURSOR_RULES = 10;
-// Cursor rule subfolders listed (one level only).
-const MAX_CURSOR_SUBDIRS = 5;
+// Folders listed under .cursor/rules, itself included, nearest levels first:
+// Cursor reads rules at any depth, but each folder is one more forge call.
+export const MAX_CURSOR_DIRS = 8;
 // The same limit as .sentryward.yaml: anything bigger is not a set of
 // conventions, so it is kept out of the prompt. GitLab's tree listing carries
 // no sizes, so the file is read before it can be checked.
@@ -77,15 +79,16 @@ const join = (folder: string, name: string) => (folder ? `${folder}/${name}` : n
 
 // A listing names a file plainly, or with "@" when it is a symlink (an AGENTS.md
 // pointing at CLAUDE.md is common). GitHub reads a symlink as its target's
-// text; GitLab reads it as the target's path, which resolveSymlink follows.
+// text; GitLab reads it as the target's path, which readResolved follows
+// (FORGE_INFO.symlinkReadsAs).
 function lists(entries: Set<string>, name: string): boolean {
   return entries.has(name) || entries.has(`${name}@`);
 }
 
 // The repository path a symlink's text names, when the text is a link target
 // at all: one line, no spaces. "" is a target outside the repository, which
-// is never read. null means the text is already the target's, as GitHub
-// returns it.
+// is never read. null means the text cannot be a target (or names the link
+// itself). Only used on forges that read a symlink as its target path.
 function symlinkTarget(linkPath: string, text: string): string | null {
   const target = text.trim();
   if (!target || /\s/.test(target)) return null;
@@ -198,9 +201,12 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
   const readFile = (path: string) =>
     attempt(() => cached(cache, cacheKey("file", adapter.host, project, path, ref), () => adapter.getFileAtRef(project, path, ref)));
 
-  // Files the review leaves out neither add folders nor match Cursor globs.
+  // Files the review leaves out (ignored, deleted, binary) neither add folders
+  // nor match Cursor globs. A rename keeps its old path: the file is still
+  // reviewed, and the conventions of the folder it left may still apply.
   const ignored = ignoreMatcher(input.ignorePaths);
   const reviewedPaths = input.changedFiles
+    .filter((file) => file.changeType !== "deleted" && !file.isBinary)
     .flatMap((file) => [file.path, file.previousPath])
     .filter((path): path is string => !!path && !ignored(path));
 
@@ -216,33 +222,37 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
   });
 
   const wanted: string[] = [];
+  // Known symlinks ("@" in a listing), and files tried only because a
+  // truncated listing could not say whether they exist, let alone their mode.
   const symlinks = new Set<string>();
+  const maybeSymlinks = new Set<string>();
   let rootEntries = new Set<string>();
+  let rootTruncated = false;
   const want = (entries: Set<string>, folder: string, name: string, truncated = false) => {
     // A forge caps a listing; past the cap the file may still be there.
     if (!lists(entries, name) && !truncated) return;
     const path = join(folder, name);
     wanted.push(path);
     if (entries.has(`${name}@`)) symlinks.add(path);
+    else if (!entries.has(name)) maybeSymlinks.add(path);
   };
   for (const { folder, listing } of listings) {
     if (!listing) continue;
     const entries = new Set(listing.entries);
-    if (folder === "") rootEntries = entries;
+    if (folder === "") {
+      rootEntries = entries;
+      rootTruncated = listing.truncated;
+    }
     for (const name of FOLDER_FILES) want(entries, folder, name, listing.truncated);
   }
-  for (const name of ROOT_FILES) want(rootEntries, "", name);
-  if (rootEntries.has(".github/")) wanted.push(COPILOT_FILE);
+  for (const name of ROOT_FILES) want(rootEntries, "", name, rootTruncated);
+  // Past a truncated root listing, .github/ and .cursor/ may exist unlisted; a
+  // missing one costs a single read that finds nothing.
+  if (rootEntries.has(".github/") || rootTruncated) wanted.push(COPILOT_FILE);
 
   const cursorRules: string[] = [];
-  if (rootEntries.has(".cursor/")) {
-    const top = await listDir(CURSOR_RULES_DIR);
-    const subdirs = (top?.entries ?? [])
-      .filter((entry) => entry.endsWith("/"))
-      .slice(0, MAX_CURSOR_SUBDIRS)
-      .map((entry) => join(CURSOR_RULES_DIR, entry.slice(0, -1)));
-    const nested = await mapLimit(subdirs, CONCURRENCY, async (dir) => ({ dir, listing: await listDir(dir) }));
-    const mdc = (dir: string, entries: string[] = []) =>
+  if (rootEntries.has(".cursor/") || rootTruncated) {
+    const mdc = (dir: string, entries: string[]) =>
       entries
         .filter((entry) => /\.mdc@?$/.test(entry))
         .map((entry) => {
@@ -250,7 +260,28 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
           if (entry.endsWith("@")) symlinks.add(path);
           return path;
         });
-    cursorRules.push(...mdc(CURSOR_RULES_DIR, top?.entries), ...nested.flatMap(({ dir, listing }) => mdc(dir, listing?.entries)));
+    // Level by level, so the cap keeps the shallower folders, and sorted, so
+    // the same folders are kept on every run.
+    let level = [CURSOR_RULES_DIR];
+    let listed = 0;
+    let unlisted = 0;
+    while (level.length) {
+      const batch = level.slice(0, MAX_CURSOR_DIRS - listed);
+      unlisted += level.length - batch.length;
+      listed += batch.length;
+      const found = await mapLimit(batch, CONCURRENCY, async (dir) => ({ dir, listing: await listDir(dir) }));
+      level = [];
+      for (const { dir, listing } of found) {
+        const entries = [...(listing?.entries ?? [])].sort();
+        cursorRules.push(...mdc(dir, entries));
+        level.push(...entries.filter((entry) => entry.endsWith("/")).map((entry) => join(dir, entry.slice(0, -1))));
+      }
+    }
+    if (unlisted > 0) {
+      warnings.push(
+        `${unlisted} Cursor rule ${unlisted === 1 ? "folder was" : "folders were"} not checked (at most ${MAX_CURSOR_DIRS} are listed)`,
+      );
+    }
     cursorRules.sort();
   }
   if (cursorRules.length > MAX_CURSOR_RULE_READS) {
@@ -261,13 +292,25 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
   }
 
   const toRead = [...wanted, ...cursorRules.slice(0, MAX_CURSOR_RULE_READS)];
-  // GitLab reads a symlink as its target's path: follow it one hop. A target
-  // already being read is left to its own entry; a target that cannot be read
-  // means the text was the file itself after all.
+  // A forge that reads a symlink as its target's content needs nothing more,
+  // and its text must not be taken for a path even when it looks like one.
+  // GitLab reads a symlink as its target path: follow it one hop. A target
+  // already being read is left to its own entry.
+  const readsTarget = FORGE_INFO[adapter.provider].symlinkReadsAs === "target";
   const readResolved = async (path: string): Promise<string | null> => {
     const text = await readFile(path);
-    if (text === null || !symlinks.has(path)) return text;
+    if (text === null || !readsTarget) return text;
+    const known = symlinks.has(path);
+    if (!known && !maybeSymlinks.has(path)) return text;
     const target = symlinkTarget(path, text);
+    if (known) {
+      // The text is a path, never guidance: a link that cannot be followed is
+      // dropped rather than shown to the model as a "convention".
+      if (!target || toRead.includes(target)) return null;
+      return readFile(target);
+    }
+    // The mode is unknown (a truncated listing): text that names a file which
+    // reads is taken as a link to it; anything else is the file itself.
     if (target === null) return text;
     if (target === "" || toRead.includes(target)) return null;
     return (await readFile(target)) ?? text;
@@ -288,7 +331,8 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
       continue;
     }
     let body = text;
-    if (path.endsWith(".mdc")) {
+    const isRule = path.endsWith(".mdc");
+    if (isRule) {
       const rule = parseCursorRule(text);
       // A glob without a slash (`*.tsx`) matches at any depth, as in Cursor.
       // picomatch's basename option would also flatten `src/db/**`, so only
@@ -297,16 +341,20 @@ export async function loadAgentFiles(input: LoadAgentFilesInput): Promise<AgentF
       const matches = globs.length ? picomatch(globs, { dot: true }) : null;
       const applies = rule.alwaysApply || (!!matches && reviewedPaths.some((changed) => matches(changed)));
       if (!applies) continue;
-      if (rulesUsed >= MAX_CURSOR_RULES) {
-        rulesLeftOut++;
-        continue;
-      }
-      rulesUsed++;
       body = rule.body;
     }
     body = body.trim();
     // A symlinked AGENTS.md reads as its CLAUDE.md target on GitHub: the same text once is enough.
     if (!body || seen.has(body)) continue;
+    // Counted only once a rule adds text, so empty or repeated rules cannot
+    // crowd out one that applies.
+    if (isRule) {
+      if (rulesUsed >= MAX_CURSOR_RULES) {
+        rulesLeftOut++;
+        continue;
+      }
+      rulesUsed++;
+    }
     seen.add(body);
     files.push({ path, text: body });
   }

@@ -1644,9 +1644,10 @@ review:
 
 - **Which files:** `CLAUDE.md` and `AGENTS.md` in the repository root and in
   every folder above a changed file (at most 12 folders, the deepest first;
-  folders of ignored files do not count), plus `.cursorrules`,
+  folders of ignored, deleted or binary files do not count), plus `.cursorrules`,
   `.github/copilot-instructions.md` and the `.cursor/rules/**/*.mdc` rules that
-  apply: those with `alwaysApply: true` or `globs` matching a changed file.
+  apply: those with `alwaysApply: true` or `globs` matching a changed file
+  (at most 8 rule folders are listed, `.cursor/rules` included).
   Globs are read as Cursor reads them: unquoted (`globs: *.ts,*.tsx`) works,
   and a glob without a slash matches at any depth. Up to 30 rules are checked
   and at most 10 that apply are used. Rules Cursor attaches by hand or by

@@ -5,6 +5,7 @@ import type { ConfigOverride } from "../src/review/config/schema.ts";
 import { planChunks } from "../src/review/context/chunk.ts";
 import {
   MAX_AGENT_DIRS,
+  MAX_CURSOR_DIRS,
   MAX_CURSOR_RULES,
   fitAgentFiles,
   loadAgentFiles,
@@ -18,11 +19,18 @@ import { makeChangeSet } from "./helpers/changeSet.ts";
 import { WALKTHROUGH, fakeModel } from "./helpers/model.ts";
 
 // A forge holding `files` at the base revision only; listings are derived from
-// the file paths, so a test names files and the folders follow.
-function forge(files: Record<string, string>, options: { failDir?: string; truncated?: string[]; symlinks?: string[] } = {}) {
+// the file paths, so a test names files and the folders follow. A symlink's
+// text is what the forge reads for it: the target's content on GitHub, the
+// target's path on GitLab.
+function forge(
+  files: Record<string, string>,
+  options: { failDir?: string; truncated?: string[]; symlinks?: string[]; provider?: "github" | "gitlab" } = {},
+) {
   const reads: string[] = [];
+  const provider = options.provider ?? "github";
   const adapter: LoadAgentFilesInput["adapter"] = {
-    host: "github.com",
+    provider,
+    host: provider === "github" ? "github.com" : "gitlab.com",
     async getFileAtRef(_project, path, ref) {
       reads.push(`${ref}:${path}`);
       return ref === "base" ? (files[path] ?? null) : null;
@@ -52,7 +60,7 @@ function input(adapter: LoadAgentFilesInput["adapter"], changed: string[], extra
     adapter,
     project: "acme/web",
     ref: "base",
-    changedFiles: changed.map((path) => ({ path })),
+    changedFiles: changed.map((path) => ({ path, changeType: "modified" as const, isBinary: false })),
     ignorePaths: [],
     maxChars: 8000,
     ...extra,
@@ -155,13 +163,13 @@ describe("loadAgentFiles", () => {
   });
 
   it("follows a symlink a forge reads as its target path (GitLab), once", async () => {
-    const same = forge({ "CLAUDE.md": "claude text", "AGENTS.md": "CLAUDE.md" }, { symlinks: ["AGENTS.md"] });
+    const same = forge({ "CLAUDE.md": "claude text", "AGENTS.md": "CLAUDE.md" }, { symlinks: ["AGENTS.md"], provider: "gitlab" });
     expect((await loadAgentFiles(input(same.adapter, ["app.ts"]))).files).toEqual([{ path: "CLAUDE.md", text: "claude text" }]);
 
-    const elsewhere = forge({ "src/AGENTS.md": "../docs/agents.md", "docs/agents.md": "agents text", "src/a.ts": "" }, { symlinks: ["src/AGENTS.md"] });
+    const elsewhere = forge({ "src/AGENTS.md": "../docs/agents.md", "docs/agents.md": "agents text", "src/a.ts": "" }, { symlinks: ["src/AGENTS.md"], provider: "gitlab" });
     expect((await loadAgentFiles(input(elsewhere.adapter, ["src/a.ts"]))).files).toEqual([{ path: "src/AGENTS.md", text: "agents text" }]);
 
-    const outside = forge({ "AGENTS.md": "../../etc/passwd" }, { symlinks: ["AGENTS.md"] });
+    const outside = forge({ "AGENTS.md": "../../etc/passwd" }, { symlinks: ["AGENTS.md"], provider: "gitlab" });
     expect((await loadAgentFiles(input(outside.adapter, ["app.ts"]))).files).toEqual([]);
   });
 
@@ -169,6 +177,96 @@ describe("loadAgentFiles", () => {
     const { adapter } = forge({ "src/CLAUDE.md": "src claude", "src/x.ts": "" }, { truncated: ["src"] });
     const result = await loadAgentFiles(input(adapter, ["src/x.ts"]));
     expect(result.files).toEqual([{ path: "src/CLAUDE.md", text: "src claude" }]);
+  });
+
+  it("drops a GitLab symlink whose target cannot be read rather than use its path as guidance", async () => {
+    const { adapter } = forge({ "AGENTS.md": "docs/agents.md", "CLAUDE.md": "claude text" }, { symlinks: ["AGENTS.md"], provider: "gitlab" });
+    expect((await loadAgentFiles(input(adapter, ["app.ts"]))).files).toEqual([{ path: "CLAUDE.md", text: "claude text" }]);
+  });
+
+  it("keeps a GitHub symlink's text as it reads, even when it looks like a path", async () => {
+    // GitHub already returns the target's content; it is never followed again.
+    const { adapter } = forge({ "CLAUDE.md": "AGENTS.md", "AGENTS.md": "agents text" }, { symlinks: ["CLAUDE.md"] });
+    expect((await loadAgentFiles(input(adapter, ["app.ts"]))).files).toEqual([
+      { path: "CLAUDE.md", text: "AGENTS.md" },
+      { path: "AGENTS.md", text: "agents text" },
+    ]);
+  });
+
+  it("follows a GitLab symlink found only past a truncated listing", async () => {
+    const same = forge({ "src/AGENTS.md": "CLAUDE.md", "src/CLAUDE.md": "src claude", "src/x.ts": "" }, { truncated: ["src"], provider: "gitlab" });
+    expect((await loadAgentFiles(input(same.adapter, ["src/x.ts"]))).files).toEqual([{ path: "src/CLAUDE.md", text: "src claude" }]);
+
+    const elsewhere = forge(
+      { "src/AGENTS.md": "../docs/agents.md", "docs/agents.md": "agents text", "src/x.ts": "" },
+      { truncated: ["src"], provider: "gitlab" },
+    );
+    expect((await loadAgentFiles(input(elsewhere.adapter, ["src/x.ts"]))).files).toEqual([{ path: "src/AGENTS.md", text: "agents text" }]);
+  });
+
+  it("still tries the root-only files when the root listing is truncated", async () => {
+    const { adapter } = forge(
+      {
+        ".cursorrules": "cursor legacy",
+        ".github/copilot-instructions.md": "copilot",
+        ".cursor/rules/always.mdc": "---\nalwaysApply: true\n---\nalways rule",
+      },
+      { truncated: [""] },
+    );
+    const result = await loadAgentFiles(input(adapter, ["app.ts"]));
+    expect(result.files.map((file) => file.path)).toEqual([".cursorrules", ".github/copilot-instructions.md", ".cursor/rules/always.mdc"]);
+  });
+
+  it("reads Cursor rules at any depth, capping the folders listed and warning about the rest", async () => {
+    const nested = forge({ ".cursor/rules/backend/db/queries.mdc": '---\nglobs: "src/db/**"\n---\nqueries rule' });
+    expect((await loadAgentFiles(input(nested.adapter, ["src/db/user.ts"]))).files).toEqual([
+      { path: ".cursor/rules/backend/db/queries.mdc", text: "queries rule" },
+    ]);
+
+    const rules: Record<string, string> = {};
+    for (let index = 0; index < MAX_CURSOR_DIRS + 1; index++) rules[`.cursor/rules/s${index}/rule.mdc`] = `---\nalwaysApply: true\n---\nrule ${index}`;
+    const wide = await loadAgentFiles(input(forge(rules).adapter, ["app.ts"]));
+    // The top folder takes one slot, so two of the nine subfolders are left.
+    expect(wide.files).toHaveLength(MAX_CURSOR_DIRS - 1);
+    expect(wide.files.map((file) => file.path)).not.toContain(`.cursor/rules/s${MAX_CURSOR_DIRS}/rule.mdc`);
+    expect(wide.warnings).toEqual([`2 Cursor rule folders were not checked (at most ${MAX_CURSOR_DIRS} are listed)`]);
+  });
+
+  it("does not count empty or repeated Cursor rules toward the cap", async () => {
+    const rules: Record<string, string> = {};
+    for (let index = 0; index < MAX_CURSOR_RULES; index++) {
+      rules[`.cursor/rules/a${String(index).padStart(2, "0")}.mdc`] = `---\nalwaysApply: true\n---\n${index % 2 ? "same rule" : ""}`;
+    }
+    rules[".cursor/rules/b.mdc"] = '---\nglobs: "**/*.ts"\n---\nts rule';
+    const result = await loadAgentFiles(input(forge(rules).adapter, ["src/a.ts"]));
+    expect(result.files).toEqual([
+      { path: ".cursor/rules/a01.mdc", text: "same rule" },
+      { path: ".cursor/rules/b.mdc", text: "ts rule" },
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("leaves deleted and binary files out of the folders and the Cursor globs", async () => {
+    const { adapter, reads } = forge({
+      "img/CLAUDE.md": "img",
+      "src/CLAUDE.md": "src",
+      ".cursor/rules/png.mdc": '---\nglobs: "**/*.png"\n---\npng rule',
+    });
+    const deep = Array.from({ length: MAX_AGENT_DIRS + 3 }, (_, index) => `d${index}`).join("/");
+    const result = await loadAgentFiles(
+      input(adapter, [], {
+        changedFiles: [
+          { path: `${deep}/old.ts`, changeType: "deleted", isBinary: false },
+          { path: "img/logo.png", changeType: "modified", isBinary: true },
+          { path: "src/a.ts", changeType: "modified", isBinary: false },
+        ],
+      }),
+    );
+    expect(result.files).toEqual([{ path: "src/CLAUDE.md", text: "src" }]);
+    expect(result.warnings).toEqual([]);
+    const listed = reads.filter((read) => read.startsWith("dir:")).map((read) => read.slice("dir:base:".length));
+    expect(listed).not.toContain("img");
+    expect(listed).not.toContain("d0");
   });
 
   it("warns about an oversized file and a failed read, and keeps what it could read", async () => {

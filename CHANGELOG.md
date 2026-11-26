@@ -14,13 +14,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   (**Coding-agent instruction files** on the Guidance tab) shows every review
   pass the `CLAUDE.md` and `AGENTS.md` files from the repository root and the
   folders of changed files, plus `.cursorrules`, `.github/copilot-instructions.md`
-  and the `.cursor/rules/*.mdc` rules that apply to the change. They are read
+  and the `.cursor/rules/**/*.mdc` rules that apply to the change. They are read
   from the base revision, wrapped as untrusted, ranked below the team rules and
   never block a review. `review.agent_files.max_chars` caps their total per pass
   (8000 by default, nearest folder first); files left out or unreadable are
   warnings. Cursor globs work as in Cursor (unquoted, and slashless globs
   match at any depth); up to 30 rules are checked and at most 10 that apply
-  are used, and rules or folders past their caps are warnings. A symlinked
+  are used, from at most 8 rule folders; rules or folders past their caps are warnings. A symlinked
   `AGENTS.md` is followed on GitLab as on GitHub. Off by default. The review result lists the files used
   (`agentFiles`) and the review page's sidebar shows them.
 
@@ -714,6 +714,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- An invalid **Max inline comments** value marks the Display tab with an error,
+  as other fields do, instead of disabling save with no tab showing why.
 - Saving the global config or a repository's settings from a page loaded
   before someone else changed them (another admin's save, or an approved rule
   suggestion) is refused with "changed since the page loaded; reload and try
