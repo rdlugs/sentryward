@@ -21,7 +21,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   warnings. Cursor globs work as in Cursor (unquoted, and slashless globs
   match at any depth); up to 30 rules are checked and at most 10 that apply
   are used, from at most 8 rule folders; rules or folders past their caps are warnings. A symlinked
-  `AGENTS.md` is followed on GitLab as on GitHub. Off by default. The review result lists the files used
+  `AGENTS.md` is followed on GitLab as on GitHub. An incremental review uses
+  only the instruction files for the files it reviews again. Off by default. The review result lists the files used
   (`agentFiles`) and the review page's sidebar shows them.
 
 - Auto deep review. `review.deep.enabled: auto` (Deep review > Auto on the

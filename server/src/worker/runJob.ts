@@ -523,23 +523,6 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   const tools = config.review.toolFindings ? await toolAnnotations(forge, changeSet, warnings) : undefined;
 
-  // From the base revision, like the repository file: a change must not be
-  // able to steer its own review. Off means no forge calls at all.
-  let agentFiles: AgentFile[] | undefined;
-  if (config.review.agentFiles.enabled) {
-    const loadedFiles = await loadAgentFiles({
-      adapter: forge,
-      project: repo.fullPath,
-      ref: changeSet.forgeRef.baseSha,
-      changedFiles: changeSet.files,
-      ignorePaths: config.ignorePaths,
-      maxChars: config.review.agentFiles.maxChars,
-      cache: fileCache,
-    });
-    agentFiles = loadedFiles.files;
-    warnings.push(...loadedFiles.warnings);
-  }
-
   const increment = await incrementFor({
     job,
     project: repo.fullPath,
@@ -549,6 +532,25 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     cache: fileCache,
     warnings,
   });
+
+  // From the base revision, like the repository file: a change must not be
+  // able to steer its own review. Off means no forge calls at all. An
+  // incremental review takes guidance only for the files it reviews again, so
+  // folders it leaves alone neither cost reads nor use up maxChars.
+  let agentFiles: AgentFile[] | undefined;
+  if (config.review.agentFiles.enabled) {
+    const loadedFiles = await loadAgentFiles({
+      adapter: forge,
+      project: repo.fullPath,
+      ref: changeSet.forgeRef.baseSha,
+      changedFiles: increment ? changeSet.files.filter((file) => increment.paths.has(file.path)) : changeSet.files,
+      ignorePaths: config.ignorePaths,
+      maxChars: config.review.agentFiles.maxChars,
+      cache: fileCache,
+    });
+    agentFiles = loadedFiles.files;
+    warnings.push(...loadedFiles.warnings);
+  }
 
   let result;
   try {

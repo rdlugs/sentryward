@@ -1655,6 +1655,42 @@ describe("runJob on a push after a completed review", () => {
     ]);
   });
 
+  it("takes instruction files only for the folders it reviews again", async () => {
+    const files: FileDiffInput[] = [
+      { path: "api/app.ts", changeType: "modified", patch: APP_PATCH },
+      { path: "web/util.ts", changeType: "modified", patch: UTIL_PATCH },
+    ];
+    // Set before the first run: changed settings would force a full review.
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { review: { blockOn: "major", agentFiles: { enabled: true } } } },
+    });
+    const first = deps({}, fixed, { anthropic: "k" }, { head: "h1", files });
+    await enqueue({ repositoryId, number: 42, headSha: "h1", trigger: "manual" });
+    await runJob((await claimNext())!, first.runDeps);
+    const second = deps(
+      { "base:api/AGENTS.md": "API rules.", "base:web/AGENTS.md": "Web rules." },
+      fixed,
+      { anthropic: "k" },
+      {
+        head: "h2",
+        files,
+        compare: ["web/util.ts"],
+        dirs: { "base:": ["api/", "web/"], "base:api": ["AGENTS.md", "app.ts"], "base:web": ["AGENTS.md", "util.ts"] },
+      },
+    );
+    const { job, stored } = await push("h2");
+
+    await runJob(job, second.runDeps);
+
+    const result = (await stored()).result as ReviewResult;
+    expect(result.incremental).toMatchObject({ files: ["web/util.ts"] });
+    expect(result.agentFiles).toEqual(["web/AGENTS.md"]);
+    expect(second.reads).toContain("base:web/AGENTS.md");
+    expect(second.reads.filter((read) => read.includes("api"))).toEqual([]);
+    expect(reviewPrompts(second.model)).not.toContain("API rules.");
+  });
+
   it("reviews everything again after a force push", async () => {
     await reviewFirst();
     const second = deps({}, both, { anthropic: "k" }, { head: "h2", files: FILES, compare: null });
