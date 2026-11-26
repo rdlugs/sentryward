@@ -424,8 +424,9 @@ export const reviewResultSchema = z.object({
   // requester's text, so it is escaped wherever it is rendered.
   focus: z.string().optional(),
   // Set when review.deep.enabled was "auto": whether the specialists ran, and
-  // the risky areas of the reviewed files that switched them on. Absent when
-  // deep review was simply on or off, and on results stored before it existed.
+  // the selected risky areas considered by the decision. `matched` may be
+  // non-empty with `ran: false` when risk fits only the general-lens plan.
+  // Absent when deep review was simply on or off, and on older results.
   deepAuto: z.object({ ran: z.boolean(), matched: z.array(riskyAreaSchema) }).optional(),
   // Set when only the files changed since an earlier completed review were
   // reviewed (worker/incremental.ts). `files` are the paths reviewed again;

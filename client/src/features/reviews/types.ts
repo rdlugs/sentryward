@@ -193,8 +193,9 @@ export interface ReviewResult {
     relatedIssues?: (IssueRef & { reason: string })[]
     riskyAreas?: RiskyArea[]
   }
-  // Set when deep review was on auto: whether it ran, and the risky areas of
-  // the reviewed files that switched it on.
+  // Set when deep review was on auto: whether it ran, and the selected risky
+  // areas considered by the decision. `matched` can be non-empty with
+  // `ran: false` when risk fit only the standard-pass plan.
   deepAuto?: { ran: boolean; matched: RiskyArea[] }
   // Set when only the files changed since an earlier completed review were
   // reviewed again (server worker/incremental.ts).
