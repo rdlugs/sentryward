@@ -42,7 +42,7 @@ const effective = {
     toolFindingsBlock: false,
     context: "static",
     agent: { maxSteps: 8, maxToolTokens: 30000, maxSearches: 5 },
-    deep: { enabled: false, specialists: ["naming", "tests"] },
+    deep: { enabled: false, autoOn: ["auth", "database", "api"], specialists: ["naming", "tests"] },
   },
   // The server's quiet defaults (DEFAULT_CONFIG in server/src/review/config/schema.ts).
   output: {
@@ -107,6 +107,7 @@ const schema = {
   severities: ["critical", "major", "minor"],
   categories: ["security", "bug", "style"],
   specialists: ["naming", "tests"],
+  riskKinds: ["auth", "database", "api"],
   contextWindows: { anthropic: 200_000, openai: 200_000, google: 1_000_000, ollama: 128_000 },
   defaultContextWindow: 128_000,
   thinkingBudgets: { off: 0, low: 2_000, medium: 8_000, high: 24_000 },
@@ -474,6 +475,53 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
 
     await waitFor(() => expect(body).toMatchObject({ settings: { review: { deep: { enabled: true, specialists: ["tests"] } } } }))
+  })
+
+  it("sets deep review to auto and picks the kinds of change it runs for", async () => {
+    let body: unknown
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          body = JSON.parse(String(init?.body))
+          return jsonResponse(200, globalConfig((body as { settings: Record<string, unknown> }).settings))
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Finding Types")
+    // Greyed out until deep review is auto.
+    expect(await screen.findByRole("checkbox", { name: "database" })).toBeDisabled()
+    await userEvent.click(screen.getByRole("combobox", { name: "Deep review" }))
+    await userEvent.click(screen.getByRole("option", { name: "Auto (risky changes only)" }))
+    await userEvent.click(screen.getByRole("checkbox", { name: "database" }))
+    await selectConnectionOnLlmTab()
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+
+    await waitFor(() =>
+      expect(body).toMatchObject({ settings: { review: { deep: { enabled: "auto", autoOn: ["auth", "api"] } } } }),
+    )
+  })
+
+  it("keeps the auto run kinds usable while they hold an error, even with deep review off", async () => {
+    mockApi(globalRoutes())
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Finding Types")
+    await userEvent.click(await screen.findByRole("combobox", { name: "Deep review" }))
+    await userEvent.click(screen.getByRole("option", { name: "Auto (risky changes only)" }))
+    await userEvent.click(screen.getByRole("button", { name: "No auto runs for" }))
+    await userEvent.click(screen.getByRole("combobox", { name: "Deep review" }))
+    await userEvent.click(screen.getByRole("option", { name: "Off" }))
+
+    expect(await screen.findByText("Choose at least one kind of change")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "All auto runs for" })).toBeEnabled()
+    const database = screen.getByRole("checkbox", { name: "database" })
+    expect(database).toBeEnabled()
+    await userEvent.click(database)
+    expect(screen.queryByText("Choose at least one kind of change")).not.toBeInTheDocument()
+    // Fixed, so it greys out again like any setting auto alone uses.
+    expect(screen.getByRole("checkbox", { name: "database" })).toBeDisabled()
   })
 
   it("refuses to save deep review without a specialist", async () => {
@@ -1610,14 +1658,17 @@ describe("Finding Types tab", { timeout: 20_000 }, () => {
     mockApi(globalRoutes())
     renderWithProviders(<App />, { route: "/configuration?tab=findings" })
 
-    expect(await screen.findByText("2 of 3 on")).toBeInTheDocument()
+    // The risk kind grid also has three options, so count within the categories.
+    const categories = () => screen.getByRole("button", { name: "All categories" }).closest("fieldset")!
+    await screen.findByRole("checkbox", { name: "style" })
+    expect(within(categories()).getByText("2 of 3 on")).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "All categories" }))
-    expect(screen.getByText("3 of 3 on")).toBeInTheDocument()
+    expect(within(categories()).getByText("3 of 3 on")).toBeInTheDocument()
     expect(screen.getByRole("checkbox", { name: "style" })).toBeChecked()
     expect(screen.getByRole("button", { name: "All categories" })).toBeDisabled()
 
     await userEvent.click(screen.getByRole("button", { name: "No categories" }))
-    expect(screen.getByText("0 of 3 on")).toBeInTheDocument()
+    expect(within(categories()).getByText("0 of 3 on")).toBeInTheDocument()
     expect(screen.getByText("Choose at least one category")).toBeInTheDocument()
   })
 

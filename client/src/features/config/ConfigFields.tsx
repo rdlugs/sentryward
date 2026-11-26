@@ -413,10 +413,11 @@ const CHOICE_INFO: Record<
   deepReview: {
     label: "Deep review",
     description:
-      "Adds a pass per specialist on every part of the change, each looking for one kind of defect. Finds more, and multiplies the review's model calls. A single review can also ask for it with /sentryward review deep.",
+      "Adds a pass per specialist on every part of the change, each looking for one kind of defect. Finds more, and multiplies the review's model calls. Auto runs it only on changes touching the kinds of code chosen below. A single review can also ask for it with /sentryward review deep.",
     options: [
       { value: "false", label: "Off" },
       { value: "true", label: "On" },
+      { value: "auto", label: "Auto (risky changes only)" },
     ],
   },
 }
@@ -431,6 +432,14 @@ const SPECIALIST_INFO: Record<string, string> = {
   tests: "Tests that would still pass if the behaviour broke",
   leaks: "Secrets and personal data in logs, errors and responses",
   consistency: "Changed files that disagree with each other",
+}
+
+// The risk kinds an auto deep review runs for, found by pattern in the diff
+// (server/src/review/context/risk.ts).
+const RISK_KIND_INFO: Record<string, string> = {
+  auth: "Authorization checks, guards and auth modules",
+  database: "Database writes, schema files and migrations",
+  api: "API routes and request handlers",
 }
 
 const SUMMARY_INSTRUCTIONS_EXAMPLE =
@@ -1813,6 +1822,9 @@ export function ConfigFields(props: {
   // Only a value known to be off greys a field out, so nothing flickers while
   // the inherited values load.
   const agentLimitsOff = contextChoice === "static"
+  // Same rule: only a deep review known not to be auto greys out its triggers.
+  const deepChoice = resolvedChoice("deepReview")
+  const autoOnOff = deepChoice !== undefined && deepChoice !== "auto"
   const fileContextOff = resolvedFlag("fileContext") === false
   const severityFloorValue = resolvedText("severityFloor")
   const blockOnValue = resolvedText("blockOn")
@@ -2281,6 +2293,23 @@ export function ConfigFields(props: {
             error={errors.specialists}
             disabled={locked("review.deep.specialists")}
           />
+          <CategoriesField
+            legend="Auto runs for"
+            description="Only used when Deep review is Auto: it runs when the reviewed files touch one of these, found by pattern in the diff. Tests never count."
+            idPrefix="risk-kind"
+            info={RISK_KIND_INFO}
+            options={schema.data?.riskKinds ?? []}
+            value={form.autoOn}
+            inherited={inherited?.review.deep.autoOn}
+            onChange={(autoOn) => props.onChange({ ...form, autoOn })}
+            resettable={isRepo}
+            inheritedHint={inheritedHint("review.deep.autoOn", inherited?.review.deep.autoOn)}
+            effective={config && effective("review.deep.autoOn", config.review.deep.autoOn)}
+            error={errors.autoOn}
+            // The schema refuses an empty list whatever deep review is set
+            // to, so a field holding that error stays usable to clear it.
+            disabled={locked("review.deep.autoOn") || (autoOnOff && !errors.autoOn)}
+          />
         </Section>
         <FieldSeparator />
         <Section title="Static analysis" description="Findings that analyzers on the forge already reported.">
@@ -2606,6 +2635,7 @@ export function ConfigFields(props: {
     "review.blockOn",
     "review.categories",
     "review.deep.specialists",
+    "review.deep.autoOn",
     ...findingsFlags.map((name) => `${FLAGS.find((flag) => flag.name === name)!.section}.${name}`),
     ...findingsNumbers.map((name) => `${NUMBERS.find((number) => number.name === name)!.section}.${name}`),
     ...findingsChoices.map((name) => {
@@ -2617,7 +2647,7 @@ export function ConfigFields(props: {
   // not use them, so they are not counted.
   const findingsOverrides =
     isRepo && !disabled
-      ? [form.severityFloor !== INHERIT, form.blockOn !== INHERIT, form.categories !== undefined, form.specialists !== undefined]
+      ? [form.severityFloor !== INHERIT, form.blockOn !== INHERIT, form.categories !== undefined, form.specialists !== undefined, form.autoOn !== undefined]
           .concat(findingsFlags.map((name) => form.flags[name] !== undefined))
           .concat(findingsNumbers.map((name) => form.numbers[name].trim() !== ""))
           .concat(findingsChoices.map((name) => form.choices[name] !== INHERIT))

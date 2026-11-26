@@ -4,6 +4,7 @@ import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW } from "../review/context/budget.ts";
+import { RISK_KINDS } from "../review/core/models.ts";
 import { CATEGORIES, SEVERITIES } from "../review/core/severity.ts";
 import { THINKING_BUDGETS } from "../review/llm/thinking.ts";
 import { PROFILES } from "../review/config/profiles.ts";
@@ -35,6 +36,8 @@ export function getConfigSchema(_req: Request, res: Response) {
     severities: SEVERITIES,
     categories: CATEGORIES,
     specialists: SPECIALISTS,
+    // The risk kinds an auto deep review can be switched on by.
+    riskKinds: RISK_KINDS,
     // What promptCeiling resolves an "auto" context budget from.
     contextWindows: CONTEXT_WINDOW,
     defaultContextWindow: DEFAULT_CONTEXT_WINDOW,

@@ -1555,6 +1555,15 @@ one kind of defect only:
 - Off by default. Turn it on for every review with `review.deep.enabled`, or
   for one run with `/sentryward review deep` or the manual review sheet.
   `review.deep.specialists` picks which run (all seven by default).
+- `review.deep.enabled: auto` runs the specialists only when the reviewed files
+  touch a kind of code listed in `review.deep.auto_on` (`auth`, `database`,
+  `api`; all three by default): the same pattern-based risky areas the
+  walkthrough lists, found in the diff without a model call. Tests never count,
+  and neither do files or hunks the review leaves out for size or budget.
+  An incremental review decides on the files it reviews again, and callers
+  reached only through context gathering do not switch it on. A run asked for a
+  deep review still gets one. The review page's sidebar says whether auto ran it
+  and for which files.
 - **Cost:** each selected specialist is one more model call per review pass, so
   all seven make a review about eight times as expensive. Usage records each
   specialist's calls, and the eval runner compares recall with and without it
@@ -1673,7 +1682,8 @@ review:
     max_tool_tokens: 30000  # what tools may return in one pass
     max_searches: 5         # code searches across the whole review
   deep:                     # specialist passes on top of the general one (see Deep review)
-    enabled: false          # one more model call per pass for each specialist below
+    enabled: false          # true | false | auto: one more model call per pass for each specialist below
+    auto_on: [auth, database, api]  # with auto: the risky changes that switch it on
     specialists: [naming, invariants, boundaries, contracts, tests, leaks, consistency]
 output:
   walkthrough: true         # the PR summary

@@ -10,6 +10,20 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Auto deep review. `review.deep.enabled: auto` (Deep review > Auto on the
+  Finding Types tab) runs the specialist passes only when the reviewed files
+  touch authorization, database writes or API routes, as found by the existing
+  risky-area detection, so low-risk changes skip the extra model calls. Files
+  or hunks left out of the review for size or budget do not count, and when
+  auto decides against a deep review the change is planned for the general pass
+  alone, so the specialists' longer prompts never leave a hunk out. Risky code
+  that fits only that general-lens plan still gets a standard review, and the
+  result, a warning and the sidebar say so instead of reporting no risk.
+  `review.deep.auto_on` picks which of those kinds count (all three by default).
+  An incremental review decides on the files it reviews again, and a run that
+  asks for a deep review still gets one. The review result records the decision
+  (`deepAuto`) and the review page's sidebar shows it.
+
 - Resizable file tree on the review page. At `lg` and up, a handle between the
   tree and the diff drags the tree column between 12rem and the smaller of 32rem
   and 40% of the viewport; it is a focusable separator (arrow keys step 1rem,

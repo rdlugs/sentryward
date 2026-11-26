@@ -3,6 +3,7 @@ import { verdictFor, blockingFindings } from "./core/verdict.ts";
 import {
   MAX_FOCUS,
   RESULT_SCHEMA_VERSION,
+  type ChangedFile,
   type ChangeSet,
   type Finding,
   type LlmUsage,
@@ -20,7 +21,7 @@ import { mapLimit } from "./core/mapLimit.ts";
 import { contextTokenBudget, estimateTokens, diffTokenBudget } from "./context/budget.ts";
 import { planChunks, type Chunk } from "./context/chunk.ts";
 import { gatherContext, type ContextSource, type ReachedCaller } from "./context/gather.ts";
-import { floorBlastRadius, riskyAreas, withReach } from "./context/risk.ts";
+import { diffAreas, floorBlastRadius, MAX_RISKY_AREAS, riskyAreas, withReach } from "./context/risk.ts";
 import { classifyFiles } from "./context/ignore.ts";
 import { MAX_MANIFEST_CHARS, MAX_REJECTED_CHARS, reviewSystemPrompt, type ManifestEntry } from "./llm/prompt.ts";
 import { reservedBudget, searchBudget } from "./agent/tools.ts";
@@ -28,7 +29,7 @@ import { ToolsUnsupportedError, toolsUnsupportedWarning, type GenerateAgentic } 
 import { reviewChunkAgentic } from "./llm/agenticReview.ts";
 import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/providers.ts";
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
-import { lensCovers, lensesFor, type Lens } from "./llm/lenses.ts";
+import { deepDecision, lensCovers, lensesFor, type Lens } from "./llm/lenses.ts";
 import { mergeAcrossLenses } from "./validate/lensDedupe.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
 import { capFindings, capPerReviewer, compareFindings, noopKey, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
@@ -107,12 +108,23 @@ const INCOMPLETE: ReadonlySet<OmissionReason> = new Set([
 // not counted exactly, so they get a generous fixed allowance next to the
 // measured system prompt. The last term covers the rejected section (its
 // MAX_REJECTED_CHARS at ~4 chars/token) so it cannot crowd out the diff.
-const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
+export const USER_PROMPT_ALLOWANCE = 3_000 + Math.ceil(MAX_REJECTED_CHARS / 4);
 // A multi-pass review also lists the whole change in every pass, capped at
 // MAX_MANIFEST_CHARS.
 const MANIFEST_ALLOWANCE = Math.ceil(MAX_MANIFEST_CHARS / 4);
 // The agentic instructions and the tool definitions, on top of the review's.
 const AGENTIC_ALLOWANCE = 2_000;
+
+// Each planned file with only the hunks some pass holds, in diff order: a
+// split file's hunks left out for size are not reviewed, so they do not count.
+function plannedFiles(chunks: Chunk[]): ChangedFile[] {
+  const files = new Map<string, ChangedFile>();
+  for (const part of chunks.flatMap((chunk) => chunk.parts)) {
+    const seen = files.get(part.file.path);
+    files.set(part.file.path, { ...part.file, hunks: [...(seen?.hunks ?? []), ...part.hunks] });
+  }
+  return [...files.values()];
+}
 
 // A tool finding the model also reported: same file and category, with
 // overlapping lines, or the very same fingerprint.
@@ -149,31 +161,67 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   if (config.review.context === "agentic" && !agentic) {
     warnings.push("Agentic context needs a code source and a tool-capable model call; passes used static context");
   }
+  // What the diff alone shows. Found by pattern, without a model, so it is
+  // ready before planning; the walkthrough weighs it and callers traced
+  // below are added after.
+  const diffRisks = riskyAreas(reviewable);
+  // An auto deep review decides on what this run's passes actually see, so a
+  // file left out for size cannot buy seven specialist passes over the docs
+  // that were planned, and an incremental push touching only docs is not
+  // reviewed deep because an earlier push touched auth. Planning needs the
+  // lens prompts and the lenses need that decision, so auto first plans for
+  // the deep lenses (only the longest specialist instruction more), and a
+  // decision against plans again for the general lens alone, so overhead for
+  // passes that never run cannot cost a hunk. Areas reached through callers
+  // are found only after planning, so they cannot switch it on: a miss is a
+  // standard review.
+  const auto = config.review.deep.enabled === "auto";
+  const planLenses = lensesFor(config, auto || config.review.deep.enabled === true);
   // Every lens reviews the same planned chunks, so context is gathered once
   // and each chunk fits the longest lens prompt.
-  const lenses = lensesFor(config);
   // An agentic pass's conversation grows by what its tools return, so that
   // much of the window is kept free of diff.
-  let overhead =
-    Math.max(...lenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
-    USER_PROMPT_ALLOWANCE +
-    // Only a review asked for a focus sends that section, so only it pays.
-    (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
-    (agentic ? AGENTIC_ALLOWANCE + config.review.agent.maxToolTokens : 0);
-  let plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
-  // Only a change that needs several passes gets the manifest, so only then is
-  // it paid for, and a single-pass review is planned exactly as before. Should
-  // the smaller budget ever leave one pass, the prompt simply omits the list.
-  const multiPass = plan.chunks.length > 1;
-  if (multiPass) {
-    overhead += MANIFEST_ALLOWANCE;
-    plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
+  const planFor = (forLenses: Lens[]) => {
+    let overhead =
+      Math.max(...forLenses.map((lens) => estimateTokens(reviewSystemPrompt(config, lens)))) +
+      USER_PROMPT_ALLOWANCE +
+      // Only a review asked for a focus sends that section, so only it pays.
+      (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
+      (agentic ? AGENTIC_ALLOWANCE + config.review.agent.maxToolTokens : 0);
+    let plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
+    // Only a change that needs several passes gets the manifest, so only then
+    // is it paid for, and a single-pass review is planned exactly as before.
+    // Should the smaller budget ever leave one pass, the prompt simply omits
+    // the list.
+    const multiPass = plan.chunks.length > 1;
+    if (multiPass) {
+      overhead += MANIFEST_ALLOWANCE;
+      plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
+    }
+    return { overhead, plan, multiPass };
+  };
+  let { overhead, plan, multiPass } = planFor(planLenses);
+  // Uncapped: the decision filters by kind, so a cap could hide the one area
+  // it runs for behind others listed first.
+  let deep = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
+  const lenses = auto ? lensesFor(config, deep.run) : planLenses;
+  if (auto && !deep.run) {
+    ({ overhead, plan, multiPass } = planFor(lenses));
+    // Decided again on the larger plan only to report it, never to turn the
+    // specialists on: a risky hunk that fits only without their overhead would
+    // be left out of the very passes it turned on, so it gets a standard
+    // review. The result still names it, rather than claim no risk was
+    // reviewed.
+    const late = deepDecision(config, diffAreas(plannedFiles(plan.chunks)));
+    if (late.auto?.matched.length) {
+      deep = { run: false, auto: late.auto };
+      warnings.push(
+        "Deep review was skipped: selected risky code fits a pass only without the specialists' longer prompts, so it had a standard review",
+      );
+    }
   }
   const omissions: Omission[] = [...classified, ...plan.omissions];
 
-  // What the diff alone shows is ready now, so the walkthrough can weigh it
-  // without waiting for context; callers traced below are added after.
-  const diffRisks = riskyAreas(reviewable);
   // The walkthrough runs alongside, so it is a stage only while the review
   // is left waiting for it.
   const wantsWalkthrough = config.output.walkthrough && reviewable.length > 0;
@@ -515,6 +563,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     findings,
     ...(walkthrough ? { walkthrough } : {}),
     ...(input.focus ? { focus: input.focus } : {}),
+    ...(deep.auto ? { deepAuto: { ran: deep.run, matched: deep.auto.matched.slice(0, MAX_RISKY_AREAS) } } : {}),
     ...(increment
       ? {
           incremental: {

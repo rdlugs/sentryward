@@ -13,6 +13,10 @@ export type VerifyMode = "off" | "blocking" | "all"
 export type ThinkingLevel = "off" | "low" | "medium" | "high"
 export type ThinkingSupportSetting = "auto" | "options" | "model" | "none"
 export type ContextMode = "static" | "agentic"
+// "auto" runs deep review only on changes touching one of review.deep.autoOn.
+export type DeepEnabled = boolean | "auto"
+// Mirror RISK_KINDS in server/src/review/core/models.ts.
+export type RiskKind = "auth" | "database" | "api"
 
 // A team rule; mirrors ruleSchema in server/src/review/config/schema.ts.
 export interface Rule {
@@ -89,7 +93,7 @@ export interface ConfigOverride {
     toolFindingsBlock?: boolean
     context?: ContextMode
     agent?: { maxSteps?: number; maxToolTokens?: number; maxSearches?: number }
-    deep?: { enabled?: boolean; specialists?: string[] }
+    deep?: { enabled?: DeepEnabled; autoOn?: RiskKind[]; specialists?: string[] }
   }
   output?: {
     walkthrough?: boolean
@@ -186,7 +190,7 @@ export interface EffectiveConfig {
     toolFindingsBlock: boolean
     context: ContextMode
     agent: { maxSteps: number; maxToolTokens: number; maxSearches: number }
-    deep: { enabled: boolean; specialists: string[] }
+    deep: { enabled: DeepEnabled; autoOn: RiskKind[]; specialists: string[] }
   }
   output: {
     walkthrough: boolean
@@ -273,6 +277,8 @@ export interface ConfigSchema {
   categories: string[]
   // Deep review specialists, in the order they run.
   specialists: string[]
+  // The risk kinds an auto deep review can be switched on by.
+  riskKinds: RiskKind[]
   // What an "auto" context budget resolves from (server promptCeiling): the
   // window per provider, less max tokens and the thinking budget.
   contextWindows: Record<string, number>

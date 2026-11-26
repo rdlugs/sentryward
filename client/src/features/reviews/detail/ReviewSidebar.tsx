@@ -156,6 +156,20 @@ function BranchRow({ label, branch }: { label: string; branch: string }) {
   )
 }
 
+// The Depth row's tooltip: which specialists ran and, for an auto deep
+// review, what switched it on. An incremental run decides on the files it
+// reviews again only, so the tooltip says so rather than look like the whole
+// change's risky areas.
+function depthTitle(specialists: string[], result: ReviewResult | null) {
+  const lines = specialists.length ? [`Specialists: ${specialists.join(", ")}`] : []
+  const deepAuto = result?.deepAuto
+  if (deepAuto?.ran) {
+    const scope = result?.incremental ? "Auto, for the files reviewed again" : "Auto, for"
+    lines.push(`${scope}: ${deepAuto.matched.map((area) => `${area.path} ${area.reason}`).join("; ")}`)
+  }
+  return lines.length ? lines.join("\n") : undefined
+}
+
 function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewResult | null }) {
   const change = result?.change
   const forge = PROVIDERS[review.repository.provider].label
@@ -224,12 +238,32 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             </span>
           </Row>
         )}
-        {(review.deep || specialists.length > 0) && (
+        {(review.deep || specialists.length > 0 || result?.deepAuto?.ran) && (
           <Row label="Depth">
-            <span title={specialists.length ? `Specialists: ${specialists.join(", ")}` : undefined}>
+            <span title={depthTitle(specialists, result)}>
               Deep review
+              {result?.deepAuto?.ran && !review.deep && " (auto)"}
               {specialists.length > 0 && ` (${specialists.length} specialist${specialists.length === 1 ? "" : "s"})`}
             </span>
+          </Row>
+        )}
+        {/* Auto mode decided against it: say so, or a reader wonders why a
+            repository set to deep review got a plain one. */}
+        {!review.deep && specialists.length === 0 && result?.deepAuto && !result.deepAuto.ran && (
+          <Row label="Depth">
+            {result.deepAuto.matched.length > 0 ? (
+              // Auto found risky code only once the plan dropped the
+              // specialists' overhead, so that code got the general pass.
+              <span
+                title={`Selected risky code fit a pass only without the specialists' longer prompts: ${result.deepAuto.matched.map((area) => `${area.path} ${area.reason}`).join("; ")}`}
+              >
+                Standard (auto: selected risk fit only a standard pass)
+              </span>
+            ) : (
+              <span title="Deep review is on auto and runs only when the reviewed code touches the kinds of code chosen in the settings">
+                Standard (auto: no selected risk in reviewed code)
+              </span>
+            )}
           </Row>
         )}
         {customReviewers.length > 0 && (

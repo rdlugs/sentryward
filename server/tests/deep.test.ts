@@ -2,16 +2,18 @@ import { describe, expect, it } from "vitest";
 import { parseRepoFile } from "../src/review/config/repoFile.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import { SPECIALISTS, configOverrideSchema, type Config, type ConfigOverride } from "../src/review/config/schema.ts";
+import { estimateTokens } from "../src/review/context/budget.ts";
+import { planChunks } from "../src/review/context/chunk.ts";
 import type { ContextSource } from "../src/review/context/gather.ts";
-import type { Finding } from "../src/review/core/models.ts";
+import type { Finding, RiskyArea } from "../src/review/core/models.ts";
 import type { AgenticRequest, AgenticResponse, GenerateAgentic } from "../src/review/llm/agentic.ts";
-import { SPECIALIST_INSTRUCTIONS, lensesFor } from "../src/review/llm/lenses.ts";
+import { SPECIALIST_INSTRUCTIONS, deepDecision, lensesFor } from "../src/review/llm/lenses.ts";
 import { reviewSystemPrompt } from "../src/review/llm/prompt.ts";
 import type { GenerateRequest } from "../src/review/llm/providers.ts";
 import { ModelCallError } from "../src/review/llm/providers.ts";
-import { runReview } from "../src/review/pipeline.ts";
+import { USER_PROMPT_ALLOWANCE, runReview } from "../src/review/pipeline.ts";
 import { mergeAcrossLenses, titleOverlap } from "../src/review/validate/lensDedupe.ts";
-import { makeChangeSet } from "./helpers/changeSet.ts";
+import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
 import { fakeModel, modelFinding } from "./helpers/model.ts";
 
 // Walkthrough off so every model call in these tests is a review pass.
@@ -52,6 +54,7 @@ describe("deep review config", () => {
   it("is off by default, with every specialist selected", () => {
     expect(config().review.deep).toEqual({
       enabled: false,
+      autoOn: ["auth", "database", "api"],
       specialists: ["naming", "invariants", "boundaries", "contracts", "tests", "leaks", "consistency"],
     });
     expect(lensesFor(config()).map((lens) => lens.id)).toEqual(["general"]);
@@ -62,7 +65,7 @@ describe("deep review config", () => {
       repoSettings: { review: { deep: { specialists: ["tests"] } } },
       trigger: { review: { deep: { enabled: true } } },
     });
-    expect(resolved.config.review.deep).toEqual({ enabled: true, specialists: ["tests"] });
+    expect(resolved.config.review.deep).toEqual({ enabled: true, autoOn: ["auth", "database", "api"], specialists: ["tests"] });
     expect(resolved.sources["review.deep.enabled"]).toBe("trigger");
     expect(resolved.sources["review.deep.specialists"]).toBe("repoSettings");
     expect(lensesFor(resolved.config).map((lens) => lens.id)).toEqual(["general", "tests"]);
@@ -74,6 +77,215 @@ describe("deep review config", () => {
     expect(configOverrideSchema.safeParse({ review: { deep: { specialists: [] } } }).success).toBe(false);
     expect(configOverrideSchema.safeParse({ review: { deep: { specialists: ["tests", "tests"] } } }).success).toBe(false);
     expect(configOverrideSchema.safeParse({ review: { deep: { specialists: ["vibes"] } } }).success).toBe(false);
+  });
+});
+
+describe("auto deep review", () => {
+  const auto = (autoOn?: RiskyArea["kind"][]) =>
+    config({ review: { deep: { enabled: "auto", ...(autoOn ? { autoOn } : {}), specialists: ["tests"] } } });
+  const route: RiskyArea = { kind: "api", path: "src/routes.ts", reason: "changes an API route" };
+  const write: RiskyArea = { kind: "database", path: "src/store.ts", reason: "changes a database write" };
+  // Changes a route, which context/risk.ts flags as an api risky area.
+  const ROUTE_PATCH = '@@ -1,2 +1,3 @@\n import { app } from "./app";\n+app.post("/users", createUser);\n export {};';
+  const routeChange = () => makeChangeSet([{ path: "src/routes.ts", changeType: "modified", patch: ROUTE_PATCH }]);
+
+  it("reads auto and auto_on from the repository file and refuses a bad list", () => {
+    const parsed = parseRepoFile(".sentryward.yaml", "review:\n  deep:\n    enabled: auto\n    auto_on: [auth]\n");
+    expect(parsed).toEqual({ override: { review: { deep: { enabled: "auto", autoOn: ["auth"] } } }, warnings: [] });
+    expect(configOverrideSchema.safeParse({ review: { deep: { autoOn: [] } } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ review: { deep: { autoOn: ["api", "api"] } } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ review: { deep: { autoOn: ["css"] } } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ review: { deep: { enabled: "sometimes" } } }).success).toBe(false);
+  });
+
+  it("is overridden by a run that asked for a deep review", () => {
+    const resolved = resolveConfig({
+      repoSettings: { review: { deep: { enabled: "auto" } } },
+      trigger: { review: { deep: { enabled: true } } },
+    });
+    expect(resolved.config.review.deep.enabled).toBe(true);
+    expect(resolved.sources["review.deep.enabled"]).toBe("trigger");
+  });
+
+  it("decides from the risky areas of the kinds it runs for", () => {
+    expect(deepDecision(deep(["tests"]), [])).toEqual({ run: true });
+    expect(deepDecision(config(), [route])).toEqual({ run: false });
+    expect(deepDecision(auto(), [route, write])).toEqual({ run: true, auto: { matched: [route, write] } });
+    expect(deepDecision(auto(["database"]), [route, write])).toEqual({ run: true, auto: { matched: [write] } });
+    expect(deepDecision(auto(["auth"]), [route, write])).toEqual({ run: false, auto: { matched: [] } });
+    expect(deepDecision(auto(), [])).toEqual({ run: false, auto: { matched: [] } });
+    // "auto" is a string, so it must never read as on.
+    expect(lensesFor(auto()).map((lens) => lens.id)).toEqual(["general"]);
+  });
+
+  it("runs the specialists on a change touching a chosen kind, and says why", async () => {
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: routeChange(), config: auto() }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined, "tests"]);
+    expect(result.deepAuto).toEqual({ ran: true, matched: [expect.objectContaining({ kind: "api", path: "src/routes.ts" })] });
+  });
+
+  it("runs only the general pass on a change touching none, or only kinds not chosen", async () => {
+    const plain = fakeModel({ code_review: { findings: [] } });
+    const quiet = await runReview({ changeSet: makeChangeSet(), config: auto() }, { generate: plain.generate });
+    expect(plain.requests.map(specialistOf)).toEqual([undefined]);
+    expect(quiet.deepAuto).toEqual({ ran: false, matched: [] });
+
+    const other = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: routeChange(), config: auto(["auth", "database"]) }, { generate: other.generate });
+    expect(other.requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+  });
+
+  it("decides an incremental review on the files it reviews again", async () => {
+    const changeSet = makeChangeSet([
+      { path: "src/routes.ts", changeType: "modified", patch: ROUTE_PATCH },
+      { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
+    ]);
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const increment = { fromSha: "a", toSha: "head", paths: new Set(["src/app.ts"]), carried: [] };
+    const result = await runReview({ changeSet, config: auto(), increment }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+  });
+
+  it("decides on every risky area, not only the first ten it lists", async () => {
+    const routes = Array.from({ length: 12 }, (_, index) => ({
+      path: `src/routes/r${index}.ts`,
+      changeType: "modified" as const,
+      patch: ROUTE_PATCH,
+    }));
+    const auth = { path: "src/auth/session.ts", changeType: "modified" as const, patch: "@@ -1,1 +1,2 @@\n export {};\n+export const ttl = 60;" };
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: makeChangeSet([...routes, auth]), config: auto(["auth"]) }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined, "tests"]);
+    expect(result.deepAuto).toEqual({ ran: true, matched: [expect.objectContaining({ kind: "auth", path: "src/auth/session.ts" })] });
+
+    // What the result stores is capped like the walkthrough's list.
+    const all = await runReview({ changeSet: makeChangeSet(routes), config: auto() }, { generate });
+    expect(all.deepAuto?.ran).toBe(true);
+    expect(all.deepAuto?.matched).toHaveLength(10);
+  });
+
+  it("does not count a risky file the plan leaves out", async () => {
+    // One hunk larger than a whole pass, so the migration is never reviewed.
+    const body = Array.from({ length: 30_000 }, (_, index) => `+CREATE INDEX idx_${index} ON t (c${index});`).join("\n");
+    const migration = { path: "prisma/migrations/1/migration.sql", changeType: "added" as const, patch: `@@ -0,0 +1,30000 @@\n${body}` };
+    const docs = { path: "README.md", changeType: "modified" as const, patch: "@@ -1,1 +1,2 @@\n # Web\n+More docs." };
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: makeChangeSet([migration, docs]), config: auto() }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+    expect(result.coverage.omissions).toContainEqual(expect.objectContaining({ path: migration.path, reason: "too_large" }));
+  });
+
+  it("counts a risky hunk of a split file only when its part is planned", async () => {
+    // Three added hunks of ~37k tokens each as rendered: no two fit one 60k
+    // pass, so the file is split into three parts. The route sits in the
+    // middle hunk, so the planned case fails unless the parts' hunks are
+    // merged (the last part alone would hide it), and one pass leaves exactly
+    // that hunk out.
+    const LINES = 5_000;
+    const hunk = (index: number, extra: string[] = []) => {
+      const lines = [...extra, ...Array.from({ length: LINES - extra.length }, (_, line) => `+const v${index}_${line} = 0;`)];
+      const start = index * LINES + 1;
+      return `@@ -${start - 1},0 +${start},${LINES} @@\n${lines.join("\n")}`;
+    };
+    const server = {
+      path: "src/server.ts",
+      changeType: "modified" as const,
+      patch: [hunk(0), hunk(1, ['+app.post("/users", createUser);']), hunk(2)].join("\n"),
+    };
+
+    const planned = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet: makeChangeSet([server]), config: auto() }, { generate: planned.generate });
+    expect(planned.requests.map(specialistOf).sort()).toEqual(["tests", "tests", "tests", undefined, undefined, undefined]);
+    expect(result.deepAuto).toEqual({ ran: true, matched: [expect.objectContaining({ kind: "api", path: server.path })] });
+
+    const cut = fakeModel({ code_review: { findings: [] } });
+    const config = auto();
+    const onePass = { ...config, review: { ...config.review, maxChunks: 1 } };
+    const omitted = await runReview({ changeSet: makeChangeSet([server]), config: onePass }, { generate: cut.generate });
+    expect(cut.requests.map(specialistOf)).toEqual([undefined]);
+    expect(omitted.deepAuto).toEqual({ ran: false, matched: [] });
+    expect(omitted.coverage.omissions).toContainEqual(expect.objectContaining({ path: server.path, reason: "budget" }));
+  });
+
+  it("plans a review it decided not to deepen for the general lens alone", async () => {
+    // One plain hunk, sized one token over what a pass fits beside the longest
+    // specialist prompt but within what the general prompt leaves.
+    const body = Array.from({ length: 2_000 }, (_, line) => `+const v${line} = 0;`).join("\n");
+    const file = { path: "src/app.ts", changeType: "modified" as const, patch: `@@ -0,0 +1,2000 @@\n${body}` };
+    const changeSet = makeChangeSet([file]);
+    const fits = (budget: number) => {
+      const plan = planChunks(changeSet.files, budget, 10);
+      return plan.omissions.length === 0 && plan.chunks.length === 1;
+    };
+    let low = 1;
+    let high = 60_000;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
+    }
+    const needed = low;
+
+    const base = auto();
+    const promptTokens = (runDeep: boolean) =>
+      Math.max(...lensesFor(base, runDeep).map((lens) => estimateTokens(reviewSystemPrompt(base, lens))));
+    expect(promptTokens(true)).toBeGreaterThan(promptTokens(false));
+    // diffTokenBudget: the ceiling less the overhead and its 2,000 safety tokens.
+    const contextBudget = needed - 1 + promptTokens(true) + USER_PROMPT_ALLOWANCE + 2_000;
+    const tight = { ...base, llm: { ...base.llm, contextBudget } };
+
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet, config: tight }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [] });
+    expect(result.coverage.omissions).toEqual([]);
+
+    // The same budget does leave it out of a deep review.
+    const forced = await runReview({ changeSet, config: { ...tight, review: { ...tight.review, deep: { ...tight.review.deep, enabled: true } } } }, { generate });
+    expect(forced.coverage.omissions).toContainEqual(expect.objectContaining({ path: file.path, reason: "too_large" }));
+  });
+
+  it("reports risky code that fits only the general-lens plan, without deepening", async () => {
+    // As above, but one line of the hunk changes an API route: the deep-budget
+    // plan leaves it out and finds nothing, the general plan reviews it.
+    const lines = Array.from({ length: 2_000 }, (_, line) => `+const v${line} = 0;`);
+    lines[1_000] = '+app.post("/users", createUser);';
+    const file = { path: "src/app.ts", changeType: "modified" as const, patch: `@@ -0,0 +1,2000 @@\n${lines.join("\n")}` };
+    const changeSet = makeChangeSet([file]);
+    const fits = (budget: number) => {
+      const plan = planChunks(changeSet.files, budget, 10);
+      return plan.omissions.length === 0 && plan.chunks.length === 1;
+    };
+    let low = 1;
+    let high = 60_000;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
+    }
+
+    const base = auto();
+    const promptTokens = (runDeep: boolean) =>
+      Math.max(...lensesFor(base, runDeep).map((lens) => estimateTokens(reviewSystemPrompt(base, lens))));
+    const contextBudget = low - 1 + promptTokens(true) + USER_PROMPT_ALLOWANCE + 2_000;
+    const tight = { ...base, llm: { ...base.llm, contextBudget } };
+
+    const { generate, requests } = fakeModel({ code_review: { findings: [] } });
+    const result = await runReview({ changeSet, config: tight }, { generate });
+    expect(requests.map(specialistOf)).toEqual([undefined]);
+    expect(result.deepAuto).toEqual({ ran: false, matched: [expect.objectContaining({ kind: "api", path: file.path })] });
+    expect(result.coverage.omissions).toEqual([]);
+    expect(result.warnings).toContainEqual(expect.stringContaining("Deep review was skipped"));
+  });
+
+  it("records nothing when deep review is simply on or off", async () => {
+    const { generate } = fakeModel({ code_review: { findings: [] } });
+    expect((await runReview({ changeSet: routeChange(), config: deep(["tests"]) }, { generate })).deepAuto).toBeUndefined();
+    expect((await runReview({ changeSet: routeChange(), config: config() }, { generate })).deepAuto).toBeUndefined();
   });
 });
 

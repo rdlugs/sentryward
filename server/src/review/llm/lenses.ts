@@ -1,5 +1,6 @@
 import picomatch from "picomatch";
 import type { Config, Specialist } from "../config/schema.ts";
+import type { RiskyArea } from "../core/models.ts";
 
 // A lens is one way of looking at a planned chunk. Every chunk gets the
 // general pass; a deep review (review.deep) adds one specialist pass per chunk
@@ -45,8 +46,24 @@ export const SPECIALIST_INSTRUCTIONS: Record<Specialist, string> = {
     "Changed files that disagree with each other: a value renamed or added in one file and used under the old or a different name in another, a schema or migration that does not match the code using it, client and server disagreeing on a field or route, a constant or default changed in one place but not its copies. Use the list of files in the change to see what else was changed.",
 };
 
-export function specialistLenses(config: Config): Lens[] {
-  if (!config.review.deep.enabled) return [];
+// Whether this review runs the specialists. "auto" decides from the risky
+// areas of the files the run reviews; `auto` is set only then, so the result
+// can say why deep review did or did not run.
+export interface DeepDecision {
+  run: boolean;
+  auto?: { matched: RiskyArea[] };
+}
+
+export function deepDecision(config: Config, areas: RiskyArea[]): DeepDecision {
+  const { enabled, autoOn } = config.review.deep;
+  if (enabled !== "auto") return { run: enabled };
+  const matched = areas.filter((area) => autoOn.includes(area.kind));
+  return { run: matched.length > 0, auto: { matched } };
+}
+
+// Compared with true, never read as truthy: "auto" is a string.
+export function specialistLenses(config: Config, runDeep = config.review.deep.enabled === true): Lens[] {
+  if (!runDeep) return [];
   return config.review.deep.specialists.map((id) => ({ id, kind: "specialist", instructions: SPECIALIST_INSTRUCTIONS[id] }));
 }
 
@@ -63,8 +80,8 @@ export function customLenses(config: Config): Lens[] {
 }
 
 // Every lens a review of this config runs, the general pass first.
-export function lensesFor(config: Config): Lens[] {
-  return [GENERAL_LENS, ...specialistLenses(config), ...customLenses(config)];
+export function lensesFor(config: Config, runDeep = config.review.deep.enabled === true): Lens[] {
+  return [GENERAL_LENS, ...specialistLenses(config, runDeep), ...customLenses(config)];
 }
 
 const matchers = new WeakMap<object, (path: string) => boolean>();
