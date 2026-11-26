@@ -92,9 +92,11 @@ describe("enqueue", () => {
     expect(await prisma.reviewJob.count()).toBe(1);
   });
 
-  describe("on a change paused after a burst of pushes", () => {
+  describe("a request for a head a push job is reviewing", () => {
     const push = () => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "webhook", event: "push" });
-    const request = () => enqueue({ repositoryId, number: 7, headSha: "aaa", trigger: "comment" });
+    const request = (trigger: "comment" | "manual" = "comment") =>
+      enqueue({ repositoryId, number: 7, headSha: "aaa", trigger });
+    const stored = (id: string) => prisma.reviewJob.findUniqueOrThrow({ where: { id } });
     const pause = () =>
       prisma.reviewJob.create({
         data: {
@@ -109,30 +111,62 @@ describe("enqueue", () => {
         },
       });
 
-    it("queues a request in place of the push job the pause would skip", async () => {
-      await pause();
+    it("is stamped on a queued push, so the burst pause cannot skip it", async () => {
       const pushed = await push();
       const asked = await request();
 
-      // Returning the push would swallow the request: the pause skips it.
-      expect(asked.id).not.toBe(pushed.id);
-      expect(asked.trigger).toBe("comment");
-      expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: pushed.id } })).status).toBe("superseded");
+      expect(asked.id).toBe(pushed.id);
+      expect(await stored(pushed.id)).toMatchObject({ status: "queued", requestedBy: "comment" });
+      expect((await stored(pushed.id)).requestedAt).toBeInstanceOf(Date);
+      expect(await prisma.reviewJob.count()).toBe(1);
     });
 
-    it("queues it behind a push that is already running", async () => {
+    it("is stamped on a running push", async () => {
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running" } });
+
+      expect((await request()).id).toBe(pushed.id);
+      expect(await stored(pushed.id)).toMatchObject({ status: "running", requestedBy: "comment" });
+    });
+
+    it("keeps a manual stamp over a later review command", async () => {
+      const pushed = await push();
+      await request("manual");
+      await request("comment");
+      expect((await stored(pushed.id)).requestedBy).toBe("manual");
+    });
+
+    it("gets a single review with an old pause marker on the change", async () => {
+      // The pause setting may be off by now; a second job would review the
+      // same head twice once the running push is not skipped.
       await pause();
       const pushed = await push();
       await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running" } });
+
+      expect((await request()).id).toBe(pushed.id);
+      expect(await prisma.reviewJob.count({ where: { status: { in: ["queued", "running"] } } })).toBe(1);
+    });
+
+    it("lets the paused skip of a stamped push match nothing", async () => {
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running", attempts: 1 } });
+      await request();
+
+      const skipped = await complete(pushed.id, 1, { status: "skipped", verdict: null, error: BURST_PAUSED_REASON, unrequested: true });
+
+      expect(skipped).toBe(false);
+      expect((await stored(pushed.id)).status).toBe("running");
+    });
+
+    it("gets a job of its own once the push was skipped as paused", async () => {
+      const pushed = await push();
+      await prisma.reviewJob.update({ where: { id: pushed.id }, data: { status: "running", attempts: 1 } });
+      await complete(pushed.id, 1, { status: "skipped", verdict: null, error: BURST_PAUSED_REASON, unrequested: true });
+
       const asked = await request();
 
       expect(asked.id).not.toBe(pushed.id);
-      expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: pushed.id } })).status).toBe("running");
-    });
-
-    it("still answers a request with the push job when nothing is paused", async () => {
-      const pushed = await push();
-      expect((await request()).id).toBe(pushed.id);
+      expect(asked.trigger).toBe("comment");
     });
   });
 

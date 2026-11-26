@@ -3,6 +3,7 @@ import { Prisma } from "../generated/prisma/client.ts";
 import type { ReviewStatus } from "../generated/prisma/client.ts";
 import { instancePolicy, shorterRetention } from "../services/privacyPolicy.ts";
 import { HISTORY_MS } from "../review/learn/suggest.ts";
+import { BURST_PAUSED_REASON } from "../review/config/filters.ts";
 
 // Runs that reviewed nothing: once past the window the whole row goes.
 const DELETED: ReviewStatus[] = ["superseded", "skipped", "cancelled"];
@@ -55,6 +56,20 @@ export async function pruneReviews(
       batchSize,
     );
     if (ids.length) {
+      // A request ends the burst pauses that began before it (worker/burst.ts),
+      // but rows are deleted by when they finished, not when they were made:
+      // a superseded request can go while an older pause marker stays, and
+      // the pause would come back. The markers it ended go with it.
+      deleted += await prisma.$executeRaw`
+        DELETE FROM review_jobs m USING review_jobs r
+        WHERE r.id = ANY(${ids}::uuid[])
+          -- Of the deleted statuses only a superseded request ended a pause.
+          AND r.status = 'superseded'
+          AND (r.trigger IN ('manual', 'comment') OR r.requested_at IS NOT NULL)
+          AND m.repository_id = r.repository_id AND m.number = r.number
+          AND m.trial = false AND m.status = 'skipped' AND m.error = ${BURST_PAUSED_REASON}
+          AND m.created_at < COALESCE(r.requested_at, r.created_at)
+          AND m.id <> ALL(${ids}::uuid[])`;
       deleted += (await prisma.reviewJob.deleteMany({ where: { id: { in: ids } } })).count;
     }
     if (ids.length < batchSize) break;

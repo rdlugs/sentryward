@@ -1633,7 +1633,7 @@ describe("runJob with pauseOnBurst", () => {
   const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
   let seeded = 0;
   // History rows for change 42. Finished statuses, so claimNext never picks them.
-  async function seed(minutes: number, data: { trigger?: "webhook" | "manual" | "comment"; event?: string | null; status?: "superseded" | "completed" | "skipped" | "cancelled" | "failed"; error?: string; trial?: boolean; headSha?: string } = {}) {
+  async function seed(minutes: number, data: { trigger?: "webhook" | "manual" | "comment"; event?: string | null; status?: "superseded" | "completed" | "skipped" | "cancelled" | "failed"; error?: string; trial?: boolean; headSha?: string; requestedAt?: Date } = {}) {
     seeded += 1;
     await prisma.reviewJob.create({
       data: {
@@ -1646,6 +1646,7 @@ describe("runJob with pauseOnBurst", () => {
         error: data.error ?? null,
         trial: data.trial ?? false,
         createdAt: minutesAgo(minutes),
+        ...(data.requestedAt ? { requestedAt: data.requestedAt, requestedBy: "comment" as const } : {}),
       },
     });
   }
@@ -1654,13 +1655,18 @@ describe("runJob with pauseOnBurst", () => {
       where: { id: repositoryId },
       data: { settings: { triggers: { pauseOnBurst: true, pauseAfterPushes: 3, pauseWindowMinutes: 15, ...settings } } },
     });
-  async function runPush() {
+  // `beforeRun` acts once the job is claimed, on the row only: the run keeps
+  // the job as it was claimed, like a request stamped while it ran.
+  async function runPush(beforeRun?: (id: string) => Promise<unknown>) {
     await enqueue({ repositoryId, number: 42, headSha: "burst-head", trigger: "webhook", event: "push" });
     const job = (await claimNext())!;
+    await beforeRun?.(job.id);
     const { runDeps, model } = deps({}, {});
     await runJob(job, runDeps);
     return { stored: await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } }), model };
   }
+  const stamp = (requestedBy: "manual" | "comment") => (id: string) =>
+    prisma.reviewJob.update({ where: { id }, data: { requestedAt: new Date(), requestedBy } });
   const at = (job: { createdAt: Date }) => ({ repositoryId, number: 42, createdAt: job.createdAt });
 
   it("skips the push that completes a burst without calling the model", async () => {
@@ -1724,6 +1730,64 @@ describe("runJob with pauseOnBurst", () => {
     await seed(5, { headSha: "same" });
     await seed(2);
     expect(await pushBurst(at({ createdAt: new Date() }), 15)).toEqual({ pushesInWindow: 2, pausedSinceRequest: false });
+  });
+
+  it("reviews the push that would start a pause when someone asked for it", async () => {
+    await pauseSettings();
+    await seed(10);
+    await seed(5);
+    await enqueue({ repositoryId, number: 42, headSha: "burst-head", trigger: "webhook", event: "push" });
+    // The review command arrives while the push waits: enqueue stamps it.
+    await enqueue({ repositoryId, number: 42, headSha: "burst-head", trigger: "comment" });
+    const job = (await claimNext())!;
+    const { runDeps } = deps({}, {});
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).not.toBe("skipped");
+    expect(stored.requestedBy).toBe("comment");
+  });
+
+  it("reviews a push someone asked for after the run read it", async () => {
+    await pauseSettings();
+    await seed(10);
+    await seed(5);
+
+    const { stored } = await runPush(stamp("manual"));
+
+    expect(stored.status).not.toBe("skipped");
+  });
+
+  it("ignores and clears a review command stamped while commands are off", async () => {
+    await pauseSettings({ command: false });
+    await seed(10);
+    await seed(5);
+
+    const { stored } = await runPush(stamp("comment"));
+
+    expect(stored).toMatchObject({ status: "skipped", error: BURST_PAUSED_REASON, requestedAt: null, requestedBy: null });
+  });
+
+  it("does not count pushes skipped for another reason", async () => {
+    // Pushes to a draft, then it was marked ready: none of them was reviewable.
+    for (const minutes of [10, 9, 8, 7, 6]) {
+      await seed(minutes, { status: "skipped", error: "Draft changes are not reviewed automatically" });
+    }
+    await seed(4, { event: "ready", status: "completed" });
+    expect(await pushBurst(at({ createdAt: new Date() }), 15)).toEqual({ pushesInWindow: 0, pausedSinceRequest: false });
+
+    // A push the pause skipped still counts.
+    await seed(3, { status: "skipped", error: BURST_PAUSED_REASON });
+    expect((await pushBurst(at({ createdAt: new Date() }), 15)).pushesInWindow).toBe(1);
+  });
+
+  it("is lifted by a request stamped on a push", async () => {
+    await seed(120, { status: "skipped", error: BURST_PAUSED_REASON });
+    await seed(70, { status: "superseded", requestedAt: minutesAgo(60) });
+    expect(await pushBurst(at({ createdAt: new Date() }), 15)).toEqual({ pushesInWindow: 0, pausedSinceRequest: false });
+    // Not before the request was made.
+    expect((await pushBurst(at({ createdAt: minutesAgo(65) }), 15)).pausedSinceRequest).toBe(true);
   });
 
   it("does nothing while the setting is off", async () => {

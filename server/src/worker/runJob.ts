@@ -1,7 +1,7 @@
 import { env } from "../config/env.ts";
 import type { ForgeConnection, IgnoreReason, ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
-import { skipReason, walkthroughEnabled } from "../review/config/filters.ts";
+import { BURST_PAUSED_REASON, skipReason, walkthroughEnabled } from "../review/config/filters.ts";
 import { loadDashboardConfigs, loadReviewConfig } from "../review/config/load.ts";
 import { loadAgentFiles, type AgentFile } from "../review/context/agentFiles.ts";
 import { customReviewerSchema, type Config } from "../review/config/schema.ts";
@@ -287,22 +287,41 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     loaded = await loadConfig();
   }
   const config = withTrialReviewer(loaded.config, job);
+  // A push someone asked for while it waited answers that request, so the
+  // burst pause never skips it (see enqueue). A review command is honoured
+  // only while commands are on; a stamp that is not honoured is cleared, so
+  // the stamps left on reviewed jobs are the ones that ended a pause
+  // (worker/burst.ts reads them).
+  const pausable = job.trigger === "webhook" && job.event === "push" && config.triggers.pauseOnBurst;
+  if (pausable && job.requestedBy && !honoursRequest(job.requestedBy, config)) {
+    await prisma.reviewJob.updateMany({
+      where: { id: job.id, status: "running", attempts: job.attempts, requestedBy: "comment" },
+      data: { requestedAt: null, requestedBy: null },
+    });
+  }
   // Read only when it can matter, so other jobs pay no extra queries.
   const burst =
-    job.trigger === "webhook" && job.event === "push" && config.triggers.pauseOnBurst
+    pausable && !(job.requestedBy && honoursRequest(job.requestedBy, config))
       ? await pushBurst(job, config.triggers.pauseWindowMinutes)
       : undefined;
   const skip = skipReason(job, config, changeSet, burst);
   if (skip) {
-    await complete(job.id, job.attempts, {
-      status: "skipped",
-      verdict: null,
-      resolvedConfig: { config: storedTrialConfig(config, job), sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory },
-      error: skip,
-      headSha: changeSet.forgeRef.headSha,
-      baseSha: changeSet.forgeRef.baseSha,
-    });
-    return;
+    const finishSkipped = () =>
+      complete(job.id, job.attempts, {
+        status: "skipped",
+        verdict: null,
+        resolvedConfig: { config: storedTrialConfig(config, job), sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory },
+        error: skip,
+        headSha: changeSet.forgeRef.headSha,
+        baseSha: changeSet.forgeRef.baseSha,
+        // A request stamped since the job was read must not be dropped with it.
+        unrequested: skip === BURST_PAUSED_REASON,
+      });
+    if (skip !== BURST_PAUSED_REASON) {
+      await finishSkipped();
+      return;
+    }
+    if (!(await pausedSkipAnswered(job, config, finishSkipped))) return;
   }
 
   // A trial posts nothing: no progress note, comments or commit status.
@@ -701,4 +720,36 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     // merge promotes this run's findings and resolves with this run's result.
     await recordSeenClose();
   }
+}
+
+// Finishes a push the burst pause skips, unless a request was stamped on it
+// since the job was read (see enqueue): true means review it after all. A
+// stamp that is not honoured (a review command while commands are off) is
+// cleared and the skip tried again; each retry needs another request to land
+// in between, so the loop ends.
+async function pausedSkipAnswered(
+  job: ReviewJob,
+  config: { triggers: { command: boolean } },
+  finishSkipped: () => Promise<boolean>,
+): Promise<boolean> {
+  for (;;) {
+    if (await finishSkipped()) return false;
+    const now = await prisma.reviewJob.findUnique({
+      where: { id: job.id },
+      select: { status: true, attempts: true, requestedBy: true },
+    });
+    // Cancelled or taken over by another attempt: not this run's to finish.
+    if (!now || now.status !== "running" || now.attempts !== job.attempts) return false;
+    if (now.requestedBy && honoursRequest(now.requestedBy, config)) return true;
+    await prisma.reviewJob.updateMany({
+      where: { id: job.id, status: "running", attempts: job.attempts, requestedBy: "comment" },
+      data: { requestedAt: null, requestedBy: null },
+    });
+  }
+}
+
+// Whether a request stamped on a push job (see enqueue) is honoured: a review
+// command only while commands are on, as skipReason treats a comment job.
+function honoursRequest(requestedBy: ReviewJob["trigger"], config: { triggers: { command: boolean } }): boolean {
+  return requestedBy === "manual" || (requestedBy === "comment" && config.triggers.command);
 }

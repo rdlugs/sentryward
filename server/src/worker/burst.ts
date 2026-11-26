@@ -2,8 +2,6 @@ import type { Prisma, ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
 import { BURST_PAUSED_REASON, type PushBurst } from "../review/config/filters.ts";
 
-// Either the shared client or the transaction enqueue() holds the change's
-// lock in, so the pause check there sees the same rows as its duplicate check.
 type Db = Prisma.TransactionClient;
 
 // The change's push history for triggers.pauseOnBurst, as skipReason reads it.
@@ -13,10 +11,12 @@ type Db = Prisma.TransactionClient;
 // made after it cannot lift a pause it was part of.
 //
 // A requested review (dashboard or "/sentryward review") ends a pause and
-// restarts the count, so only pushes after the latest request are counted. A
-// request that was skipped (review commands turned off) or cancelled never
-// became a review, so it ends nothing. A superseded one still counts: the push
-// that replaced it is reviewed, which answers it.
+// restarts the count, so only pushes after the latest request are counted. So
+// does a request stamped on a push job (see enqueue), as of when it was made:
+// the worker clears a stamp it does not honour. A request that was skipped
+// (review commands turned off) or cancelled never became a review, so it ends
+// nothing. A superseded one still counts: the push that replaced it is
+// reviewed, which answers it.
 //
 // A pause is remembered through the skipped job that started it rather than a
 // flag on the change, so it lasts past the window without any new state. A
@@ -27,12 +27,16 @@ type Db = Prisma.TransactionClient;
 // reviewed since, and a request is what ends it. With REVIEW_RETENTION_DAYS
 // set, retention deletes the skipped job after those days, which lifts a
 // pause nobody acted on; a change idle that long is better reviewed again
-// than left silent.
+// than left silent. Retention also deletes the markers a request ended along
+// with that request, so deleting it cannot bring the pause back.
 //
 // Pushes are counted by distinct head: a forge redelivery of a push whose job
 // was superseded or skipped is queued again (enqueueFromWebhook does not count
-// those as seen), and must not count twice. Every status counts otherwise: a
-// superseded or skipped push was still a push. Trials never speak for the
+// those as seen), and must not count twice. Superseded, running and paused
+// pushes count: each would have been reviewed. A push skipped for any other
+// reason (a draft, review on push turned off, the filters) would not, so it
+// is not part of a burst, and a change is never paused before a push of it
+// could be reviewed. Trials never speak for the
 // change, so they neither count nor end a pause. The queries use the
 // (repository_id, number) index; a change has few jobs.
 export async function pushBurst(
@@ -46,7 +50,14 @@ export async function pushBurst(
 
   const [pushes, pausedSinceRequest] = await Promise.all([
     prisma.reviewJob.findMany({
-      where: { ...change, trial: false, trigger: "webhook", event: "push", createdAt: { ...since, lte: job.createdAt } },
+      where: {
+        ...change,
+        trial: false,
+        trigger: "webhook",
+        event: "push",
+        createdAt: { ...since, lte: job.createdAt },
+        OR: [{ status: { not: "skipped" } }, { error: BURST_PAUSED_REASON }],
+      },
       distinct: ["headSha"],
       select: { headSha: true },
     }),
@@ -55,28 +66,27 @@ export async function pushBurst(
   return { pushesInWindow: pushes.length, pausedSinceRequest };
 }
 
-// Whether the change is paused as of `at`. enqueue() asks this so a request on
-// a paused change is not answered by a push job the pause will skip.
-export async function pausedAt(db: Db, repositoryId: string, number: number, at: Date): Promise<boolean> {
-  const change = { repositoryId, number };
-  return livePause(db, change, at, await lastRequest(db, change, at));
-}
-
 type ChangeKey = { repositoryId: string; number: number };
 
 async function lastRequest(db: Db, change: ChangeKey, at: Date): Promise<Date | null> {
-  const row = await db.reviewJob.findFirst({
-    where: {
-      ...change,
-      trial: false,
-      trigger: { in: ["manual", "comment"] },
-      status: { notIn: ["skipped", "cancelled"] },
-      createdAt: { lte: at },
-    },
-    orderBy: { createdAt: "desc" },
-    select: { createdAt: true },
-  });
-  return row?.createdAt ?? null;
+  const answered = { ...change, trial: false, status: { notIn: ["skipped" as const, "cancelled" as const] } };
+  const [job, stamped] = await Promise.all([
+    db.reviewJob.findFirst({
+      where: { ...answered, trigger: { in: ["manual", "comment"] }, createdAt: { lte: at } },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    }),
+    db.reviewJob.findFirst({
+      where: { ...answered, requestedAt: { lte: at } },
+      orderBy: { requestedAt: "desc" },
+      select: { requestedAt: true },
+    }),
+  ]);
+  return latest([job?.createdAt ?? null, stamped?.requestedAt ?? null]);
+}
+
+function latest(dates: (Date | null)[]): Date | null {
+  return dates.reduce<Date | null>((max, d) => (d && (!max || d > max) ? d : max), null);
 }
 
 // A pause marker counts only after both the last request and the last push
@@ -94,10 +104,7 @@ async function livePause(db: Db, change: ChangeKey, at: Date, request: Date | nu
     orderBy: { createdAt: "desc" },
     select: { createdAt: true },
   });
-  const after = [request, reviewed?.createdAt ?? null].reduce<Date | null>(
-    (latest, d) => (d && (!latest || d > latest) ? d : latest),
-    null,
-  );
+  const after = latest([request, reviewed?.createdAt ?? null]);
   const marker = await db.reviewJob.findFirst({
     where: {
       ...change,

@@ -16,12 +16,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `pause_window_minutes` (default 15). The change stays paused until someone
   comments `/sentryward review` or starts a review from the dashboard, after
   which pushes are counted again. A request that was skipped (review commands
-  off) or cancelled does not end the pause, and a request made while a push
-  for the same commit is waiting is queued on its own instead of being folded
-  into that push. Pushes are counted by distinct commit, so forge redeliveries
-  count once, and a pause is forgotten once a later push was reviewed (for
-  example, with the setting turned off meanwhile). A paused push is recorded as
-  skipped with the reason, and the Triggers summary shows the limits.
+  off) or cancelled does not end the pause. A request made while a push for
+  the same commit is queued or running is recorded on that push, which then
+  answers it: the pause never skips it, even when it is the push that would
+  start the pause, and the commit is reviewed once. Pushes are counted by
+  distinct commit, so forge redeliveries count once; pushes skipped for another
+  reason (a draft, review on push off, filters) do not count. A pause is
+  forgotten once a later push was reviewed (for example, with the setting
+  turned off meanwhile), and retention never brings back a pause a request
+  ended. A paused push is recorded as skipped with the reason, and the
+  Triggers summary shows the limits.
 
 - Coding-agent instruction files as review guidance. `review.agent_files.enabled`
   (**Coding-agent instruction files** on the Guidance tab) shows every review
