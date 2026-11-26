@@ -3,6 +3,7 @@ import type { ForgeConnection, IgnoreReason, ReviewJob } from "../generated/pris
 import { prisma } from "../lib/prisma.ts";
 import { skipReason, walkthroughEnabled } from "../review/config/filters.ts";
 import { loadDashboardConfigs, loadReviewConfig } from "../review/config/load.ts";
+import { loadAgentFiles, type AgentFile } from "../review/context/agentFiles.ts";
 import { customReviewerSchema, type Config } from "../review/config/schema.ts";
 import type { ChangeSet, RejectedFinding, ToolAnnotation } from "../review/core/models.ts";
 import { priceUsage } from "../review/core/pricing/pricing.ts";
@@ -534,6 +535,29 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   let result;
   try {
+    // From the base revision, like the repository file: a change must not be
+    // able to steer its own review. Off means no forge calls at all. An
+    // incremental review takes guidance only for the files it reviews again, so
+    // folders it leaves alone neither cost reads nor use up maxChars. Loaded
+    // inside the try so a failure still stops the watch and keeps what the
+    // capability probes learned; the watch's signal stops the reads if the
+    // review is cancelled meanwhile.
+    let agentFiles: AgentFile[] | undefined;
+    if (config.review.agentFiles.enabled) {
+      const loadedFiles = await loadAgentFiles({
+        adapter: forge,
+        project: repo.fullPath,
+        ref: changeSet.forgeRef.baseSha,
+        changedFiles: increment ? changeSet.files.filter((file) => increment.paths.has(file.path)) : changeSet.files,
+        ignorePaths: config.ignorePaths,
+        maxChars: config.review.agentFiles.maxChars,
+        cache: fileCache,
+        signal: watch.signal,
+      });
+      agentFiles = loadedFiles.files;
+      warnings.push(...loadedFiles.warnings);
+    }
+
     result = await runReview(
       {
         changeSet,
@@ -545,6 +569,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
         increment,
         toolAnnotations: tools,
         ...(job.focus ? { focus: job.focus } : {}),
+        ...(agentFiles?.length ? { agentFiles } : {}),
       },
       {
         generate: abortableGenerate(generate, watch.signal),

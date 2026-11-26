@@ -23,6 +23,7 @@ import { planChunks, type Chunk } from "./context/chunk.ts";
 import { gatherContext, type ContextSource, type ReachedCaller } from "./context/gather.ts";
 import { diffAreas, floorBlastRadius, MAX_RISKY_AREAS, riskyAreas, withReach } from "./context/risk.ts";
 import { classifyFiles } from "./context/ignore.ts";
+import { agentFilesChars, type AgentFile } from "./context/agentFiles.ts";
 import { MAX_MANIFEST_CHARS, MAX_REJECTED_CHARS, reviewSystemPrompt, type ManifestEntry } from "./llm/prompt.ts";
 import { reservedBudget, searchBudget } from "./agent/tools.ts";
 import { ToolsUnsupportedError, toolsUnsupportedWarning, type GenerateAgentic } from "./llm/agentic.ts";
@@ -77,6 +78,10 @@ export interface RunReviewInput {
   // The area to look hardest at, for this run only (ReviewJob.focus). A
   // priority, not a filter: problems elsewhere are still reported.
   focus?: string;
+  // Coding-agent instruction files from the base revision, already fitted to
+  // review.agentFiles.maxChars (context/agentFiles.ts). Fetched by the caller
+  // when review.agentFiles is on; shown to every review pass as guidance.
+  agentFiles?: AgentFile[];
 }
 
 export interface Increment {
@@ -187,6 +192,9 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       USER_PROMPT_ALLOWANCE +
       // Only a review asked for a focus sends that section, so only it pays.
       (input.focus ? Math.ceil(MAX_FOCUS / 4) : 0) +
+      // Measured, not allowed for: the loader already fitted them, and the
+      // lead-in is covered by the user prompt allowance.
+      (input.agentFiles?.length ? Math.ceil(agentFilesChars(input.agentFiles) / 4) : 0) +
       (agentic ? AGENTIC_ALLOWANCE + config.review.agent.maxToolTokens : 0);
     let plan = planChunks(scoped, diffTokenBudget(config, overhead), config.review.maxChunks);
     // Only a change that needs several passes gets the manifest, so only then
@@ -300,7 +308,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     | { chunk: Chunk; lens: Lens; review?: undefined; error: string; spent: LlmUsage[] };
   const reviewPass = async (chunk: Chunk, lens: Lens): Promise<PassOutcome> => {
     const review = () =>
-      reviewChunk(deps.generate, changeSet, chunk, chunks.length, config, input.rejectedFindings, manifest, input.focus, lens);
+      reviewChunk(deps.generate, changeSet, chunk, chunks.length, config, input.rejectedFindings, manifest, input.focus, lens, input.agentFiles);
     if (!agentic) return { chunk, lens, review: await review() };
     try {
       const { toolContext, ...result } = await reviewChunkAgentic(
@@ -314,6 +322,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
         manifest,
         input.focus,
         lens,
+        input.agentFiles,
       );
       return { chunk: toolContext ? { ...chunk, toolContext } : chunk, lens, review: result };
     } catch (err) {
@@ -563,6 +572,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     findings,
     ...(walkthrough ? { walkthrough } : {}),
     ...(input.focus ? { focus: input.focus } : {}),
+    ...(input.agentFiles?.length ? { agentFiles: input.agentFiles.map((file) => file.path) } : {}),
     ...(deep.auto ? { deepAuto: { ran: deep.run, matched: deep.auto.matched.slice(0, MAX_RISKY_AREAS) } } : {}),
     ...(increment
       ? {

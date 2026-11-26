@@ -1,8 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import type { ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
-import type { Config } from "../review/config/schema.ts";
+import { DEFAULT_CONFIG, type Config } from "../review/config/schema.ts";
 import { reviewResultSchema, type ChangeSet } from "../review/core/models.ts";
+import { isAgentFilePath } from "../review/context/agentFiles.ts";
 import type { ForgeCache } from "../review/forge/cache.ts";
 import type { ForgeAdapter } from "../review/forge/types.ts";
 import type { Increment } from "../review/pipeline.ts";
@@ -47,6 +48,31 @@ function reviewSettings(config: Config) {
   ) as unknown;
 }
 
+// Why the instruction files may differ from the ones the last review read, or
+// null when they cannot. Any changed instruction file counts, even one in a
+// folder this change does not touch: such edits are rare, and a full review is
+// the safe side to err on.
+async function agentFilesChanged(
+  forge: Pick<ForgeAdapter, "compareCommits">,
+  project: string,
+  lastBase: string | null,
+  base: string,
+  cache: ForgeCache | undefined,
+): Promise<string | null> {
+  if (!lastBase) return "the last review's base revision is unknown, so its agent instruction files cannot be compared";
+  if (lastBase === base) return null;
+  let changed: string[] | null;
+  try {
+    changed = await forge.compareCommits(project, lastBase, base, cache);
+  } catch (err) {
+    return `the base revisions could not be compared for agent instruction file changes: ${message(err)}`;
+  }
+  if (!changed) return `the last review's base ${lastBase.slice(0, 7)} is no longer an ancestor of the base`;
+  return changed.some(isAgentFilePath)
+    ? "agent instruction files changed on the base branch since the last review"
+    : null;
+}
+
 function storedConfig(resolvedConfig: unknown): Config | undefined {
   const config = (resolvedConfig as { config?: Config } | null)?.config;
   return config?.review && config.llm ? config : undefined;
@@ -81,23 +107,40 @@ export async function incrementFor({
       trial: false,
     },
     orderBy: { finishedAt: "desc" },
-    select: { headSha: true, result: true, resolvedConfig: true },
+    select: { headSha: true, baseSha: true, result: true, resolvedConfig: true },
   });
   if (!last) return undefined;
   const parsed = reviewResultSchema.safeParse(last.result);
   if (!parsed.success || parsed.data.status !== "completed") return undefined;
   const previous = parsed.data;
   const stored = storedConfig(last.resolvedConfig);
-  // Configs stored before review.impactDepth existed have none; caller
-  // context only adds evidence to findings, so they do not force a full
-  // review.
+  // Configs stored before review.impactDepth or review.agentFiles existed
+  // have none. Caller context only adds evidence to findings, so it does not
+  // force a full review. Agent files were off for every review stored before
+  // the setting existed, so the default (off) is what that review used:
+  // turning them on since still forces one.
   const lastConfig = stored && {
     ...stored,
-    review: { ...stored.review, impactDepth: stored.review.impactDepth ?? config.review.impactDepth },
+    review: {
+      ...stored.review,
+      impactDepth: stored.review.impactDepth ?? config.review.impactDepth,
+      agentFiles: stored.review.agentFiles ?? DEFAULT_CONFIG.review.agentFiles,
+    },
   };
   if (!lastConfig || !isDeepStrictEqual(reviewSettings(lastConfig), reviewSettings(config))) {
     warnings.push("Full review: the review settings changed since the last review");
     return undefined;
+  }
+
+  // Agent instruction files are read from the base revision, so the settings
+  // alone cannot say whether carried findings saw the same guidance: an edit
+  // merged to the base branch since then needs every file read again under it.
+  if (config.review.agentFiles.enabled) {
+    const reason = await agentFilesChanged(forge, project, last.baseSha, changeSet.forgeRef.baseSha, cache);
+    if (reason) {
+      warnings.push(`Full review: ${reason}`);
+      return undefined;
+    }
   }
 
   const toSha = changeSet.forgeRef.headSha;

@@ -271,6 +271,14 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             <span title={customReviewers.join(", ")}>{customReviewers.join(", ")}</span>
           </Row>
         )}
+        {result?.agentFiles && result.agentFiles.length > 0 && (
+          // Repository paths, so rendered as text; the full list is on hover.
+          <Row label="Agent files">
+            <span title={`Coding-agent instruction files shown to the reviewer as guidance: ${result.agentFiles.join(", ")}`}>
+              {result.agentFiles.join(", ")}
+            </span>
+          </Row>
+        )}
         {review.focus && (
           <Row label="Focus">
             {/* The row truncates; the whole request is on hover. */}

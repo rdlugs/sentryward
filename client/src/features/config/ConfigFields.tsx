@@ -420,6 +420,16 @@ const CHOICE_INFO: Record<
       { value: "auto", label: "Auto (risky changes only)" },
     ],
   },
+  // Read in server/src/review/context/agentFiles.ts.
+  agentFiles: {
+    label: "Coding-agent instruction files",
+    description:
+      "Show the reviewer CLAUDE.md and AGENTS.md from the repository root and the folders of changed files, plus .cursorrules, .github/copilot-instructions.md and matching .cursor/rules/*.mdc rules. Read from the base branch as low-priority hints: they never become rules and never block a review.",
+    options: [
+      { value: "false", label: "Off" },
+      { value: "true", label: "On" },
+    ],
+  },
 }
 
 // What each deep review specialist looks for, as the checkbox grid shows it.
@@ -611,6 +621,10 @@ const NUMBER_INFO: Record<NumberName, { label: string; description: string }> = 
   },
   maxSteps: { label: "Agent steps", description: "Model calls per agentic pass, the final report included." },
   maxToolTokens: { label: "Agent tool tokens", description: "What tools may return in one pass before the model must report." },
+  maxChars: {
+    label: "Max instruction characters",
+    description: "How much of the instruction files each review pass is shown, nearest folder first. About four characters per token.",
+  },
   maxSearches: { label: "Agent searches", description: "Code searches across the whole review. GitHub rate-limits search." },
   maxInlineComments: {
     label: "Max inline comments",
@@ -1826,6 +1840,7 @@ export function ConfigFields(props: {
   const deepChoice = resolvedChoice("deepReview")
   const autoOnOff = deepChoice !== undefined && deepChoice !== "auto"
   const fileContextOff = resolvedFlag("fileContext") === false
+  const agentFilesOff = resolvedChoice("agentFiles") === "false"
   const severityFloorValue = resolvedText("severityFloor")
   const blockOnValue = resolvedText("blockOn")
 
@@ -2577,6 +2592,8 @@ export function ConfigFields(props: {
           <FieldDescription>Project conventions passed to the reviewer with every change.</FieldDescription>
           {errors.instructions && <FieldError>{errors.instructions}</FieldError>}
         </Field>
+        {choiceField("agentFiles")}
+        <Nested>{numberField("maxChars", undefined, agentFilesOff)}</Nested>
         <LanguageInstructionsField
           rows={form.languageInstructions}
           onChange={(languageInstructions) => props.onChange({ ...form, languageInstructions })}

@@ -22,6 +22,11 @@ export interface ForgeInfo {
   suggestionInfo(startLine: number, endLine: number): string;
   // A commit viewed inside its change, so the link keeps the PR/MR context.
   commitUrl(changeUrl: string, sha: string): string;
+  // What reading a symlink's path returns: the link's target path, or the
+  // target's content. Agent instruction files (context/agentFiles.ts) follow
+  // the first and must not reinterpret the second, whose text can look like a
+  // path.
+  symlinkReadsAs: "target" | "content";
 }
 
 function pathMatcher(pattern: RegExp) {
@@ -47,6 +52,7 @@ export const FORGE_INFO: Record<ForgeProvider, ForgeInfo> = {
     // it to replace.
     suggestionInfo: (startLine, endLine) => `suggestion:-0+${endLine - startLine}`,
     commitUrl: (changeUrl, sha) => `${changeUrl}/diffs?commit_id=${sha}`,
+    symlinkReadsAs: "target",
   },
   github: {
     name: "GitHub",
@@ -56,6 +62,7 @@ export const FORGE_INFO: Record<ForgeProvider, ForgeInfo> = {
     // GitHub's suggestion replaces exactly the commented range.
     suggestionInfo: () => "suggestion",
     commitUrl: (changeUrl, sha) => `${changeUrl}/commits/${sha}`,
+    symlinkReadsAs: "content",
   },
 };
 

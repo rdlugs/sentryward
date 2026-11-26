@@ -94,6 +94,7 @@ export interface ConfigOverride {
     context?: ContextMode
     agent?: { maxSteps?: number; maxToolTokens?: number; maxSearches?: number }
     deep?: { enabled?: DeepEnabled; autoOn?: RiskKind[]; specialists?: string[] }
+    agentFiles?: { enabled?: boolean; maxChars?: number }
   }
   output?: {
     walkthrough?: boolean
@@ -191,6 +192,7 @@ export interface EffectiveConfig {
     context: ContextMode
     agent: { maxSteps: number; maxToolTokens: number; maxSearches: number }
     deep: { enabled: DeepEnabled; autoOn: RiskKind[]; specialists: string[] }
+    agentFiles: { enabled: boolean; maxChars: number }
   }
   output: {
     walkthrough: boolean

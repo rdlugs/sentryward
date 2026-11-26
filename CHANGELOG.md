@@ -10,6 +10,30 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Coding-agent instruction files as review guidance. `review.agent_files.enabled`
+  (**Coding-agent instruction files** on the Guidance tab) shows every review
+  pass the `CLAUDE.md` and `AGENTS.md` files from the repository root and the
+  folders of changed files, plus `.cursorrules`, `.github/copilot-instructions.md`
+  and the `.cursor/rules/**/*.mdc` rules that apply to the change. They are read
+  from the base revision, wrapped as untrusted, ranked below the team rules and
+  never block a review. `review.agent_files.max_chars` caps their total per pass
+  (8000 by default, nearest folder first); files left out, cut or unreadable are
+  warnings. Cursor globs work as in Cursor (unquoted, comma-separated with
+  brace sets such as `**/*.{ts,tsx}` kept whole, and slashless globs match at
+  any depth, with a quoted `alwaysApply: "true"` honoured); up to 30 rules are checked and at most 10 that apply
+  are used, from at most 8 rule folders; rules or folders past their caps are warnings. Glob lists
+  are read even when a rule's frontmatter is not valid YAML, and a rule whose globs cannot be read
+  is a warning. At most 12 folders are checked, preferring those above the most reviewed files, so
+  a package-level `CLAUDE.md` is not crowded out by deeply nested ones; the warning names the folders
+  skipped. A symlinked `AGENTS.md` is followed on GitLab as on GitHub, even when its target is also
+  read on its own. An incremental review uses
+  only the instruction files for the files it reviews again, and files the
+  review leaves out (pure renames, withheld patches, files moved into an ignored path) do not pick folders or
+  match rules. A push after an instruction file changed on the base branch gets a full review, since
+  carried findings were made under the old guidance. Reviews stored before the setting existed still allow an
+  incremental review. Off by default. The review result lists the files used
+  (`agentFiles`) and the review page's sidebar shows them.
+
 - Auto deep review. `review.deep.enabled: auto` (Deep review > Auto on the
   Finding Types tab) runs the specialist passes only when the reviewed files
   touch authorization, database writes or API routes, as found by the existing
@@ -700,6 +724,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- An invalid **Max inline comments** value marks the Display tab with an error,
+  as other fields do, instead of disabling save with no tab showing why.
 - Saving the global config or a repository's settings from a page loaded
   before someone else changed them (another admin's save, or an approved rule
   suggestion) is refused with "changed since the page loaded; reload and try
