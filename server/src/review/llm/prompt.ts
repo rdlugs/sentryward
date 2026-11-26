@@ -390,7 +390,9 @@ export function walkthroughUserPrompt(changeSet: ChangeSet, diffText: string, ex
     tasks.push(`highLevelSummary, following these instructions from the repository owner:\n${extras.highLevelSummary}`);
   }
   if (extras?.linkedIssues) {
-    tasks.push("linkedIssues: for each linked issue below, judge how well the change addresses it.");
+    tasks.push(
+      "linkedIssues: for each linked issue below, judge how well the change addresses it. In requirements, split the issue into the concrete, checkable things it asks for (acceptance criteria, checklist items, explicit asks), leaving out discussion and anything the issue itself puts out of scope. Mark each met, partial, missing or unclear (unclear when the diff shown cannot tell). For met and partial, give the changed file and new-file line that do it. For partial and missing, give a one-sentence fix and, when it is clear, the changed file where it belongs. Never cite a file that is not in the diff.",
+    );
   }
   if (extras?.candidateIssues) {
     tasks.push(

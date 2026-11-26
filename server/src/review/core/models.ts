@@ -302,6 +302,18 @@ export type RejectedFinding = { title: string; category: string; file: string; n
 export const issueAssessmentSchema = z.enum(["addressed", "partial", "not_addressed", "unclear"]);
 export type IssueAssessment = z.infer<typeof issueAssessmentSchema>;
 
+// One requirement of a linked issue, as the walkthrough judged it. The file
+// is kept only when it is a changed file and the line only when the diff
+// shows it (llm/walkthrough.ts), so neither can point somewhere invented.
+export const issueRequirementSchema = z.object({
+  text: z.string(),
+  status: z.enum(["met", "partial", "missing", "unclear"]),
+  file: z.string().optional(),
+  line: z.number().int().positive().optional(),
+  fix: z.string().optional(),
+});
+export type IssueRequirement = z.infer<typeof issueRequirementSchema>;
+
 export const RISK_KINDS = ["auth", "database", "api"] as const;
 
 // A sensitive area the change touches or reaches, found by pattern in the
@@ -329,7 +341,14 @@ export const walkthroughSchema = z.object({
   sequenceDiagram: z.string().optional(),
   highLevelSummary: z.string().optional(),
   linkedIssues: z
-    .array(issueRefSchema.extend({ assessment: issueAssessmentSchema, note: z.string() }))
+    .array(
+      issueRefSchema.extend({
+        assessment: issueAssessmentSchema,
+        note: z.string(),
+        // Optional: results stored before it existed have none.
+        requirements: z.array(issueRequirementSchema).optional(),
+      }),
+    )
     .optional(),
   relatedIssues: z.array(issueRefSchema.extend({ reason: z.string() })).optional(),
   // Optional: results stored before it existed have none.

@@ -99,6 +99,9 @@ export const walkthroughOutputSchema = z.object({
 export type WalkthroughOutput = z.infer<typeof walkthroughOutputSchema>;
 
 export const ISSUE_ASSESSMENTS = ["addressed", "partial", "not_addressed", "unclear"] as const;
+export const REQUIREMENT_STATUSES = ["met", "partial", "missing", "unclear"] as const;
+// Enough for a checklist; the long tail of an issue is usually discussion.
+export const MAX_ISSUE_REQUIREMENTS = 8;
 
 const sequenceDiagramField = z
   .string()
@@ -112,6 +115,21 @@ const linkedIssuesField = z
       ref: z.string().describe("The issue reference exactly as given, e.g. #12"),
       assessment: z.enum(ISSUE_ASSESSMENTS),
       note: z.string().describe("One sentence on what is or is not addressed"),
+      // Every field is required, with empty values for "none": providers'
+      // structured output modes handle required fields more reliably.
+      requirements: z
+        .array(
+          z.object({
+            text: z.string().describe("One concrete, checkable requirement from the issue, in a short sentence"),
+            status: z.enum(REQUIREMENT_STATUSES),
+            file: z
+              .string()
+              .describe("Changed file that meets it, or where the missing part belongs, exactly as in the diff; empty string when none"),
+            line: z.number().describe("New-file line in that file from the diff, or 0 when none"),
+            fix: z.string().describe("For partial or missing: one sentence on what to add; empty string otherwise"),
+          }),
+        )
+        .describe(`At most ${MAX_ISSUE_REQUIREMENTS} requirements taken from the issue text (acceptance criteria, checklist items, explicit asks)`),
     }),
   )
   .describe("One entry per linked issue given");
@@ -252,6 +270,19 @@ export function repairWalkthroughOutput(raw: unknown): unknown {
               ref: entry.ref,
               assessment: enumValue(entry.assessment ?? entry.status, ISSUE_ASSESSMENTS, "unclear"),
               note: String(entry.note ?? ""),
+              requirements: (Array.isArray(entry.requirements) ? entry.requirements : [])
+                .map((item) => camelKeys(record(item)))
+                .filter((item) => typeof (item.text ?? item.requirement) === "string")
+                .map((item) => {
+                  const line = Number(numberValue(item.line ?? item.startLine));
+                  return {
+                    text: String(item.text ?? item.requirement),
+                    status: enumValue(item.status, REQUIREMENT_STATUSES, "unclear"),
+                    file: typeof (item.file ?? item.path) === "string" ? String(item.file ?? item.path) : "",
+                    line: Number.isFinite(line) ? line : 0,
+                    fix: typeof item.fix === "string" ? item.fix : "",
+                  };
+                }),
             })),
         }
       : {}),

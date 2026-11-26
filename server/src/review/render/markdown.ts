@@ -5,6 +5,7 @@ import type {
   Finding,
   InvalidatedReason,
   IssueAssessment,
+  IssueRequirement,
   IssueRef,
   Lifecycle,
   Omission,
@@ -184,8 +185,14 @@ function location(finding: Located): string {
   return `\`${finding.file}:${lines}\``;
 }
 
+// A requirement gap the walkthrough could place in no changed file has an
+// empty file; its title already names the issue, so it stands alone.
+function locatedTitle(finding: Located & { title: string }): string {
+  return finding.file ? `${location(finding)}: ${inline(finding.title)}` : inline(finding.title);
+}
+
 function indexLine(finding: Located & { severity: Severity; title: string }): string {
-  return `- ${SEVERITY_ICON[finding.severity]} **${finding.severity}** ${location(finding)}: ${inline(finding.title)}`;
+  return `- ${SEVERITY_ICON[finding.severity]} **${finding.severity}** ${locatedTitle(finding)}`;
 }
 
 function bucketSummary(bucket: Bucket, count: number): string {
@@ -259,6 +266,32 @@ const ASSESSMENT_TEXT: Record<IssueAssessment, string> = {
   unclear: "❔ Unclear",
 };
 
+const REQUIREMENT_TEXT: Record<IssueRequirement["status"], string> = {
+  met: "✅ Met",
+  partial: "🟡 Partly met",
+  missing: "❌ Missing",
+  unclear: "❔ Unclear",
+};
+
+// One table per issue that was split into requirements. Results stored before
+// requirements existed have none and render the summary table alone.
+function requirementLines(issue: { ref: string; requirements?: IssueRequirement[] }): string[] {
+  const requirements = issue.requirements ?? [];
+  if (!requirements.length) return [];
+  const met = requirements.filter((requirement) => requirement.status === "met").length;
+  const lines = ["", `**${inline(issue.ref)}: ${met} of ${requirements.length} met**`, ""];
+  lines.push("| Requirement | Status | Where | Fix |", "| --- | --- | --- | --- |");
+  for (const requirement of requirements) {
+    const where = requirement.file
+      ? `\`${codeCell(requirement.file)}${requirement.line ? `:${requirement.line}` : ""}\``
+      : "";
+    lines.push(
+      `| ${inline(requirement.text)} | ${REQUIREMENT_TEXT[requirement.status]} | ${where} | ${inline(requirement.fix ?? "")} |`,
+    );
+  }
+  return lines;
+}
+
 function issueLink(issue: IssueRef): string {
   const title = inline(issue.title);
   return issue.url && /^https?:\/\//.test(issue.url) ? `[${issue.ref}](${issue.url}) ${title}` : `${issue.ref} ${title}`;
@@ -277,6 +310,7 @@ function walkthroughExtras(walkthrough: Walkthrough, options: WalkthroughOptions
     for (const issue of walkthrough.linkedIssues) {
       lines.push(`| ${issueLink(issue)} | ${ASSESSMENT_TEXT[issue.assessment]} | ${inline(issue.note)} |`);
     }
+    for (const issue of walkthrough.linkedIssues) lines.push(...requirementLines(issue));
     lines.push("", "</details>");
   }
   if (walkthrough.relatedIssues?.length) {
@@ -362,7 +396,7 @@ function walkthroughSection(
 
 function findingDetail(finding: Finding): string[] {
   const lines = [
-    `#### ${location(finding)}: ${inline(finding.title)}`,
+    `#### ${locatedTitle(finding)}`,
     "",
     `${SEVERITY_ICON[finding.severity]} *${finding.severity} · ${finding.category} · ${finding.kind.replace(/_/g, " ")}${toolSuffix(finding)}${ruleSuffix(finding)}${reviewerSuffix(finding)}${verificationSuffix(finding)}*`,
     "",

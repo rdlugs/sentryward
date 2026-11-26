@@ -37,6 +37,7 @@ import { capFindings, capPerReviewer, compareFindings, noopKey, validateFindings
 import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkClaims } from "./validate/claims.ts";
 import { checkPatternRules } from "./rules.ts";
+import { requirementGapFindings } from "./core/requirementGaps.ts";
 import { lineCounts, storedFiles } from "./diff/stored.ts";
 
 export { MAX_STORED_PATCH_CHARS, MAX_STORED_PATCHES_CHARS } from "./diff/stored.ts";
@@ -517,13 +518,17 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const guardedPaths = new Set(guardReviewable.map((file) => file.path).filter((path) => !reviewablePaths.has(path)));
   const guardedOnly = guardReviewable.filter((file) => guardedPaths.has(file.path) && (!increment || increment.paths.has(file.path)));
   const patternRules = checkPatternRules(scoped, changeSet, config, input.ignoredFingerprints, guardedOnly);
-  const reviewed = [...verified.findings, ...toolFindings, ...patternRules.findings].sort(compareFindings);
+  // Missing requirements of linked issues, from the walkthrough. Recomputed
+  // every run (an incremental one too), so they are never carried over.
+  const gaps = requirementGapFindings(walkthrough, changeSet, input.ignoredFingerprints);
+  const reviewed = [...verified.findings, ...toolFindings, ...patternRules.findings, ...gaps].sort(compareFindings);
   // The cap covers model, tool and rule findings together; the model's own
   // were already capped after the claim checks.
   const overLimit = Math.max(0, reviewed.length - config.review.maxFindings);
   const fresh = new Set(reviewed.map((finding) => finding.fingerprint));
   const carried = (increment?.carried ?? []).filter(
     (finding) =>
+      finding.kind !== "requirement_gap" &&
       !increment?.paths.has(finding.file) &&
       (reviewablePaths.has(finding.file) || (finding.source === "rule" && guardedPaths.has(finding.file))) &&
       !fresh.has(finding.fingerprint) &&

@@ -59,7 +59,8 @@ describe("previewPublication", () => {
     expect(labelled.pr.labels).toEqual(["Medium blast radius", "5-10 Minutes"]);
 
     const strict = await previewPublication(config({ review: { blockOn: "major", severityFloor: "major" } }), "github");
-    expect(strict.status?.description).toBe("2 findings at or above major");
+    // The sample's missing requirement of #12 is a major gap, so it counts too.
+    expect(strict.status?.description).toBe("3 findings at or above major");
     expect(strict.summaryComment).not.toContain("rate limit");
   });
 
@@ -69,6 +70,14 @@ describe("previewPublication", () => {
     expect(all.summaryComment).toContain("⏱️ Review effort: 2/5");
     expect(all.summaryComment).toContain("[#12](https://github.com/acme/users/issues/12)");
     expect(all.summaryComment).toContain("🟡 Partly addressed");
+    // Each requirement of the issue, and the missing one as a finding.
+    expect(all.summaryComment).toContain("**#12: 2 of 3 met**");
+    expect(all.summaryComment).toContain(
+      "| Return 404 for an unknown id | ❌ Missing | `src/api/users.ts:10` | Check that a row came back and respond with 404 when none did. |",
+    );
+    expect(all.summaryComment).toContain("| Document the endpoint in the README | ✅ Met | `README.md` |  |");
+    expect(all.summaryComment).toContain("Requirements not met (1)");
+    expect(all.summaryComment).toContain("#### `src/api/users.ts:10`: #12: Return 404 for an unknown id");
     expect(all.summaryComment).toContain("[#31](https://github.com/acme/users/issues/31)");
     // The candidate the model did not pick is left out.
     expect(all.summaryComment).not.toContain("#7");
@@ -89,7 +98,7 @@ describe("previewPublication", () => {
       }),
       "github",
     );
-    expect(none.summaryComment).not.toMatch(/mermaid|Review effort|#12|#31/);
+    expect(none.summaryComment).not.toMatch(/mermaid|Review effort|#12|#31|Requirements not met/);
     // Not parts the model is asked for, so still shown.
     expect(none.summaryComment).toContain("🏷️ Labels: `api`, `feature` · 💥 Blast radius: medium");
 

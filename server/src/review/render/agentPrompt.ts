@@ -19,6 +19,8 @@ function lines(finding: Finding): string {
 }
 
 function location(finding: Finding): string {
+  // A requirement gap placed in no changed file.
+  if (!finding.file) return "the change";
   const range = finding.startLine === finding.endLine ? `${finding.startLine}` : `${finding.startLine}-${finding.endLine}`;
   return `${finding.file}:${range}`;
 }
@@ -28,7 +30,8 @@ function suggestion(finding: Finding): string {
 }
 
 function describe(finding: Finding): string[] {
-  const parts = [`In ${finding.file} around ${lines(finding)}: ${finding.title.trim()}`, "", finding.body.trim()];
+  const where = finding.file ? `In ${finding.file} around ${lines(finding)}` : "In this change";
+  const parts = [`${where}: ${finding.title.trim()}`, "", finding.body.trim()];
   if (finding.impact) parts.push("", `Impact: ${finding.impact.trim()}`);
   if (finding.suggestion) parts.push("", "Suggested replacement for those lines:", "", suggestion(finding));
   if (finding.fixRationale) parts.push("", `Why this fix works: ${finding.fixRationale.trim()}`);

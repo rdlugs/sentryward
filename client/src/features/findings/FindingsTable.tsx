@@ -18,6 +18,7 @@ import { CATEGORY_LABEL, KIND_LABEL } from "./options"
 import { ReopenFindingDialog } from "./ReopenFindingDialog"
 import { StateBadge } from "./StateBadge"
 import type { FindingRow, FindingSortKey } from "./types"
+import { findingLocation } from "@/features/reviews/findingLocation"
 
 // The page has room for the name; the owner is in the tooltip.
 function repoName(fullPath: string) {
@@ -139,7 +140,7 @@ function FindingCard({ finding, onOpen }: { finding: FindingRow; onOpen: (findin
             {finding.title}
           </button>
           <div className="font-mono text-xs break-all text-muted-foreground">
-            {finding.file}:{finding.startLine}
+            {findingLocation(finding.file, finding.startLine)}
           </div>
         </div>
         <FindingActions finding={finding} />
@@ -218,7 +219,7 @@ export function FindingsTable({
                 {finding.title}
               </button>
               <div className="truncate font-mono text-xs text-muted-foreground">
-                {finding.file}:{finding.startLine}
+                {findingLocation(finding.file, finding.startLine)}
               </div>
             </TableCell>
             <TableCell>

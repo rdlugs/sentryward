@@ -24,6 +24,7 @@ import {
   type ReviewResult,
   type Severity,
 } from "../types"
+import { NO_FILE_LABEL } from "../findingLocation"
 
 function groupByFile(findings: Finding[]) {
   const groups = new Map<string, Finding[]>()
@@ -315,7 +316,7 @@ export function FindingsSection({
                           {path}
                         </button>
                       ) : (
-                        <span className="font-mono break-all">{path}</span>
+                        <span className={cn(path && "font-mono break-all")}>{path || NO_FILE_LABEL}</span>
                       )}
                       {file && (
                         <span className="text-xs text-muted-foreground">

@@ -110,10 +110,18 @@ export function findingTransitions(existing: KnownFinding[], result: ReviewResul
   const deleted = new Set(result.files.filter((file) => file.changeType === "deleted").map((file) => file.path));
   const reported = new Set(result.findings.map((finding) => finding.fingerprint));
   const moved = movedFindings(existing, result);
+  // A requirement gap comes from the walkthrough's linked-issue check, not
+  // from reading its file, so only a run that made that check can say it is
+  // met. A failed walkthrough or an unreadable tracker says nothing.
+  const issuesAssessed = result.walkthrough?.linkedIssues !== undefined;
   return {
     resolved: existing
       .filter((row) => row.state === "open" && !reported.has(row.fingerprint))
-      .filter((row) => reviewed.has(row.file) || !changed.has(row.file) || deleted.has(row.file) || moved.has(row.fingerprint))
+      .filter((row) =>
+        row.kind === "requirement_gap"
+          ? issuesAssessed
+          : reviewed.has(row.file) || !changed.has(row.file) || deleted.has(row.file) || moved.has(row.fingerprint),
+      )
       .map((row) => row.fingerprint),
     reopened: existing.filter((row) => row.state === "resolved" && reported.has(row.fingerprint)).map((row) => row.fingerprint),
   };

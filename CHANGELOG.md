@@ -10,6 +10,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Requirement checks for linked issues. With `output.assess_linked_issues`
+  on, the PR summary now splits each linked issue into its concrete
+  requirements and shows a table per issue: each requirement marked met,
+  partly met, missing or unclear, the changed file and line that meet it, and
+  a one-sentence fix for the rest. A file is kept only when the change touches
+  it and a line only when the diff shows it. Each missing requirement is also a
+  `requirement_gap` finding under "Requirements not met": severity major, so
+  it blocks only when `block_on` is `major` or lower, tracked across runs, and
+  resolved only by a run that assessed the linked issues again. Gaps placed in
+  no changed file show "Linked issue" instead of a path. The review page's
+  walkthrough card lists the requirements, and results stored before this
+  change still render as before.
+
 - Pause on a burst of pushes. `triggers.pause_on_burst` (**Pause after a burst
   of pushes** on the Triggers tab, off by default) stops automatic push reviews
   of a change once it receives `pause_after_pushes` pushes (default 5) within

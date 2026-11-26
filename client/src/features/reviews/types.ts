@@ -9,6 +9,16 @@ export type Provider = "github" | "gitlab"
 export type Trigger = "manual" | "webhook" | "comment"
 export type IssueAssessment = "addressed" | "partial" | "not_addressed" | "unclear"
 
+// One requirement of a linked issue. The server keeps the file only when the
+// change touches it, and the line only when the diff shows it.
+export interface IssueRequirement {
+  text: string
+  status: "met" | "partial" | "missing" | "unclear"
+  file?: string
+  line?: number
+  fix?: string
+}
+
 // A sensitive area the change touches, or reaches through its callers (via).
 export interface RiskyArea {
   kind: "auth" | "database" | "api"
@@ -189,7 +199,8 @@ export interface ReviewResult {
     // Optional parts, present only when their settings were on.
     sequenceDiagram?: string
     highLevelSummary?: string
-    linkedIssues?: (IssueRef & { assessment: IssueAssessment; note: string })[]
+    // requirements is absent in results stored before it existed.
+    linkedIssues?: (IssueRef & { assessment: IssueAssessment; note: string; requirements?: IssueRequirement[] })[]
     relatedIssues?: (IssueRef & { reason: string })[]
     riskyAreas?: RiskyArea[]
   }

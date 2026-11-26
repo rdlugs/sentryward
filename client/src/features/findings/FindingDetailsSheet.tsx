@@ -17,6 +17,7 @@ import { CATEGORY_LABEL, IGNORE_REASON_LABEL, KIND_LABEL, LIFECYCLE_LABEL } from
 import { ReopenFindingDialog } from "./ReopenFindingDialog"
 import { StateBadge } from "./StateBadge"
 import type { FindingRow } from "./types"
+import { findingLocation } from "@/features/reviews/findingLocation"
 
 function When({ iso }: { iso: string }) {
   return <time dateTime={iso} title={new Date(iso).toLocaleString()}>{timeAgo(iso)}</time>
@@ -95,7 +96,7 @@ export function FindingDetailsSheet({
                 <DetailRow label="Author">{finding.author ?? <span className="text-muted-foreground">Unknown</span>}</DetailRow>
                 <DetailRow label="Location">
                   <code className="font-mono text-xs">
-                    {finding.file}:{data?.detail ? findingLines(data.detail) : finding.startLine}
+                    {findingLocation(finding.file, data?.detail ? findingLines(data.detail) : finding.startLine)}
                   </code>
                 </DetailRow>
                 <DetailRow label="Last review">{LIFECYCLE_LABEL[finding.lifecycle]}</DetailRow>
