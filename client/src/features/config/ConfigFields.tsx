@@ -83,7 +83,8 @@ import {
   EMPTY_RULE,
   FLAGS,
   INHERIT,
-  LISTS,
+  listPath,
+  TRIGGER_LISTS,
   MAX_FALLBACK_MODELS,
   MAX_RULE_PATTERN,
   MAX_SUMMARY_INSTRUCTIONS,
@@ -439,6 +440,32 @@ const CHOICE_INFO: Record<
       { value: "true", label: "On" },
     ],
   },
+  // Decided in server/src/review/publish/approve.ts.
+  approval: {
+    label: "Approve clean reviews",
+    description:
+      "Approve the PR/MR when the review is clean, and withdraw that approval when a later review is not. Never merges. The connection needs the right to approve (GitHub: Pull requests write; GitLab: Developer or above).",
+    options: [
+      { value: "false", label: "Off" },
+      { value: "true", label: "On" },
+    ],
+  },
+  approvalWhen: {
+    label: "Clean means",
+    description: "Passing follows Block on, like the commit status. No findings approves only a review that found nothing.",
+    options: [
+      { value: "pass", label: "Passing verdict" },
+      { value: "no_findings", label: "No findings" },
+    ],
+  },
+  approvalRequestChanges: {
+    label: "Request changes when blocked",
+    description: "GitHub only. Otherwise a blocked review only withdraws the approval; GitLab has no request for changes.",
+    options: [
+      { value: "false", label: "Off" },
+      { value: "true", label: "On" },
+    ],
+  },
 }
 
 // What each deep review specialist looks for, as the checkbox grid shows it.
@@ -561,6 +588,30 @@ const LIST_INFO: Record<ListName, { label: string; description: string; placehol
     description: "Part of the branch the PR/MR targets.",
     placeholder: "legacy",
     match: "contains",
+  },
+  approvalBlockPaths: {
+    label: "Never approve paths",
+    description: "Globs, matched like ignored paths. A change touching one is left for people to approve.",
+    placeholder: "infra/**",
+    match: "glob",
+  },
+  approvalOnlyAuthors: {
+    label: "Only approve authors",
+    description: "Logins whose changes may be approved. Empty approves anyone's.",
+    placeholder: "dependabot[bot]",
+    match: "exact, any case",
+  },
+  approvalSkipAuthors: {
+    label: "Never approve authors",
+    description: "Logins whose changes are never approved.",
+    placeholder: "octocat",
+    match: "exact, any case",
+  },
+  approvalBlockLabels: {
+    label: "Never approve labels",
+    description: "Labels that leave the change for people to approve.",
+    placeholder: "needs-review",
+    match: "exact, case-sensitive",
   },
 }
 
@@ -1719,8 +1770,8 @@ export function ConfigFields(props: {
   // `off` greys out a list the worker never checks right now (automatic
   // reviews are off); the saved value is kept.
   function listField(name: ListName, off = false) {
-    const path = `triggers.${name}`
-    const fallback = inherited?.triggers[name]
+    const path = listPath(name)
+    const fallback = inherited ? (at(inherited, path) as string[] | undefined) : undefined
     const info = LIST_INFO[name]
     const id = `list-${name}`
     const error = errors[name]
@@ -1731,7 +1782,7 @@ export function ConfigFields(props: {
     const replaces = isRepo && !disabled && form.lists[name].length > 0 && Boolean(fallback?.length)
     return (
       <Field data-disabled={fieldOff} data-invalid={error ? true : undefined}>
-        <LabelRow effective={config && effective(path, config.triggers[name])}>
+        <LabelRow effective={config && effective(path, at(config, path))}>
           <FieldLabel htmlFor={id}>{info.label}</FieldLabel>
           <Badge variant="outline" className="h-4 px-1.5 text-[0.65rem] font-normal">
             {info.match}
@@ -1934,9 +1985,11 @@ export function ConfigFields(props: {
   // switches off nothing at all reaches the change. Only values known to be
   // off count, so nothing flickers while the inherited values load.
   const standaloneSummary = resolvedFlag("postSummary") === false && resolvedFlag("walkthrough") === true
-  const nothingPosted = (["postInline", "postSummary", "postCheck", "walkthrough"] as const).every(
-    (name) => resolvedFlag(name) === false,
-  )
+  const nothingPosted =
+    (["postInline", "postSummary", "postCheck", "walkthrough"] as const).every((name) => resolvedFlag(name) === false) &&
+    resolvedChoice("approval") === "false"
+  // Only a value known to be off greys out the approval settings.
+  const approvalOff = resolvedChoice("approval") === "false"
 
   // The high-level summary instructions, counted the way validation does.
   const summaryLength = form.summaryInstructions.trim().length
@@ -1961,9 +2014,9 @@ export function ConfigFields(props: {
   const reviewChoice = resolvedChoice("review")
   const reviewManual = reviewChoice === "manual"
   function resolvedList(name: ListName) {
-    const path = `triggers.${name}`
-    if (fromRepoFile(path)) return config?.triggers[name]
-    return disabled || form.lists[name].length === 0 ? inherited?.triggers[name] : form.lists[name]
+    const path = listPath(name)
+    if (fromRepoFile(path)) return at(config, path) as string[] | undefined
+    return disabled || form.lists[name].length === 0 ? (at(inherited, path) as string[] | undefined) : form.lists[name]
   }
   const summaryHint = walkthroughKnownOff ? (
     <OffHint setting="PR summary" tab="display" onTabChange={props.onTabChange} />
@@ -2414,6 +2467,32 @@ export function ConfigFields(props: {
             </Nested>
             {toggles(["postCheck"])}
           </ToggleList>
+          {choiceField("approval")}
+          {/* Policies only hold an approval back; they do nothing while approval is off. */}
+          <Nested>
+            {choiceField("approvalWhen", approvalOff)}
+            {choiceField("approvalRequestChanges", approvalOff)}
+            {listField("approvalBlockPaths", approvalOff)}
+            <div className="grid gap-4 @md/field-group:grid-cols-2">
+              {listField("approvalOnlyAuthors", approvalOff)}
+              {listField("approvalSkipAuthors", approvalOff)}
+            </div>
+            {listField("approvalBlockLabels", approvalOff)}
+            <CategoriesField
+              legend="Never approve changes touching"
+              description="Found by pattern in the diff, without a model call. Tests never count."
+              idPrefix="approval-risk"
+              info={RISK_KIND_INFO}
+              options={schema.data?.riskKinds ?? []}
+              value={form.approvalRisk}
+              inherited={inherited?.output.approval.blockOnRisk}
+              onChange={(approvalRisk) => props.onChange({ ...form, approvalRisk })}
+              resettable={isRepo}
+              inheritedHint={inheritedHint("output.approval.blockOnRisk", inherited?.output.approval.blockOnRisk)}
+              effective={config && effective("output.approval.blockOnRisk", config.output.approval.blockOnRisk)}
+              disabled={locked("output.approval.blockOnRisk") || approvalOff}
+            />
+          </Nested>
           {nothingPosted && (
             <Alert role="status">
               <MessageSquareOff />
@@ -2717,7 +2796,7 @@ export function ConfigFields(props: {
           command={resolvedFlag("command")}
           replies={resolvedFlag("replies")}
           abortOnClose={resolvedFlag("abortOnClose")}
-          lists={Object.fromEntries(LISTS.map((name) => [name, resolvedList(name)]))}
+          lists={Object.fromEntries(TRIGGER_LISTS.map((name) => [name, resolvedList(name)]))}
           repoFile={isRepo ? props.repoFile : null}
         />
       ),

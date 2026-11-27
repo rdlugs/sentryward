@@ -71,6 +71,16 @@ const effective = {
     highLevelSummaryInstructions: "",
     walkthroughLabels: false,
     walkthroughBlastRadius: true,
+    approval: {
+      enabled: false,
+      when: "pass",
+      requestChanges: false,
+      blockPaths: [],
+      onlyAuthors: [],
+      skipAuthors: [],
+      blockLabels: [],
+      blockOnRisk: [],
+    },
   },
   triggers: {
     review: "published",
@@ -503,6 +513,39 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
 
     await waitFor(() => expect(body).toMatchObject({ settings: { review: { agentFiles: { enabled: true, maxChars: 4000 } } } }))
+  })
+
+  it("turns on approval with policies on the Display tab, greyed out while approval is off", async () => {
+    let body: unknown
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          body = JSON.parse(String(init?.body))
+          return jsonResponse(200, globalConfig((body as { settings: Record<string, unknown> }).settings))
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    await openTab("Display")
+    const approval = await screen.findByRole("combobox", { name: "Approve clean reviews" })
+    expect(screen.getByRole("combobox", { name: "Clean means" })).toBeDisabled()
+    expect(screen.getByLabelText("Never approve paths")).toBeDisabled()
+
+    await userEvent.click(approval)
+    await userEvent.click(screen.getByRole("option", { name: "On" }))
+    const paths = screen.getByLabelText("Never approve paths")
+    expect(paths).toBeEnabled()
+    await userEvent.type(paths, "infra/**{Enter}")
+    await userEvent.click(screen.getByRole("checkbox", { name: "auth" }))
+    await selectConnectionOnLlmTab()
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+
+    await waitFor(() =>
+      expect(body).toMatchObject({
+        settings: { output: { approval: { enabled: true, blockPaths: ["infra/**"], blockOnRisk: ["auth"] } } },
+      }),
+    )
   })
 
   it("sets deep review to auto and picks the kinds of change it runs for", async () => {

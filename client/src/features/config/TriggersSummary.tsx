@@ -17,7 +17,7 @@ import {
   type TriggerCheckChange,
   type TriggerCheckEvent,
 } from "./api"
-import type { ListName } from "./settingsForm"
+import type { TriggerListName } from "./settingsForm"
 
 export interface TriggersSummaryProps {
   // What the check sends, or null while the form has errors or nothing is inherited yet.
@@ -33,14 +33,14 @@ export interface TriggersSummaryProps {
   command?: boolean
   replies?: boolean
   abortOnClose?: boolean
-  lists: Partial<Record<ListName, string[]>>
+  lists: Partial<Record<TriggerListName, string[]>>
   // Repository scope with a repository file: the check does not read it.
   repoFile?: string | null
 }
 
 const UNKNOWN = "..."
 
-const LIST_LABEL: Record<ListName, string> = {
+const LIST_LABEL: Record<TriggerListName, string> = {
   ignoreTitles: "Title",
   skipAuthors: "Author",
   skipLabels: "Label",
@@ -109,7 +109,7 @@ export function TriggersSummary(props: TriggersSummaryProps) {
         : props.summary === "manual"
           ? "Requested reviews only"
           : UNKNOWN
-  const rules = (Object.keys(LIST_LABEL) as ListName[]).flatMap((name) =>
+  const rules = (Object.keys(LIST_LABEL) as TriggerListName[]).flatMap((name) =>
     (props.lists[name] ?? []).map((value) => ({ name, value })),
   )
 

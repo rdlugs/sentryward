@@ -253,6 +253,78 @@ describe("GitHub publishing", () => {
     });
   });
 
+  it("approves at the head commit, and skips when its own approval already covers the head", async () => {
+    const reviews = (list: unknown[]) => ({ url: /\/pulls\/42\/reviews\?per_page=100$/, body: list });
+    const fresh = github([reviews([]), { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 1 } }]);
+    expect(await fresh.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
+    expect(body(fresh.calls[1]!)).toEqual({ commit_id: "head", event: "APPROVE", body: "ok" });
+
+    const current = github([
+      reviews([
+        { id: 2, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } },
+        { id: 3, state: "COMMENTED", commit_id: "head", user: { login: "sentryward[bot]" } },
+      ]),
+    ]);
+    expect(await current.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "unchanged" });
+
+    // An approval of an older head, or someone else's, does not count.
+    const stale = github([
+      reviews([
+        { id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } },
+        { id: 4, state: "APPROVED", commit_id: "head", user: { login: "alice" } },
+      ]),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 5 } },
+    ]);
+    expect(await stale.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
+  });
+
+  it("requests changes once, until it is withdrawn", async () => {
+    const reviews = (list: unknown[]) => ({ url: /\/pulls\/42\/reviews\?per_page=100$/, body: list });
+    const first = github([
+      reviews([{ id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } }]),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 3 } },
+    ]);
+    expect(await first.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).toEqual({ state: "changes_requested" });
+    expect(body(first.calls[1]!)).toMatchObject({ event: "REQUEST_CHANGES", body: "fix" });
+
+    const again = github([reviews([{ id: 3, state: "CHANGES_REQUESTED", commit_id: "old", user: { login: "sentryward[bot]" } }])]);
+    expect(await again.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).toEqual({ state: "unchanged" });
+  });
+
+  it("dismisses only its own standing reviews when withdrawing", async () => {
+    const { gh, calls } = github([
+      {
+        url: /\/pulls\/42\/reviews\?per_page=100$/,
+        body: [
+          { id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } },
+          { id: 3, state: "DISMISSED", commit_id: "old", user: { login: "sentryward[bot]" } },
+          { id: 4, state: "APPROVED", commit_id: "head", user: { login: "alice" } },
+        ],
+      },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "withdraw", body: "blocked" })).toEqual({ state: "withdrawn" });
+    expect(calls.filter((c) => c.method === "PUT").map((c) => c.url)).toEqual([expect.stringMatching(/reviews\/2\/dismissals$/)]);
+    expect(body(calls[1]!)).toEqual({ message: "blocked", event: "DISMISS" });
+
+    const none = github([{ url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }]);
+    expect(await none.gh.setApproval(ghRef, { action: "withdraw", body: "blocked" })).toEqual({ state: "unchanged" });
+  });
+
+  it("reports a pull request opened by its own account as refused, other failures as errors", async () => {
+    const own = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      { method: "POST", url: /\/pulls\/42\/reviews$/, status: 422, body: { message: "Unprocessable Entity: Can not approve your own pull request" } },
+    ]);
+    expect(await own.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+
+    const broken = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      { method: "POST", url: /\/pulls\/42\/reviews$/, status: 403, body: { message: "Resource not accessible by integration" } },
+    ]);
+    await expect(broken.gh.setApproval(ghRef, { action: "approve", body: "ok" })).rejects.toThrow(/403/);
+  });
+
   it("replaces the estimate labels, ignoring one the PR does not carry", async () => {
     const { gh, calls } = github([
       { method: "DELETE", url: /\/issues\/42\/labels\/Large%20blast%20radius$/, status: 404, body: { message: "Label does not exist" } },
@@ -447,6 +519,35 @@ describe("GitLab publishing", () => {
     await gl.setCommitStatus(glRef, { state: "pending", description: "Review in progress" });
     expect(calls.map((c) => body(c).state)).toEqual(["failed", "running"]);
     expect(body(calls[0]!).name).toBe("sentryward/review");
+  });
+
+  it("approves at the head sha unless it already approved, and withdraws only its own approval", async () => {
+    const approvals = (users: string[]) => ({
+      url: /\/merge_requests\/42\/approvals$/,
+      body: { approved_by: users.map((username) => ({ user: { username } })) },
+    });
+    const fresh = gitlab([approvals(["alice"]), { method: "POST", url: /\/merge_requests\/42\/approve$/, body: {} }]);
+    expect(await fresh.gl.setApproval(glRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
+    expect(body(fresh.calls[1]!)).toEqual({ sha: "head" });
+
+    const done = gitlab([approvals(["sentryward-bot"])]);
+    expect(await done.gl.setApproval(glRef, { action: "approve", body: "ok" })).toEqual({ state: "unchanged" });
+
+    const withdraw = gitlab([approvals(["sentryward-bot"]), { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} }]);
+    expect(await withdraw.gl.setApproval(glRef, { action: "withdraw", body: "blocked" })).toEqual({ state: "withdrawn" });
+
+    // No "request changes" on GitLab: it only withdraws, and leaves others' approvals.
+    const others = gitlab([approvals(["alice"])]);
+    expect(await others.gl.setApproval(glRef, { action: "request_changes", body: "fix" })).toEqual({ state: "unchanged" });
+    expect(others.calls).toHaveLength(1);
+  });
+
+  it("reports an approval GitLab does not allow as refused", async () => {
+    const { gl } = gitlab([
+      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [] } },
+      { method: "POST", url: /\/merge_requests\/42\/approve$/, status: 401, body: { message: "401 Unauthorized" } },
+    ]);
+    expect(await gl.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
   });
 
   it("adds and removes labels in one update", async () => {

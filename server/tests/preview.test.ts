@@ -64,6 +64,13 @@ describe("previewPublication", () => {
     expect(strict.summaryComment).not.toContain("rate limit");
   });
 
+  it("says what would happen to the approval only while approval is on", async () => {
+    expect((await previewPublication(config(), "github")).approval).toBeNull();
+    const approving = await previewPublication(config({ output: { approval: { enabled: true, requestChanges: true } } }), "github");
+    // The sample's SQL injection blocks the verdict.
+    expect(approving.approval).toEqual({ action: "request_changes", reasons: ["1 finding at or above critical"] });
+  });
+
   it("shows each optional walkthrough part only while its setting is on", async () => {
     const all = await previewPublication(config(), "github");
     expect(all.summaryComment).toContain("```mermaid\nsequenceDiagram");

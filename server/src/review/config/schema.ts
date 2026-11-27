@@ -173,6 +173,33 @@ export const REVIEW_TRIGGERS = ["manual", "published", "all"] as const;
 export const SUMMARY_TRIGGERS = ["manual", "published"] as const;
 export const HIGH_LEVEL_SUMMARY_PLACEMENTS = ["description", "walkthrough"] as const;
 
+export const APPROVAL_WHEN = ["pass", "no_findings"] as const;
+
+// Turning a clean review into a forge approval (publish/approve.ts). Off by
+// default, and it never merges. Lists replace across layers like any other
+// list. Policies only ever hold an approval back: a change that matches one
+// gets no approval, and an earlier one is withdrawn.
+const approvalShape = {
+  enabled: z.boolean(),
+  // "pass" approves whenever the verdict passes (nothing at or above blockOn,
+  // as the commit status says); "no_findings" only a review with no findings.
+  when: z.enum(APPROVAL_WHEN),
+  // Request changes on a blocked verdict instead of only withdrawing an
+  // approval. GitHub only: GitLab has no such review state.
+  requestChanges: z.boolean(),
+  // Globs, matched like ignore_paths: a change touching any of them is left
+  // for people to approve.
+  blockPaths: z.array(z.string().trim().min(1).max(200)).max(50),
+  // When not empty, only changes by these logins are approved.
+  onlyAuthors: z.array(z.string().trim().min(1).max(200)).max(50),
+  skipAuthors: z.array(z.string().trim().min(1).max(200)).max(50),
+  blockLabels: z.array(z.string().trim().min(1).max(200)).max(50),
+  // Risk kinds (context/risk.ts) read from the diff, without a model call.
+  blockOnRisk: z
+    .array(z.enum(RISK_KINDS))
+    .refine((list) => new Set(list).size === list.length, "List each risk kind once"),
+};
+
 const outputShape = {
   walkthrough: z.boolean(),
   postInline: z.boolean(),
@@ -224,6 +251,7 @@ const outputShape = {
   // the comment text: the model still estimates both, for the native labels.
   walkthroughLabels: z.boolean(),
   walkthroughBlastRadius: z.boolean(),
+  approval: z.strictObject(approvalShape),
 };
 
 // Phrases, logins, labels and branch names; matching rules are in filters.ts.
@@ -488,7 +516,9 @@ export const configOverrideSchema = z
         agentFiles: z.strictObject(agentFilesShape).partial(),
       })
       .partial(),
-    output: z.strictObject(outputShape).partial(),
+    output: z
+      .strictObject({ ...outputShape, approval: z.strictObject(approvalShape).partial() })
+      .partial(),
     triggers: z.strictObject(triggersShape).partial(),
   })
   .partial();
@@ -630,6 +660,16 @@ export const DEFAULT_CONFIG: Config = {
     highLevelSummaryInstructions: "",
     walkthroughLabels: false,
     walkthroughBlastRadius: true,
+    approval: {
+      enabled: false,
+      when: "pass",
+      requestChanges: false,
+      blockPaths: [],
+      onlyAuthors: [],
+      skipAuthors: [],
+      blockLabels: [],
+      blockOnRisk: [],
+    },
   },
   triggers: {
     review: "published",

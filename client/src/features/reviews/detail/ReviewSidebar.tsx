@@ -61,6 +61,23 @@ function publicationText(publication: Publication, forge: string) {
   return parts.length ? `Posted to ${forge}: ${parts.join(", ")}` : `Nothing posted to ${forge}`
 }
 
+// "unchanged" means the forge already showed what this run decided: an
+// approval still standing, or none to withdraw.
+function approvalText(approval: NonNullable<Publication["approval"]>, forge: string) {
+  switch (approval.state) {
+    case "approved":
+      return "Approved"
+    case "changes_requested":
+      return "Changes requested"
+    case "withdrawn":
+      return "Withdrawn"
+    case "refused":
+      return `Refused by ${forge}`
+    default:
+      return approval.reasons.length ? "Not approved" : "Still approved"
+  }
+}
+
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
@@ -305,6 +322,16 @@ function PublicationCard({ publication, forge }: { publication: Publication; for
   return (
     <SideCard title="Publication">
       <p>{publicationText(publication, forge)}</p>
+      {publication.approval && (
+        <div>
+          <p>Approval: {approvalText(publication.approval, forge)}</p>
+          {[...publication.approval.reasons, ...(publication.approval.note ? [publication.approval.note] : [])].map((line) => (
+            <p key={line} className="text-muted-foreground">
+              {line}
+            </p>
+          ))}
+        </div>
+      )}
       {problems.length > 0 && (
         <ul className="list-disc pl-4 text-destructive">
           {problems.map((problem) => (

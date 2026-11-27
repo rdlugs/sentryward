@@ -13,6 +13,8 @@ import {
   MAX_OPEN_CHANGE_PAGES,
   MAX_CODE_SEARCH_RESULTS,
   MAX_COMPARE_FILES,
+  type ApprovalAction,
+  type ApprovalOutcome,
   type ChangeDetails,
   type ChangeHead,
   type ForgeUser,
@@ -217,6 +219,13 @@ function toIssue(issue: GhIssue): IssueContext {
 interface GhComment {
   id: number;
   body: string;
+  user: { login: string } | null;
+}
+
+interface GhReview {
+  id: number;
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
+  commit_id: string | null;
   user: { login: string } | null;
 }
 
@@ -598,8 +607,9 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return String(created.id);
   }
 
-  // One review carries every inline comment, posted as COMMENT: Sentryward never
-  // approves or requests changes. If GitHub rejects the batch (one bad anchor
+  // One review carries every inline comment, posted as COMMENT: approving or
+  // requesting changes is setApproval's separate step, so a failed approval
+  // never costs the comments. If GitHub rejects the batch (one bad anchor
   // fails the whole request), each comment is retried on its own so one
   // problem does not lose the rest.
   async postInlineComments(ref: ForgeRef, comments: InlineComment[]): Promise<InlineResult> {
@@ -702,6 +712,56 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         ...(status.targetUrl ? { target_url: status.targetUrl } : {}),
       }),
     });
+  }
+
+  // Sentryward's approval is its latest APPROVED or CHANGES_REQUESTED review:
+  // a later COMMENT review does not change it, and a dismissed one shows as
+  // DISMISSED. Without its own login it cannot tell its reviews apart, so it
+  // may still approve but never dismisses.
+  async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
+    const pulls = `${repoApiPath(ref.project)}/pulls/${ref.number}`;
+    const own = this.options.selfLogin
+      ? (await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext)).filter(
+          (review) => this.isSelfLogin(review.user?.login) && (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED"),
+        )
+      : [];
+    const current = own.at(-1);
+    if (action.action === "withdraw") {
+      if (!own.length) return { state: "unchanged" };
+      for (const review of own) {
+        await this.http.request(`${pulls}/reviews/${review.id}/dismissals`, {
+          method: "PUT",
+          body: JSON.stringify({ message: action.body.slice(0, 1000), event: "DISMISS" }),
+        });
+      }
+      return { state: "withdrawn" };
+    }
+    // An approval follows the head, so a push gets a fresh one (branch
+    // protection may dismiss stale approvals). A request for changes stands
+    // until it is withdrawn; the summary comment already says what is wrong.
+    if (action.action === "approve" && current?.state === "APPROVED" && current.commit_id === ref.headSha) {
+      return { state: "unchanged" };
+    }
+    if (action.action === "request_changes" && current?.state === "CHANGES_REQUESTED") {
+      return { state: "unchanged" };
+    }
+    try {
+      await this.http.request(`${pulls}/reviews`, {
+        method: "POST",
+        body: JSON.stringify({
+          commit_id: ref.headSha,
+          event: action.action === "approve" ? "APPROVE" : "REQUEST_CHANGES",
+          body: action.body,
+        }),
+      });
+    } catch (err) {
+      // A token's own pull request: GitHub refuses any review decision on it.
+      if (err instanceof ForgeError && err.status === 422 && /own pull request/i.test(err.message)) {
+        return { state: "refused", note: "GitHub does not allow a review decision on a pull request opened by the same account" };
+      }
+      throw err;
+    }
+    return { state: action.action === "approve" ? "approved" : "changes_requested" };
   }
 
   // Threads can only be resolved through GraphQL. GitHub Enterprise serves it

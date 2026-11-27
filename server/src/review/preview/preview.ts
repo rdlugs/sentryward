@@ -7,6 +7,7 @@ import { labelChanges } from "../publish/labels.ts";
 import { withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummary, summaryPlacement, withInlineSelection } from "../publish/publisher.ts";
 import { commitStatus } from "../publish/status.ts";
+import { approvalDecision, type ApprovalDecision } from "../publish/approve.ts";
 import { SAMPLE_NOW, sampleChange, sampleGenerate, sampleIssues } from "./sample.ts";
 
 export interface DiffLine {
@@ -38,6 +39,8 @@ export interface PreviewPublication {
     description: string;
   };
   status: CommitStatus | null;
+  // What would happen to Sentryward's approval, or null with approval off.
+  approval: ApprovalDecision | null;
   summaryComment: string | null;
   walkthroughComment: string | null;
   inline: PreviewInline[];
@@ -96,6 +99,7 @@ export async function previewPublication(config: Config, provider: ForgeProvider
       description: withDescriptionSummary(change.description, descriptionSummary(config, result)),
     },
     status: output.postCheck ? commitStatus(result) : null,
+    approval: approvalDecision(config, result, change),
     // The sample change has no earlier summary to update.
     summaryComment: placement.summaryCreate ? placement.summary : null,
     walkthroughComment: placement.walkthroughComment,

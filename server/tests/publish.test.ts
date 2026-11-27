@@ -3,7 +3,7 @@ import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { ConfigOverride } from "../src/review/config/schema.ts";
 import { DESCRIPTION_END, DESCRIPTION_START, WALKTHROUGH_MARKER, markersIn } from "../src/review/core/markers.ts";
 import type { Finding, ReviewResult } from "../src/review/core/models.ts";
-import type { CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
+import type { ApprovalAction, ApprovalOutcome, CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
 import { inlineBody, inlineComments } from "../src/review/publish/inline.ts";
 import { inlineSelection } from "../src/review/core/buckets.ts";
 import { publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
@@ -101,6 +101,7 @@ function recordingPublisher(
     failThreads?: boolean;
     // Whether a summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
+    approval?: ApprovalOutcome | Error;
   } = {},
 ) {
   const calls = {
@@ -111,6 +112,7 @@ function recordingPublisher(
     descriptions: [] as string[],
     labels: [] as { add: string[]; remove: string[] }[],
     threads: [] as { fingerprints: string[]; resolved: boolean }[],
+    approvals: [] as ApprovalAction[],
     // Which kind of comment went up when, across the kinds.
     order: [] as string[],
   };
@@ -146,6 +148,12 @@ function recordingPublisher(
     },
     setCommitStatus: async (_ref, status) => {
       calls.statuses.push(status);
+    },
+    setApproval: async (_ref, action) => {
+      if (options.approval instanceof Error) throw options.approval;
+      // Published after everything else, so the status must already be set.
+      calls.approvals.push({ ...action, body: `${calls.statuses.length}:${action.body}` });
+      return options.approval ?? { state: action.action === "approve" ? "approved" : "withdrawn" };
     },
     setThreadsResolved: async (_ref, fingerprints, resolved) => {
       if (options.failThreads) throw new Error("GraphQL request failed: nope");
@@ -572,5 +580,105 @@ describe("walkthrough placement and labels", () => {
 
     const off = await publish({});
     expect(off.calls.labels).toEqual([]);
+  });
+});
+
+describe("publishReview approval", () => {
+  const approving = (approval: NonNullable<NonNullable<ConfigOverride["output"]>["approval"]> = {}) =>
+    config({ output: { approval: { enabled: true, ...approval } } });
+  const passing = async (): Promise<ReviewResult> => ({
+    ...(await sampleResult()),
+    verdict: { verdict: "pass", blockOn: "critical", blocking: [] },
+  });
+
+  it("leaves the approval alone while it is off", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: config(),
+      postedFingerprints: new Set(),
+    });
+    expect(calls.approvals).toEqual([]);
+    expect(publication.approval).toBeUndefined();
+  });
+
+  it("approves a passing review last, after the commit status, with a link", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+      targetUrl: "http://sentryward/reviews/1",
+    });
+    expect(calls.approvals).toHaveLength(1);
+    expect(calls.approvals[0]!.body.startsWith("1:")).toBe(true);
+    expect(calls.approvals[0]!.action).toBe("approve");
+    expect(calls.approvals[0]!.body).toContain("No findings at or above critical");
+    expect(calls.approvals[0]!.body).toContain("http://sentryward/reviews/1");
+    expect(publication.approval).toEqual({ state: "approved", reasons: [] });
+    expect(publication.errors).toEqual([]);
+  });
+
+  it("withdraws on a blocked verdict, or requests changes when asked", async () => {
+    const blocked = await sampleResult();
+    for (const [requestChanges, action] of [
+      [false, "withdraw"],
+      [true, "request_changes"],
+    ] as const) {
+      const { publisher, calls } = recordingPublisher();
+      const publication = await publishReview({
+        publisher,
+        changeSet: makeChangeSet(),
+        result: blocked,
+        config: approving({ requestChanges }),
+        postedFingerprints: new Set(),
+      });
+      expect(calls.approvals.map((a) => a.action)).toEqual([action]);
+      expect(publication.approval?.reasons).toEqual(["1 finding at or above critical"]);
+    }
+  });
+
+  it("records a refusal as a note and a failure as an error, without stopping the rest", async () => {
+    const refused = recordingPublisher({ approval: { state: "refused", note: "own change" } });
+    const first = await publishReview({
+      publisher: refused.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(first.approval).toEqual({ state: "refused", reasons: [], note: "own change" });
+    expect(first.errors).toEqual([]);
+
+    const failing = recordingPublisher({ approval: new Error("403 Forbidden") });
+    const second = await publishReview({
+      publisher: failing.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(second.errors).toEqual(["Approval failed: 403 Forbidden"]);
+    expect(failing.calls.summaries).toHaveLength(1);
+    expect(failing.calls.statuses).toHaveLength(1);
+  });
+
+  it("is not sent once proceed says the job was cancelled", async () => {
+    const { publisher, calls } = recordingPublisher();
+    // Every step up to the commit status goes through, then the cancel lands.
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+      proceed: async () => calls.statuses.length === 0,
+    });
+    expect(publication.stopped).toBe(true);
+    expect(calls.approvals).toEqual([]);
   });
 });

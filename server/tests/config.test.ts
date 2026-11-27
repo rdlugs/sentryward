@@ -405,6 +405,33 @@ describe("parseRepoFile", () => {
     expect(DEFAULT_CONFIG.triggers).toMatchObject({ pauseOnBurst: false, pauseAfterPushes: 5, pauseWindowMinutes: 15 });
   });
 
+  it("reads output.approval, merging it field by field over the dashboard's", () => {
+    expect(DEFAULT_CONFIG.output.approval).toMatchObject({ enabled: false, when: "pass", requestChanges: false, blockOnRisk: [] });
+    const yaml = [
+      "output:",
+      "  approval:",
+      "    enabled: true",
+      "    when: no_findings",
+      "    block_paths: [infra/**]",
+      "    block_on_risk: [auth, database]",
+      "",
+    ].join("\n");
+    expect(parseRepoFile(".sentryward.yaml", yaml)).toEqual({
+      override: { output: { approval: { enabled: true, when: "no_findings", blockPaths: ["infra/**"], blockOnRisk: ["auth", "database"] } } },
+      warnings: [],
+    });
+    const resolved = resolveConfig({
+      global: { output: { approval: { requestChanges: true, blockLabels: ["hold"] } } },
+      repoFile: parseRepoFile(".sentryward.yaml", yaml).override,
+    });
+    expect(resolved.config.output.approval).toMatchObject({ enabled: true, requestChanges: true, blockLabels: ["hold"], blockPaths: ["infra/**"] });
+    expect(resolved.sources["output.approval.enabled"]).toBe("repoFile");
+    expect(resolved.sources["output.approval.requestChanges"]).toBe("global");
+    for (const bad of ["when: always", "block_on_risk: [auth, auth]", "block_on_risk: [secrets]", "approve: true"]) {
+      expect(parseRepoFile(".sentryward.yaml", `output:\n  approval:\n    ${bad}\n`).override).toBeUndefined();
+    }
+  });
+
   it("reads review.verify and rejects an unknown mode", () => {
     expect(parseRepoFile(".sentryward.yaml", "review:\n  verify: all\n")).toEqual({
       override: { review: { verify: "all" } },

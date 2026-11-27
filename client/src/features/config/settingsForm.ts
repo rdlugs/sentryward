@@ -60,6 +60,9 @@ export const CHOICES = [
   { name: "toolSupport", key: "tools", section: "llm.capabilities", boolean: true },
   { name: "deepReview", key: "enabled", section: "review.deep", boolean: true },
   { name: "agentFiles", key: "enabled", section: "review.agentFiles", boolean: true },
+  { name: "approval", key: "enabled", section: "output.approval", boolean: true },
+  { name: "approvalWhen", key: "when", section: "output.approval" },
+  { name: "approvalRequestChanges", key: "requestChanges", section: "output.approval", boolean: true },
 ] as const satisfies readonly { name: string; key?: string; section: string; boolean?: boolean }[]
 
 export type ChoiceName = (typeof CHOICES)[number]["name"]
@@ -73,9 +76,28 @@ export function at(value: unknown, path: string): unknown {
   return path.split(".").reduce<unknown>((node, key) => (node as Section | undefined)?.[key], value)
 }
 
-// The skip lists, edited as tags.
-export const LISTS = ["ignoreTitles", "skipAuthors", "skipLabels", "skipSourceBranches", "skipTargetBranches"] as const
-export type ListName = (typeof LISTS)[number]
+// The lists edited as tags: the skip lists and the approval policies. `key`
+// is the saved name where it differs, as for CHOICES.
+export const LISTS = [
+  { name: "ignoreTitles", section: "triggers" },
+  { name: "skipAuthors", section: "triggers" },
+  { name: "skipLabels", section: "triggers" },
+  { name: "skipSourceBranches", section: "triggers" },
+  { name: "skipTargetBranches", section: "triggers" },
+  { name: "approvalBlockPaths", key: "blockPaths", section: "output.approval" },
+  { name: "approvalOnlyAuthors", key: "onlyAuthors", section: "output.approval" },
+  { name: "approvalSkipAuthors", key: "skipAuthors", section: "output.approval" },
+  { name: "approvalBlockLabels", key: "blockLabels", section: "output.approval" },
+] as const satisfies readonly { name: string; key?: string; section: string }[]
+export type ListName = (typeof LISTS)[number]["name"]
+export type TriggerListName = Extract<(typeof LISTS)[number], { section: "triggers" }>["name"]
+export const TRIGGER_LISTS = LISTS.filter((list) => list.section === "triggers").map((list) => list.name) as TriggerListName[]
+
+// Where a list is saved, e.g. "output.approval.blockPaths".
+export function listPath(name: ListName): string {
+  const list = LISTS.find((entry) => entry.name === name)!
+  return `${list.section}.${"key" in list ? list.key : list.name}`
+}
 // Mirror server/src/review/config/schema.ts.
 const MAX_LIST_ENTRIES = 50
 const MAX_LIST_ENTRY = 200
@@ -235,6 +257,9 @@ export interface FormState {
   specialists: string[] | undefined
   // review.deep.autoOn, the risk kinds an auto deep review runs for; undefined inherits.
   autoOn: string[] | undefined
+  // output.approval.blockOnRisk; undefined inherits, and an empty list is
+  // allowed (no risk kind holds an approval back).
+  approvalRisk: string[] | undefined
   // "" inherits.
   numbers: Record<NumberName, string>
   // One glob per line; empty inherits. Not split on commas: globs use them in braces.
@@ -445,7 +470,7 @@ export function toForm(settings: ConfigOverride): FormState {
     choices[choice.name] = typeof value === "string" || typeof value === "boolean" ? String(value) : INHERIT
   }
   const lists = {} as FormState["lists"]
-  for (const name of LISTS) lists[name] = [...(settings.triggers?.[name] ?? [])]
+  for (const { name } of LISTS) lists[name] = [...((at(settings, listPath(name)) as string[] | undefined) ?? [])]
   return {
     profile: settings.profile ?? INHERIT,
     model: settings.llm?.model ?? "",
@@ -460,6 +485,7 @@ export function toForm(settings: ConfigOverride): FormState {
     categories: settings.review?.categories,
     specialists: settings.review?.deep?.specialists,
     autoOn: settings.review?.deep?.autoOn,
+    approvalRisk: settings.output?.approval?.blockOnRisk,
     numbers,
     choices,
     lists,
@@ -520,6 +546,7 @@ export function toSettings(base: ConfigOverride, form: FormState): ConfigOverrid
       ["autoOn", form.autoOn],
     ],
     output: [["highLevelSummaryInstructions", form.summaryInstructions.trim() || undefined]],
+    "output.approval": [["blockOnRisk", form.approvalRisk]],
     triggers: [
       // Replaced by `review`, which the form reads them into.
       ["onPush", undefined],
@@ -532,9 +559,9 @@ export function toSettings(base: ConfigOverride, form: FormState): ConfigOverrid
     const saved = "boolean" in choice && (value === "true" || value === "false") ? value === "true" : value
     ;(fields[choice.section] ??= []).push([choiceKey(choice), saved])
   }
-  for (const name of LISTS) {
-    const entries = tagList(form.lists[name])
-    fields.triggers.push([name, entries.length ? entries : undefined])
+  for (const list of LISTS) {
+    const entries = tagList(form.lists[list.name])
+    ;(fields[list.section] ??= []).push(["key" in list ? list.key : list.name, entries.length ? entries : undefined])
   }
   for (const spec of NUMBERS) {
     ;(fields[spec.section] ??= []).push([spec.name, parseNumber(spec, form.numbers[spec.name])])
@@ -651,7 +678,7 @@ export function validateForm(
     errors.connection = "Select a connection configured in Settings > API keys"
   }
 
-  for (const name of LISTS) {
+  for (const { name } of LISTS) {
     const entries = tagList(form.lists[name])
     if (entries.length > MAX_LIST_ENTRIES) errors[name] = `At most ${MAX_LIST_ENTRIES} entries`
     else if (entries.some((entry) => entry.length > MAX_LIST_ENTRY)) errors[name] = `At most ${MAX_LIST_ENTRY} characters per entry`
@@ -717,7 +744,7 @@ export function baseConfig(schema: ConfigSchema, profile: string = schema.defaul
       deep: { ...defaults.review.deep, ...preset.review?.deep },
       agentFiles: { ...defaults.review.agentFiles, ...preset.review?.agentFiles },
     },
-    output: { ...defaults.output, ...preset.output },
+    output: { ...defaults.output, ...preset.output, approval: { ...defaults.output.approval, ...preset.output?.approval } },
     triggers: { ...defaults.triggers, ...preset.triggers },
   }
 }

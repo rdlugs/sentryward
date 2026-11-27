@@ -10,6 +10,23 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Automatic approval. With `output.approval.enabled` on (**Approve clean
+  reviews** on the Display tab, off by default) a clean review approves the
+  PR/MR (a GitHub `APPROVE` review at the head commit, a GitLab approval pinned
+  to the head sha), and a later review that is not clean withdraws it
+  (GitHub dismisses Sentryward's own approvals, GitLab unapproves). It never
+  merges. `when` is `pass` (the verdict passes, as the commit status says) or
+  `no_findings`; a partial or failed review never approves. Policies hold an
+  approval back: `block_paths` globs (either side of a rename),
+  `only_authors` and `skip_authors` (any case), `block_labels` and
+  `block_on_risk` (auth, database writes or API routes, found in the diff
+  without a model call). `request_changes` requests changes on a blocked
+  verdict instead of only withdrawing (GitHub only). The approval is published
+  last and independently: a failure marks the review partial, while the forge
+  refusing an approval of the account's own change is only a note. The review
+  page's sidebar shows the outcome and the reasons, and the Display preview
+  returns what would happen.
+
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete
   requirements and shows a table per issue: each requirement marked met,

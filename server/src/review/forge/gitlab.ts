@@ -18,6 +18,8 @@ import {
   STATUS_CONTEXT,
   MAX_OPEN_CHANGE_PAGES,
   MAX_CODE_SEARCH_RESULTS,
+  type ApprovalAction,
+  type ApprovalOutcome,
   type ChangeDetails,
   type ChangeHead,
   type ForgeUser,
@@ -713,6 +715,33 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         ...(status.targetUrl ? { target_url: status.targetUrl } : {}),
       }),
     });
+  }
+
+  // GitLab approvals carry no text and have no "request changes", so a request
+  // for changes only withdraws Sentryward's approval; the summary comment says
+  // why. The approval is pinned to the head sha, so a push racing the review
+  // fails it rather than approving commits the review never saw.
+  async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
+    const mr = this.mergeRequest(ref);
+    const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[] }>(`${mr}/approvals`);
+    const approved = (approvals.approved_by ?? []).some((entry) => this.isSelfLogin(entry.user.username));
+    if (action.action !== "approve") {
+      if (!approved) return { state: "unchanged" };
+      await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      return { state: "withdrawn" };
+    }
+    if (approved) return { state: "unchanged" };
+    try {
+      await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
+    } catch (err) {
+      // The author may not approve (the project prevents it, or the token
+      // opened the MR), or the token's role cannot approve at all.
+      if (err instanceof ForgeError && (err.status === 401 || err.status === 403)) {
+        return { state: "refused", note: "GitLab did not let this account approve the merge request" };
+      }
+      throw err;
+    }
+    return { state: "approved" };
   }
 
   // Project hooks need Maintainer access; callers treat a failure as "automatic

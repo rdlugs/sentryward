@@ -181,6 +181,23 @@ export interface CommitStatus {
 
 export const STATUS_CONTEXT = "sentryward/review";
 
+// What the review asks of Sentryward's own approval on the change
+// (publish/approve.ts). Withdrawing only ever touches Sentryward's approval or
+// request for changes, never anyone else's.
+export interface ApprovalAction {
+  action: "approve" | "request_changes" | "withdraw";
+  body: string;
+}
+
+// "refused": the forge would not let Sentryward approve (its own change, or the
+// project prevents it). Expected setups, so a note rather than a failure.
+export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused";
+
+export interface ApprovalOutcome {
+  state: ApprovalState;
+  note?: string;
+}
+
 // The change a thread lives on; a webhook knows no more than this.
 export interface ThreadTarget {
   project: string;
@@ -215,6 +232,9 @@ export interface ForgePublisher {
   // Adds and removes labels; removing one the change does not carry is not an error.
   setLabels(ref: ForgeRef, add: string[], remove: string[]): Promise<void>;
   setCommitStatus(ref: ForgeRef, status: CommitStatus): Promise<void>;
+  // Approves the change at ref.headSha, requests changes, or withdraws what
+  // Sentryward said before. Never merges.
+  setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome>;
   // Resolves (or reopens) Sentryward's own inline threads for these findings,
   // found by the hidden fingerprint marker in each thread's first comment.
   setThreadsResolved(ref: ForgeRef, fingerprints: string[], resolved: boolean): Promise<ThreadResult>;

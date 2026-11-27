@@ -590,7 +590,7 @@ details in `.env`:
 
 | Permission | Access | Used for | Without it |
 | --- | --- | --- | --- |
-| Pull requests | read and write | Reading changes, posting reviews, labels, description updates | Reviews cannot run or publish |
+| Pull requests | read and write | Reading changes, posting reviews, labels, description updates, [approvals](#automatic-approval) | Reviews cannot run or publish |
 | Contents | read | Diffs, files and `.sentryward.yaml` | Reviews cannot run |
 | Commit statuses | read and write | The `sentryward/review` status | No commit status |
 | Issues | read | Linked and related issues in the walkthrough | Those parts are skipped with a warning |
@@ -649,8 +649,8 @@ it finishes it publishes, each step independently:
     so a later run only opens threads for the slots left. Findings either one
     holds back are written out in full in the summary comment, under "Not
     posted inline"; a finding that already has a thread never is.
-  - GitHub: one review posted as `COMMENT`, never approve or request changes.
-    GitLab: one discussion per finding.
+  - GitHub: one review posted as `COMMENT`; approving is a separate step (see
+    the approval below). GitLab: one discussion per finding.
   - Suggestions use each forge's suggestion syntax.
   - Each comment carries a hidden fingerprint, so a later run never posts the
     same finding twice, even if Sentryward's own records are lost.
@@ -728,6 +728,55 @@ it finishes it publishes, each step independently:
   default): `success` (pass), `failure` (blocked) or `error` (incomplete;
   GitLab shows it as `failed`), linking to the review in the dashboard. Turn it
   on for branch protection to require it.
+- **The approval**, when `output.approval.enabled` is on (it is off by
+  default), published last. See [Automatic approval](#automatic-approval).
+
+### Automatic approval
+
+With `output.approval.enabled` on (**Approve clean reviews** on the Display
+tab), a clean review approves the PR/MR, and a later review that is not clean
+withdraws that approval. Sentryward never merges.
+
+```yaml
+output:
+  approval:
+    enabled: true
+    when: pass               # or no_findings
+    request_changes: false   # GitHub only
+    block_paths: ["infra/**", "**/migrations/**"]
+    only_authors: []         # empty: anyone's changes
+    skip_authors: ["octocat"]
+    block_labels: ["needs-review"]
+    block_on_risk: [auth]    # auth, database, api
+```
+
+- **Clean** means the verdict passes (nothing at or above `block_on`, as the
+  commit status says), or with `when: no_findings` that the review found
+  nothing at all. A partial or failed review never approves.
+- **Policies** only hold an approval back. A change that touches a
+  `block_paths` glob (either side of a rename), is by an author outside
+  `only_authors` or in `skip_authors` (any case), carries a `block_labels`
+  label (case-sensitive) or touches one of the `block_on_risk` kinds (found by
+  pattern in the diff, as for deep review) is not approved. The review page's
+  sidebar lists the reasons.
+- **Withdrawing**: on GitLab Sentryward removes its approval. On GitHub it
+  dismisses its own approvals; on a protected branch that needs the right to
+  dismiss reviews, and without it the review is marked partial with the error.
+  With `request_changes` on, a blocked review requests changes instead (GitHub
+  only; GitLab has no such state, so there it only withdraws).
+- GitHub approvals are tied to the head commit, so a push gets a fresh approval
+  once it is reviewed. GitLab approvals are pinned to the head sha, so a push
+  that lands mid-review makes the approval fail rather than approve unseen
+  commits.
+- **Permissions**: GitHub uses the Pull requests (write) permission already
+  needed for reviews. GitLab needs a role allowed to approve (Developer or
+  above, and an approval rule that includes the account where rules apply).
+  The forge refuses an approval of the account's own change (GitHub always,
+  GitLab when the project prevents author approval); that is shown as a note,
+  not a failure.
+- Whether an approval from Sentryward counts toward required approvals depends
+  on the forge's branch protection or approval rules, not on Sentryward.
+- Turning the setting off leaves any approval already given in place.
 
 The defaults are a quiet setup, the Display tab's Standard preset: inline
 comments, one summary comment and a short PR summary, without the counts,
