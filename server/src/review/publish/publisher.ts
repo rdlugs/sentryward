@@ -1,6 +1,6 @@
 import type { Config } from "../config/schema.ts";
 import type { ChangeSet, ReviewResult } from "../core/models.ts";
-import type { ApprovalState, ForgePublisher, PostedComment } from "../forge/types.ts";
+import type { ApprovalAction, ApprovalState, ForgePublisher, PostedComment } from "../forge/types.ts";
 import { inlineLimits, inlineSelection } from "../core/buckets.ts";
 import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
@@ -43,8 +43,10 @@ export interface Publication {
   threadsFailed?: string[];
   // What became of Sentryward's approval, when output.approval is on: the
   // forge's answer, why the change was not approved, and the forge's note
-  // when it refused.
-  approval?: { state: ApprovalState; reasons: string[]; note?: string };
+  // when it refused. `action` is what was asked of the forge, so a later
+  // skipped run can tell whether this run approved its head (rows written
+  // before it was recorded lack it).
+  approval?: { action?: ApprovalAction["action"]; state: ApprovalState; reasons: string[]; note?: string };
   // Publishing stopped partway because proceed() said so.
   stopped?: boolean;
   // ReviewResult.heldBack as this run decided it; the caller stores it in the
@@ -215,8 +217,9 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
     if (await halted()) return publication;
     // The labels above were read before the review: someone may have added a
     // hold label since. An approval is only given against the labels the
-    // forge has now, and not at all when they cannot be read.
-    if (decision.action === "approve") {
+    // forge has now, and not at all when they cannot be read. Without a label
+    // policy the labels cannot change the decision, so they are not read.
+    if (decision.action === "approve" && config.output.approval.blockLabels.length > 0) {
       try {
         const current = await publisher.getLabels(ref);
         decision = approvalDecision(config, result, { ...changeSet, labels: current })!;
@@ -233,8 +236,9 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
       const outcome = await publisher.setApproval(ref, {
         action: decision.action,
         body: approvalBody(result, decision, input.targetUrl),
+        ...(changeSet.baseRef ? { baseRef: changeSet.baseRef } : {}),
       });
-      publication.approval = { state: outcome.state, reasons: decision.reasons, ...(outcome.note ? { note: outcome.note } : {}) };
+      publication.approval = { action: decision.action, state: outcome.state, reasons: decision.reasons, ...(outcome.note ? { note: outcome.note } : {}) };
     } catch (err) {
       publication.errors.push(`Approval failed: ${message(err)}`);
     }

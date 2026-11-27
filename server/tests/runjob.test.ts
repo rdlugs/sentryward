@@ -1645,9 +1645,18 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
       where: { id: repositoryId },
       data: { settings: { output: { approval: { enabled: true } }, triggers: { reviewOnPush: false, ...triggers } } },
     });
-  const reviewed = (headSha: string) =>
+  const approved = { approval: { action: "approve", state: "approved", reasons: [] } };
+  const reviewed = (headSha: string, publication: object | null = approved) =>
     prisma.reviewJob.create({
-      data: { repositoryId, number: 42, headSha, trigger: "manual", status: "completed", finishedAt: new Date() },
+      data: {
+        repositoryId,
+        number: 42,
+        headSha,
+        trigger: "manual",
+        status: "completed",
+        finishedAt: new Date(),
+        ...(publication ? { publication } : {}),
+      },
     });
   async function skippedPush(options: Parameters<typeof deps>[3] = {}) {
     await enqueue({ repositoryId, number: 42, headSha: "newhead", trigger: "webhook", event: "push" });
@@ -1664,14 +1673,41 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     await reviewed("oldhead");
     const approvals = await skippedPush();
     expect(approvals).toEqual([
-      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/commits since the last review were not reviewed/) },
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        keepAt: "newhead",
+        body: expect.stringMatching(/commits since the last review were not reviewed/),
+      },
     ]);
   });
 
-  it("leaves it alone when the last review saw this head", async () => {
+  it("leaves it alone when the last review published an approval decision for this head", async () => {
     await approvingSettings();
     await reviewed("newhead");
     expect(await skippedPush()).toEqual([]);
+  });
+
+  // The head was reviewed, but that review left no approval behind (approval
+  // was off, or the step failed or was refused), so a standing approval may
+  // be an older one: the forge decides by the approval's own commit.
+  it("asks the forge, keeping an approval of the head, when the review of this head published no approval", async () => {
+    await approvingSettings();
+    await reviewed("newhead", null);
+    expect(await skippedPush()).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        keepAt: "newhead",
+        body: expect.stringMatching(/no published approval of the current commits is on record/),
+      },
+    ]);
+  });
+
+  it("does not trust an unchanged outcome recorded without its action", async () => {
+    await approvingSettings();
+    await reviewed("newhead", { approval: { state: "unchanged", reasons: [] } });
+    expect(await skippedPush()).toMatchObject([{ action: "withdraw", keepAt: "newhead" }]);
   });
 
   // Retention may have pruned the history while the forge approval stands, so
@@ -1683,7 +1719,7 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
         action: "withdraw",
         headSha: "newhead",
         keepAt: "newhead",
-        body: expect.stringMatching(/no review of the current commits is on record/),
+        body: expect.stringMatching(/no published approval of the current commits is on record/),
       },
     ]);
   });

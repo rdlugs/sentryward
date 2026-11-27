@@ -628,7 +628,7 @@ describe("publishReview approval", () => {
     expect(calls.approvals[0]!.action).toBe("approve");
     expect(calls.approvals[0]!.body).toContain("No findings at or above critical");
     expect(calls.approvals[0]!.body).toContain("http://sentryward/reviews/1");
-    expect(publication.approval).toEqual({ state: "approved", reasons: [] });
+    expect(publication.approval).toEqual({ action: "approve", state: "approved", reasons: [] });
     expect(publication.errors).toEqual([]);
   });
 
@@ -660,7 +660,7 @@ describe("publishReview approval", () => {
       config: approving(),
       postedFingerprints: new Set(),
     });
-    expect(first.approval).toEqual({ state: "refused", reasons: [], note: "own change" });
+    expect(first.approval).toEqual({ action: "approve", state: "refused", reasons: [], note: "own change" });
     expect(first.errors).toEqual([]);
 
     const failing = recordingPublisher({ approval: new Error("403 Forbidden") });
@@ -691,7 +691,7 @@ describe("publishReview approval", () => {
       postedFingerprints: new Set(),
     });
     expect(added.calls.labels[0]!.add).toEqual(["Large blast radius"]);
-    expect(publication.approval).toEqual({ state: "withdrawn", reasons: ['The change has the label "Large blast radius"'] });
+    expect(publication.approval).toEqual({ action: "withdraw", state: "withdrawn", reasons: ['The change has the label "Large blast radius"'] });
 
     // A stale label this run takes off no longer holds the approval back.
     const removed = recordingPublisher();
@@ -715,19 +715,35 @@ describe("publishReview approval", () => {
       postedFingerprints: new Set(),
     });
     expect(held.calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
-    expect(publication.approval).toEqual({ state: "withdrawn", reasons: ['The change has the label "do-not-merge"'] });
+    expect(publication.approval).toEqual({ action: "withdraw", state: "withdrawn", reasons: ['The change has the label "do-not-merge"'] });
 
     const unreadable = recordingPublisher({ forgeLabels: new Error("502 Bad Gateway") });
     const failed = await publishReview({
       publisher: unreadable.publisher,
       changeSet: makeChangeSet(),
       result: await passing(),
-      config: approving(),
+      config: approving({ blockLabels: ["do-not-merge"] }),
       postedFingerprints: new Set(),
     });
     expect(unreadable.calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
     expect(failed.approval?.reasons).toEqual(["The change's current labels could not be read, so the label policy could not be checked"]);
     expect(failed.errors).toEqual(["Labels could not be re-read for the approval: 502 Bad Gateway"]);
+  });
+
+  // Without a label policy the labels cannot change the decision, so an
+  // unreadable label list must not cost the approval.
+  it("does not read the labels again when no label policy is set", async () => {
+    const unreadable = recordingPublisher({ forgeLabels: new Error("502 Bad Gateway") });
+    const publication = await publishReview({
+      publisher: unreadable.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(unreadable.calls.approvals.map((a) => a.action)).toEqual(["approve"]);
+    expect(publication.approval).toEqual({ action: "approve", state: "approved", reasons: [] });
+    expect(publication.errors).toEqual([]);
   });
 
   it("withdraws instead of requesting changes on GitLab", async () => {

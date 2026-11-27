@@ -281,7 +281,7 @@ export interface Publication {
   statusState: string | null
   // What became of Sentryward's approval, when output.approval is on
   // (server/src/review/publish/publisher.ts). Absent on older rows.
-  approval?: { state: ApprovalState; reasons: string[]; note?: string }
+  approval?: { action?: "approve" | "request_changes" | "withdraw"; state: ApprovalState; reasons: string[]; note?: string }
   errors: string[]
 }
 

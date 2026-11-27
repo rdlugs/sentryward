@@ -459,6 +459,14 @@ describe("parseRepoFile", () => {
     const nobody = approval({ output: { approval: { onlyAuthors: ["carol"] } } });
     expect(nobody.config.output.approval.onlyAuthors).toEqual([NO_APPROVED_AUTHOR]);
     expect(approval({ output: { approval: { enabled: false } } }).config.output.approval.enabled).toBe(false);
+
+    // A dashboard list that repeats an entry must not hide the one the file adds.
+    const repeated = approval(
+      { output: { approval: { blockLabels: ["wip"] } } },
+      { output: { approval: { enabled: true, blockLabels: ["hold", "hold"] } } },
+    );
+    expect(repeated.config.output.approval.blockLabels).toEqual(["hold", "wip"]);
+    expect(repeated.sources["output.approval.blockLabels"]).toBe("repoFile");
   });
 
   it("reads review.verify and rejects an unknown mode", () => {

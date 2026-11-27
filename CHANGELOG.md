@@ -26,16 +26,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   refusing an approval of the account's own change is only a note. The review
   page's sidebar shows the outcome and the reasons, and the Display preview
   returns what would happen. Safeguards: `.sentryward.yaml` (and the trigger)
-  can only tighten approval, never turn it on or drop a block; a GitHub
-  approval is not posted when the head moved during the review, and is
-  dismissed again when the head moved while it was being posted; a skipped run
-  withdraws the approval when commits arrived since the last review or a skip
-  filter matched, and when no review is on record (pruned history) it asks the
-  forge to withdraw, keeping a GitHub approval of the current head; a change
-  whose file list the forge cut short is not approved; `block_labels` is
+  can only tighten approval, never turn it on or drop a block (even when a
+  dashboard list repeats an entry); a GitHub approval is not posted (and an
+  existing one is not reused) when the head, the base sha or the target branch
+  moved during the review, and is dismissed again when they moved while it was
+  being posted or could not be re-read afterwards (a failed dismissal is an
+  error saying the approval still stands); a skipped run keeps the approval
+  only when the last review published an approval decision for the current
+  head, and otherwise asks the forge to withdraw, keeping a GitHub approval of
+  the current head (filter skips always withdraw); a change whose file list
+  the forge cut short is not approved; when `block_labels` is set it is
   checked against the labels read from the forge just before approving (so a
   hold label added mid-review counts, and an unreadable label list withholds
-  the approval); a GitLab refusal is only a note when GitLab reports the
+  the approval), and without it the labels are not re-read; a GitLab refusal is only a note when GitLab reports the
   account cannot approve the MR, while other 401/403 errors mark the review
   partial; the preview shows a withdrawal rather than a request for changes on
   GitLab, as publishing does; and without its own login (`GITHUB_APP_SLUG` for

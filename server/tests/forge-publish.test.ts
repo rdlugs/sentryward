@@ -36,7 +36,10 @@ const gitlab = (routes: StubRoute[]) => {
 };
 const body = (call: { body?: string }) => JSON.parse(call.body ?? "{}");
 // The pull request as setApproval re-reads it just before and after approving.
-const pullAt = (sha: string): StubRoute => ({ url: /\/pulls\/42$/, body: { head: { sha } } });
+const pullAt = (sha: string, base: { sha?: string; ref?: string } = {}): StubRoute => ({
+  url: /\/pulls\/42$/,
+  body: { head: { sha }, base: { sha: base.sha ?? "base", ref: base.ref ?? "main" } },
+});
 
 describe("GitHub publishing", () => {
   it("posts one COMMENT review at the head commit with right-side line anchors", async () => {
@@ -266,6 +269,7 @@ describe("GitHub publishing", () => {
         { id: 2, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } },
         { id: 3, state: "COMMENTED", commit_id: "head", user: { login: "sentryward[bot]" } },
       ]),
+      pullAt("head"),
     ]);
     expect(await current.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "unchanged" });
 
@@ -298,6 +302,57 @@ describe("GitHub publishing", () => {
     expect(await gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
     expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "PUT"]);
     expect(body(calls[4]!)).toMatchObject({ event: "DISMISS" });
+  });
+
+  it("does not approve when the base moved or the pull request was retargeted during the review", async () => {
+    const noReviews = { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] };
+    const baseMoved = github([noReviews, pullAt("head", { sha: "newbase" })]);
+    expect(await baseMoved.gh.setApproval(ghRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+      state: "refused",
+      note: expect.stringMatching(/rerun/),
+    });
+    expect(baseMoved.calls.some((c) => c.method === "POST")).toBe(false);
+
+    const retargeted = github([noReviews, pullAt("head", { ref: "release" })]);
+    expect(await retargeted.gh.setApproval(ghRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "refused" });
+    expect(retargeted.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("does not reuse an approval of the head once the base has moved", async () => {
+    const { gh, calls } = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } }] },
+      pullAt("head", { sha: "newbase" }),
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET"]);
+  });
+
+  it("dismisses its new approval when the base moved while it was posted", async () => {
+    const { gh, calls } = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      { ...pullAt("head"), times: 1 },
+      pullAt("head", { sha: "newbase" }),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "PUT"]);
+  });
+
+  it("dismisses its new approval when the pull request cannot be re-read after posting", async () => {
+    const routes = (dismissal: StubRoute) => [
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      { ...pullAt("head"), times: 1 },
+      { url: /\/pulls\/42$/, status: 404, body: { message: "Not Found" } },
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      dismissal,
+    ];
+    const withdrawn = github(routes({ method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} }));
+    await expect(withdrawn.gh.setApproval(ghRef, { action: "approve", body: "ok" })).rejects.toThrow(/approval was withdrawn/);
+    expect(withdrawn.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "PUT"]);
+
+    const stands = github(routes({ method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, status: 404, body: { message: "Not Found" } }));
+    await expect(stands.gh.setApproval(ghRef, { action: "approve", body: "ok" })).rejects.toThrow(/still stands/);
   });
 
   it("keeps an approval of the given commit when withdrawing without history", async () => {

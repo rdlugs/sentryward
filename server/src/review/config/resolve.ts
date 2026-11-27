@@ -260,9 +260,11 @@ function holdApproval(layers: ConfigLayers, config: Config, sources: Record<stri
       set.requestChanges = name;
     }
     for (const key of ["blockPaths", "skipAuthors", "blockLabels", "blockOnRisk"] as const) {
-      const next = union<string>(held[key], own[key]);
-      if (next.length !== held[key].length) {
-        (held as Record<typeof key, string[]>)[key] = next;
+      // Asks whether the layer adds a member, not whether the length grew: the
+      // union also dedupes the dashboard's own list, which may repeat entries.
+      const theirs: string[] = own[key] ?? [];
+      if (theirs.some((item) => !(held[key] as string[]).includes(item))) {
+        (held as Record<typeof key, string[]>)[key] = union<string>(held[key], theirs);
         set[key] = name;
       }
     }

@@ -280,6 +280,25 @@ const MOVED: ApprovalOutcome = {
   note: "The pull request moved to a newer commit during the review; the next review decides",
 };
 
+// A moved base queues no review (only new commits and reopening do), so the
+// note says a rerun is needed rather than leaving it to a next review.
+const BASE_MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The pull request's target branch moved or was changed during the review; rerun the review to decide on an approval",
+};
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Whether the pull request still is what the review saw: its head, and the
+// base its diff and the repository's policy were read against.
+function movedFrom(pull: GhPull, ref: ForgeRef, baseRef: string | undefined): ApprovalOutcome | undefined {
+  if (pull.head.sha !== ref.headSha) return MOVED;
+  if (pull.base.sha !== ref.baseSha || (baseRef !== undefined && pull.base.ref !== baseRef)) return BASE_MOVED;
+  return undefined;
+}
+
 export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, ForgeThreads {
   readonly provider = "github" as const;
   readonly host: string;
@@ -762,26 +781,32 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       }
       return { state: "withdrawn" };
     }
+    // GitHub accepts an approval of an older commit and counts it for the
+    // newer ones unless branch protection dismisses stale approvals, so a push
+    // (or a retarget) that raced the review must not inherit it. A push queues
+    // its own review, which decides. GitHub has no conditional write, so the
+    // head and base are checked before posting (cheap, catches most races) and
+    // again after, dismissing the approval if they moved in between or cannot
+    // be confirmed. A push in the moment between the post and that second read
+    // can still slip through; teams that gate merges on this approval should
+    // dismiss stale approvals on push or also require the commit-specific
+    // sentryward/review status.
+    if (action.action === "approve") {
+      const moved = movedFrom(await this.http.json<GhPull>(pulls), ref, action.baseRef);
+      if (moved) return moved;
+    }
     // An approval follows the head, so a push gets a fresh one (branch
-    // protection may dismiss stale approvals). A request for changes stands
-    // until it is withdrawn; the summary comment already says what is wrong.
+    // protection may dismiss stale approvals). One already at the head is
+    // reused only once the check above showed the pull request is still at
+    // the head and base this review saw, so this review vouches for it. A
+    // request for changes stands until it is withdrawn; the summary comment
+    // already says what is wrong.
     if (action.action === "approve" && current?.state === "APPROVED" && current.commit_id === ref.headSha) {
       return { state: "unchanged" };
     }
     if (action.action === "request_changes" && current?.state === "CHANGES_REQUESTED") {
       return { state: "unchanged" };
     }
-    // GitHub accepts an approval of an older commit and counts it for the
-    // newer ones unless branch protection dismisses stale approvals, so a push
-    // that raced the review must not inherit it. The push queues its own
-    // review, which decides. GitHub has no conditional write, so the head is
-    // checked before posting (cheap, catches most races) and again after,
-    // dismissing the approval if it moved in between. A push in the moment
-    // between the post and that second read can still slip through; teams
-    // that gate merges on this approval should dismiss stale approvals on push
-    // or also require the commit-specific sentryward/review status.
-    const pull = action.action === "approve" ? await this.http.json<GhPull>(pulls) : undefined;
-    if (pull && pull.head.sha !== ref.headSha) return MOVED;
     let posted: { id: number };
     try {
       posted = await this.http.json<{ id: number }>(`${pulls}/reviews`, {
@@ -800,15 +825,31 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       throw err;
     }
     if (action.action === "approve") {
-      const after = await this.http.json<GhPull>(pulls);
-      if (after.head.sha !== ref.headSha) {
-        // A failed dismissal throws: the approval stands on unseen commits, so
-        // the review must show an error rather than a note.
-        await this.http.request(`${pulls}/reviews/${posted.id}/dismissals`, {
-          method: "PUT",
-          body: JSON.stringify({ message: "Sentryward withdrew this approval: the pull request moved on during the review.", event: "DISMISS" }),
-        });
-        return MOVED;
+      let moved: ApprovalOutcome | undefined;
+      let unconfirmed: unknown;
+      try {
+        moved = movedFrom(await this.http.json<GhPull>(pulls), ref, action.baseRef);
+      } catch (err) {
+        unconfirmed = err;
+      }
+      if (moved || unconfirmed !== undefined) {
+        // The approval is withdrawn whenever its freshness is not confirmed. A
+        // failure here throws rather than returning a note, so the review
+        // shows an error: either the check failed, or the approval stands on
+        // commits the review never saw.
+        const why = unconfirmed !== undefined ? `the pull request could not be re-read (${errorText(unconfirmed)})` : "the pull request moved on during the review";
+        try {
+          await this.http.request(`${pulls}/reviews/${posted.id}/dismissals`, {
+            method: "PUT",
+            body: JSON.stringify({ message: "Sentryward withdrew this approval: the pull request moved on during the review, or could not be checked.", event: "DISMISS" }),
+          });
+        } catch (err) {
+          throw new Error(`The approval could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
+        }
+        if (unconfirmed !== undefined) {
+          throw new Error(`Could not confirm the pull request was still at the reviewed commits, so the approval was withdrawn: ${errorText(unconfirmed)}`);
+        }
+        return moved!;
       }
     }
     return { state: action.action === "approve" ? "approved" : "changes_requested" };

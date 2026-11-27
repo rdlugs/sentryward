@@ -191,6 +191,9 @@ export interface ApprovalAction {
   // records which commit an approval covers (GitHub). For callers that have
   // no record of what Sentryward last reviewed.
   keepAt?: string;
+  // approve only: the target branch the review saw, so an approval is not
+  // posted on a change retargeted mid-review (GitHub checks it).
+  baseRef?: string;
 }
 
 // "refused": the forge would not let Sentryward approve (its own change, or the
