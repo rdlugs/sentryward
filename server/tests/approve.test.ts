@@ -8,8 +8,9 @@ import { sampleResult } from "./helpers/result.ts";
 
 type Approval = NonNullable<NonNullable<ConfigOverride["output"]>["approval"]>;
 
+// Only the dashboard layers can turn approval on (resolve.ts holdApproval).
 const config = (approval: Approval = {}) =>
-  resolveConfig({ trigger: { output: { approval: { enabled: true, ...approval } } } }).config;
+  resolveConfig({ global: { output: { approval: { enabled: true, ...approval } } } }).config;
 
 async function passing(findings = true): Promise<ReviewResult> {
   const result = await sampleResult();
@@ -44,7 +45,7 @@ describe("approvalDecision", () => {
     });
   });
 
-  it("withdraws when the review did not complete, whatever it found", async () => {
+  it("withdraws when the review did not complete and found nothing blocking", async () => {
     const partial = { ...(await passing(false)), status: "partial" as const };
     expect(approvalDecision(config(), partial, change())).toEqual({ action: "withdraw", reasons: ["The review did not complete"] });
     const error = { ...(await passing(false)), verdict: { verdict: "error" as const, blockOn: "critical" as const, blocking: [] } };
@@ -58,6 +59,21 @@ describe("approvalDecision", () => {
       reasons: ["1 finding at or above critical"],
     });
     expect(approvalDecision(config({ requestChanges: true }), blocked, change())?.action).toBe("request_changes");
+  });
+
+  it("names the blocking findings of a partial review rather than calling it incomplete", async () => {
+    const blocked = { ...(await sampleResult()), status: "partial" as const };
+    expect(approvalDecision(config({ requestChanges: true }), blocked, change())).toEqual({
+      action: "request_changes",
+      reasons: ["1 finding at or above critical"],
+    });
+  });
+
+  it("holds the approval back when the forge listed only part of the files", async () => {
+    expect(approvalDecision(config(), await passing(), change({ filesTruncated: true }))).toEqual({
+      action: "withdraw",
+      reasons: [expect.stringMatching(/^The forge listed only \d+ files? of the change/)],
+    });
   });
 
   it("holds the approval back for a blocked path, on either side of a rename", async () => {

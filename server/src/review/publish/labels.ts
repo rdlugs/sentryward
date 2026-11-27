@@ -32,3 +32,13 @@ export function labelChanges(walkthrough: Walkthrough, output: Config["output"])
   if (output.effortLabel) pick(EFFORT_LABELS, EFFORT_LABELS[walkthrough.estimatedEffort]);
   return { add, remove };
 }
+
+// The labels the change carries once this run's label changes land, which is
+// what the approval's block_labels policy must judge. When the write failed
+// (`applied` false) the additions still count but the removals do not, so a
+// failure can only hold an approval back, never let one through.
+export function labelsAfter(labels: string[] | undefined, changes: { add: string[]; remove: string[] }, applied = true): string[] {
+  const removed = new Set(applied ? changes.remove : []);
+  const kept = (labels ?? []).filter((label) => !removed.has(label));
+  return [...new Set([...kept, ...changes.add])];
+}

@@ -757,17 +757,35 @@ output:
   `block_paths` glob (either side of a rename), is by an author outside
   `only_authors` or in `skip_authors` (any case), carries a `block_labels`
   label (case-sensitive) or touches one of the `block_on_risk` kinds (found by
-  pattern in the diff, as for deep review) is not approved. The review page's
-  sidebar lists the reasons.
+  pattern in the diff, as for deep review) is not approved. Neither is a change
+  whose file list the forge cut short (GitHub lists at most 3000 files), since
+  part of it went unchecked. `block_labels` is matched against the labels the
+  change carries after the review sets its own (blast radius, effort). The
+  review page's sidebar lists the reasons.
+- **Repository file**: `.sentryward.yaml` can only tighten approval. It can
+  turn approval off, ask for `when: no_findings`, add `block_paths`,
+  `skip_authors`, `block_labels` and `block_on_risk` entries, and narrow
+  `only_authors` to logins on both lists. It cannot turn approval on or remove
+  a block; such settings are ignored with a warning.
 - **Withdrawing**: on GitLab Sentryward removes its approval. On GitHub it
   dismisses its own approvals; on a protected branch that needs the right to
   dismiss reviews, and without it the review is marked partial with the error.
   With `request_changes` on, a blocked review requests changes instead (GitHub
   only; GitLab has no such state, so there it only withdraws).
 - GitHub approvals are tied to the head commit, so a push gets a fresh approval
-  once it is reviewed. GitLab approvals are pinned to the head sha, so a push
-  that lands mid-review makes the approval fail rather than approve unseen
-  commits.
+  once it is reviewed. Before approving, Sentryward checks the pull request's
+  head again and does not approve if a push landed mid-review (shown as a
+  note). GitLab approvals are pinned to the head sha, so such a push makes the
+  approval fail rather than approve unseen commits.
+- **Skipped runs**: when a run is skipped (automatic reviews off for pushes, a
+  draft, a burst pause, a skip filter), Sentryward withdraws its approval if
+  commits arrived since the last review, or if the skip came from a skip
+  label, author, title or branch filter. An approval never covers commits
+  Sentryward did not review.
+- **Its own account**: Sentryward has to know the login it acts as to find and
+  withdraw its approval. For a GitHub App that means setting
+  `GITHUB_APP_SLUG`; without it (or without a GitLab username on the
+  connection), Sentryward makes no approval decision at all and shows a note.
 - **Permissions**: GitHub uses the Pull requests (write) permission already
   needed for reviews. GitLab needs a role allowed to approve (Developer or
   above, and an approval rule that includes the account where rules apply).

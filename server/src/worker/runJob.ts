@@ -48,6 +48,7 @@ import { guardModels, policyFor, type EffectivePolicy } from "../services/privac
 import type { Resolve } from "../lib/hostSafety.ts";
 import { priceOverridesFor } from "../services/modelPrices.ts";
 import { probeModel } from "../services/llmProbe.ts";
+import { withdrawStaleApproval } from "./staleApproval.ts";
 import { prepareCapabilities, type Probe } from "./capabilities.ts";
 import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
@@ -327,6 +328,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
       : undefined;
   const skip = skipReason(job, config, changeSet, burst);
   if (skip) {
+    // An earlier approval must not carry over to commits this run will not
+    // review. A trial posts nothing, so it touches no approval either.
+    if (!job.trial) await withdrawStaleApproval(forge, job, config, changeSet, skip);
     const finishSkipped = () =>
       complete(job.id, job.attempts, {
         status: "skipped",

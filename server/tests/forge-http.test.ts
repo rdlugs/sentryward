@@ -59,3 +59,16 @@ describe("ForgeHttp timeouts", () => {
     expect(calls[0]!.signal).toBe(caller.signal);
   });
 });
+
+describe("ForgeHttp errors", () => {
+  it("includes GitHub's errors array in the message", async () => {
+    const fetch = async () =>
+      new Response(JSON.stringify({ message: "Unprocessable Entity", errors: ["Review Can not approve your own pull request", { code: "invalid" }] }), {
+        status: 422,
+      });
+    await expect(http(fetch).request("/repos/acme/web/pulls/1/reviews", { method: "POST" })).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringMatching(/Unprocessable Entity: Review Can not approve your own pull request; invalid$/),
+    });
+  });
+});

@@ -211,8 +211,80 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   const config = configSchema.parse(merged);
   const ruleGuard = guardFor(layers, config, sources);
   if (ruleGuard) config.ruleGuard = ruleGuard;
+  const approvalWarnings = holdApproval(layers, config, sources);
 
-  return { config, sources, warnings: combinedIssues.map((issue) => issue.message), combinedIssues };
+  return { config, sources, warnings: [...combinedIssues.map((issue) => issue.message), ...approvalWarnings], combinedIssues };
+}
+
+// Logins cannot contain parentheses on either forge, so this matches nobody.
+export const NO_APPROVED_AUTHOR = "(nobody)";
+
+// The approval policy is a security control, like rules: the repository file
+// and the trigger may tighten what the dashboard layers set, never loosen it.
+// They can turn approval off, ask for "no_findings", and add blocks; an
+// onlyAuthors list narrows the dashboard's. A loosening is ignored with a
+// warning. Returns the warnings; `config` and `sources` are updated in place.
+function holdApproval(layers: ConfigLayers, config: Config, sources: Record<string, LayerName>): string[] {
+  const repoLayers = (
+    [
+      ["repoFile", layers.repoFile],
+      ["trigger", layers.trigger],
+    ] as const
+  ).flatMap(([name, layer]) => (layer?.output?.approval ? [[name, layer.output.approval] as const] : []));
+  if (!repoLayers.length) return [];
+
+  const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings, directory: layers.directory });
+  const base = dashboard.config.output.approval;
+  const held = { ...base };
+  const set: Partial<Record<keyof typeof held, LayerName>> = {};
+  const warnings: string[] = [];
+  const union = <T>(a: T[], b: T[] | undefined) => [...new Set([...a, ...(b ?? [])])];
+
+  for (const [name, own] of repoLayers) {
+    const where = LAYER_LABELS[name];
+    if (own.enabled === false && held.enabled) {
+      held.enabled = false;
+      set.enabled = name;
+    } else if (own.enabled === true && !held.enabled) {
+      warnings.push(`Approval in ${where} was ignored: only the dashboard settings can turn approval on`);
+    }
+    if (own.when === "no_findings" && held.when !== "no_findings") {
+      held.when = "no_findings";
+      set.when = name;
+    } else if (own.when === "pass" && held.when === "no_findings") {
+      warnings.push(`Approval "when: pass" in ${where} was ignored: the dashboard settings approve only reviews with no findings`);
+    }
+    // Withdrawing and requesting changes both hold the approval back.
+    if (own.requestChanges !== undefined && own.requestChanges !== held.requestChanges) {
+      held.requestChanges = own.requestChanges;
+      set.requestChanges = name;
+    }
+    for (const key of ["blockPaths", "skipAuthors", "blockLabels", "blockOnRisk"] as const) {
+      const next = union<string>(held[key], own[key]);
+      if (next.length !== held[key].length) {
+        (held as Record<typeof key, string[]>)[key] = next;
+        set[key] = name;
+      }
+    }
+    if (own.onlyAuthors?.length) {
+      if (!held.onlyAuthors.length) {
+        held.onlyAuthors = [...own.onlyAuthors];
+      } else {
+        const theirs = new Set(own.onlyAuthors.map((login) => login.toLowerCase()));
+        const both = held.onlyAuthors.filter((login) => theirs.has(login.toLowerCase()));
+        // An empty intersection must still approve nobody, not everybody.
+        held.onlyAuthors = both.length ? both : [NO_APPROVED_AUTHOR];
+      }
+      set.onlyAuthors = name;
+    }
+  }
+
+  config.output.approval = held;
+  for (const key of Object.keys(held) as (keyof typeof held)[]) {
+    const path = `output.approval.${key}`;
+    sources[path] = set[key] ?? dashboard.sources[path] ?? "default";
+  }
+  return warnings;
 }
 
 

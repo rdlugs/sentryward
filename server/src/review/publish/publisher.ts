@@ -6,7 +6,7 @@ import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
 import { approvalBody, approvalDecision } from "./approve.ts";
 import { inlineComments } from "./inline.ts";
-import { labelChanges } from "./labels.ts";
+import { labelChanges, labelsAfter } from "./labels.ts";
 import { commitStatus } from "./status.ts";
 
 export interface PublishInput {
@@ -179,15 +179,20 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
     if (summary) publication.errors.push(`Description summary failed: ${message(err)}`);
   });
 
+  // The labels the change carries after this run, for the approval policy.
+  let labels = changeSet.labels ?? [];
   if (result.walkthrough) {
-    const { add, remove } = labelChanges(result.walkthrough, config.output);
+    const changes = labelChanges(result.walkthrough, config.output);
+    const { add, remove } = changes;
     if (add.length || remove.length) {
       if (await halted()) return publication;
       try {
         await publisher.setLabels(ref, add, remove);
         publication.labels = add;
+        labels = labelsAfter(labels, changes);
       } catch (err) {
         publication.errors.push(`Labels failed: ${message(err)}`);
+        labels = labelsAfter(labels, changes, false);
       }
     }
   }
@@ -205,7 +210,7 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
 
   // Last, so the summary and status already explain the decision when it
   // lands. A refusal (the forge's own rules) is a note, not a failure.
-  const decision = approvalDecision(config, result, changeSet);
+  const decision = approvalDecision(config, result, { ...changeSet, labels });
   if (decision) {
     if (await halted()) return publication;
     try {

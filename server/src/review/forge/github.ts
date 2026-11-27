@@ -90,6 +90,8 @@ interface GhPull {
   html_url: string;
   user?: GhUser | null;
   labels?: { name: string }[];
+  // Total files in the PR, which the files endpoint stops listing at 3000.
+  changed_files?: number;
   base: { sha: string; ref: string; repo?: { full_name: string } | null };
   // `label` is owner:branch; `repo` is null once a fork has been deleted.
   head: { sha: string; ref: string; label?: string; repo?: { full_name: string } | null };
@@ -349,6 +351,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       authorId: pull.user?.id === undefined ? undefined : String(pull.user.id),
       labels: (pull.labels ?? []).map((label) => label.name),
       files: files.map(toChangedFileFromGh),
+      ...(pull.changed_files !== undefined && files.length < pull.changed_files ? { filesTruncated: true } : {}),
     };
   }
 
@@ -716,15 +719,19 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
 
   // Sentryward's approval is its latest APPROVED or CHANGES_REQUESTED review:
   // a later COMMENT review does not change it, and a dismissed one shows as
-  // DISMISSED. Without its own login it cannot tell its reviews apart, so it
-  // may still approve but never dismisses.
+  // DISMISSED. Without its own login it cannot tell its reviews apart, so an
+  // approval could never be withdrawn: it refuses to decide at all.
   async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
+    if (!this.options.selfLogin) {
+      return {
+        state: "refused",
+        note: "Sentryward does not know its own GitHub account name (set GITHUB_APP_SLUG), so it could not withdraw an approval later",
+      };
+    }
     const pulls = `${repoApiPath(ref.project)}/pulls/${ref.number}`;
-    const own = this.options.selfLogin
-      ? (await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext)).filter(
-          (review) => this.isSelfLogin(review.user?.login) && (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED"),
-        )
-      : [];
+    const own = (await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext)).filter(
+      (review) => this.isSelfLogin(review.user?.login) && (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED"),
+    );
     const current = own.at(-1);
     if (action.action === "withdraw") {
       if (!own.length) return { state: "unchanged" };
@@ -744,6 +751,16 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     }
     if (action.action === "request_changes" && current?.state === "CHANGES_REQUESTED") {
       return { state: "unchanged" };
+    }
+    // GitHub accepts an approval of an older commit and counts it for the
+    // newer ones unless branch protection dismisses stale approvals, so a push
+    // that raced the review must not inherit it. The push queues its own
+    // review, which decides.
+    if (action.action === "approve") {
+      const pull = await this.http.json<GhPull>(pulls);
+      if (pull.head.sha !== ref.headSha) {
+        return { state: "refused", note: "The pull request moved to a newer commit during the review; the next review decides" };
+      }
     }
     try {
       await this.http.request(`${pulls}/reviews`, {

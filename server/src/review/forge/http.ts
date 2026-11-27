@@ -56,8 +56,12 @@ export class ForgeHttp {
       const body = await res.text().catch(() => "");
       let message = body.slice(0, 300);
       try {
-        const parsed = JSON.parse(body) as { message?: unknown; error?: unknown };
+        const parsed = JSON.parse(body) as { message?: unknown; error?: unknown; errors?: unknown };
         message = String(parsed.message ?? parsed.error ?? message);
+        // GitHub's 422s put the reason in `errors` and only "Unprocessable
+        // Entity" in `message`; callers matching on the reason need both.
+        const details = errorDetails(parsed.errors);
+        if (details) message = `${message}: ${details}`;
       } catch {
         // Not JSON; keep the raw excerpt.
       }
@@ -134,4 +138,22 @@ export function linkHeaderNext(res: Response): string | null {
 
 export function isNotFound(err: unknown): boolean {
   return err instanceof ForgeError && err.status === 404;
+}
+
+// GitHub's `errors` holds strings or `{ resource, field, code, message }`
+// objects; only the text is useful in an error message.
+function errorDetails(errors: unknown): string {
+  if (!Array.isArray(errors)) return "";
+  return errors
+    .map((entry) => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object") {
+        const { message, code } = entry as { message?: unknown; code?: unknown };
+        return typeof message === "string" ? message : typeof code === "string" ? code : "";
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("; ")
+    .slice(0, 300);
 }

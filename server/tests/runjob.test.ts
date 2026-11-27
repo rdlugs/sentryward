@@ -138,6 +138,8 @@ function deps(
     tools?: { annotations: ToolAnnotation[]; warnings: string[] } | Error;
     // What getChange throws instead of answering.
     changeError?: Error;
+    // The labels getChange reports.
+    labels?: string[];
     // A summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
     // Directory listings by "<ref>:<path>"; recorded as "dir:<ref>:<path>".
@@ -148,6 +150,7 @@ function deps(
   const reads: string[] = [];
   const toolReads: string[] = [];
   const published: Published = { inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] };
+  const approvals: { action: string; body: string; headSha: string }[] = [];
   const forge = {
     provider: "github" as const,
     getChange: async (_p: string, _n: number, cache?: ForgeCache) => {
@@ -158,6 +161,7 @@ function deps(
         ...change,
         title: options.title ?? change.title,
         author: "alice",
+        ...(options.labels ? { labels: options.labels } : {}),
         forgeRef: { ...change.forgeRef, headSha: options.head ?? "newhead", ...(options.base ? { baseSha: options.base } : {}) },
       };
     },
@@ -231,6 +235,10 @@ function deps(
       published.threads.push({ fingerprints, resolved });
       return { updated: fingerprints, failed: [] };
     },
+    setApproval: async (ref: { headSha: string }, action: { action: string; body: string }) => {
+      approvals.push({ ...action, headSha: ref.headSha });
+      return { state: action.action === "approve" ? "approved" : "withdrawn" };
+    },
   } as unknown as Forge;
   const model = fakeModel(answers);
   const connections = Object.fromEntries(
@@ -242,7 +250,7 @@ function deps(
     credentialsFor: async () => ({ keys, baseUrls: {}, connections }),
     cache: options.cache,
   };
-  return { runDeps, reads, toolReads, model, published };
+  return { runDeps, reads, toolReads, model, published, approvals };
 }
 
 // These tests call runJob directly, one run after another, so nothing releases
@@ -1626,6 +1634,56 @@ describe("runJob with automatic triggers", () => {
     expect(pending).toBe(0);
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(stored.status).toBe("skipped");
+  });
+});
+
+describe("runJob withdraws a stale approval on a skipped run", () => {
+  const approvingSettings = (triggers: Record<string, unknown> = {}) =>
+    prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { output: { approval: { enabled: true } }, triggers: { reviewOnPush: false, ...triggers } } },
+    });
+  const reviewed = (headSha: string) =>
+    prisma.reviewJob.create({
+      data: { repositoryId, number: 42, headSha, trigger: "manual", status: "completed", finishedAt: new Date() },
+    });
+  async function skippedPush(options: Parameters<typeof deps>[3] = {}) {
+    await enqueue({ repositoryId, number: 42, headSha: "newhead", trigger: "webhook", event: "push" });
+    const job = (await claimNext())!;
+    const { runDeps, approvals } = deps({}, {}, undefined, options);
+    await runJob(job, runDeps);
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("skipped");
+    return approvals;
+  }
+
+  it("withdraws when commits arrived since the last review", async () => {
+    await approvingSettings();
+    await reviewed("oldhead");
+    const approvals = await skippedPush();
+    expect(approvals).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/commits since the last review were not reviewed/) },
+    ]);
+  });
+
+  it("leaves it alone when the last review saw this head, or there was none", async () => {
+    await approvingSettings();
+    expect(await skippedPush()).toEqual([]);
+    await reviewed("newhead");
+    expect(await skippedPush()).toEqual([]);
+  });
+
+  it("withdraws for a skip label even on a head already reviewed", async () => {
+    await approvingSettings({ reviewOnPush: true, skipLabels: ["no-bot"] });
+    await reviewed("newhead");
+    const approvals = await skippedPush({ labels: ["no-bot"] });
+    expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/label "no-bot"/) }]);
+  });
+
+  it("does nothing while approval is off", async () => {
+    await prisma.repository.update({ where: { id: repositoryId }, data: { settings: { triggers: { reviewOnPush: false } } } });
+    await reviewed("oldhead");
+    expect(await skippedPush()).toEqual([]);
   });
 });
 

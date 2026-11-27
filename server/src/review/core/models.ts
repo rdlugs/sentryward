@@ -98,6 +98,9 @@ export const changeSetSchema = z.object({
   authorId: z.string().optional(),
   labels: z.array(z.string()).optional(),
   files: z.array(changedFileSchema),
+  // The forge stopped listing files before the end (GitHub stops at 3000), so
+  // `files` is only part of the change. Approval is held back on it.
+  filesTruncated: z.boolean().optional(),
 });
 export type ChangeSet = z.infer<typeof changeSetSchema>;
 

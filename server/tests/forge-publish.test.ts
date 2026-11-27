@@ -35,6 +35,8 @@ const gitlab = (routes: StubRoute[]) => {
   return { ...stub, gl: new GitLabAdapter({ host: "gitlab.com", token: async () => "t", selfLogin: "sentryward-bot", fetch: stub.fetch }) };
 };
 const body = (call: { body?: string }) => JSON.parse(call.body ?? "{}");
+// The pull request as setApproval re-reads it just before approving.
+const pullAt = (sha: string): StubRoute => ({ url: /\/pulls\/42$/, body: { head: { sha } } });
 
 describe("GitHub publishing", () => {
   it("posts one COMMENT review at the head commit with right-side line anchors", async () => {
@@ -255,9 +257,9 @@ describe("GitHub publishing", () => {
 
   it("approves at the head commit, and skips when its own approval already covers the head", async () => {
     const reviews = (list: unknown[]) => ({ url: /\/pulls\/42\/reviews\?per_page=100$/, body: list });
-    const fresh = github([reviews([]), { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 1 } }]);
+    const fresh = github([reviews([]), pullAt("head"), { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 1 } }]);
     expect(await fresh.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
-    expect(body(fresh.calls[1]!)).toEqual({ commit_id: "head", event: "APPROVE", body: "ok" });
+    expect(body(fresh.calls[2]!)).toEqual({ commit_id: "head", event: "APPROVE", body: "ok" });
 
     const current = github([
       reviews([
@@ -273,9 +275,25 @@ describe("GitHub publishing", () => {
         { id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } },
         { id: 4, state: "APPROVED", commit_id: "head", user: { login: "alice" } },
       ]),
+      pullAt("head"),
       { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 5 } },
     ]);
     expect(await stale.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
+  });
+
+  it("does not approve when the pull request moved on during the review", async () => {
+    const moved = github([{ url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }, pullAt("newer")]);
+    expect(await moved.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(moved.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("refuses every decision when it does not know its own login", async () => {
+    const stub = fetchStub([]);
+    const anonymous = new GitHubAdapter({ host: "github.com", token: async () => "t", fetch: stub.fetch });
+    for (const action of ["approve", "request_changes", "withdraw"] as const) {
+      expect(await anonymous.setApproval(ghRef, { action, body: "x" })).toMatchObject({ state: "refused" });
+    }
+    expect(stub.calls).toHaveLength(0);
   });
 
   it("requests changes once, until it is withdrawn", async () => {
@@ -314,12 +332,20 @@ describe("GitHub publishing", () => {
   it("reports a pull request opened by its own account as refused, other failures as errors", async () => {
     const own = github([
       { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
-      { method: "POST", url: /\/pulls\/42\/reviews$/, status: 422, body: { message: "Unprocessable Entity: Can not approve your own pull request" } },
+      pullAt("head"),
+      // GitHub's real shape: the reason is only in `errors`.
+      {
+        method: "POST",
+        url: /\/pulls\/42\/reviews$/,
+        status: 422,
+        body: { message: "Unprocessable Entity", errors: ["Review Can not approve your own pull request"] },
+      },
     ]);
     expect(await own.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
 
     const broken = github([
       { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      pullAt("head"),
       { method: "POST", url: /\/pulls\/42\/reviews$/, status: 403, body: { message: "Resource not accessible by integration" } },
     ]);
     await expect(broken.gh.setApproval(ghRef, { action: "approve", body: "ok" })).rejects.toThrow(/403/);
@@ -548,6 +574,14 @@ describe("GitLab publishing", () => {
       { method: "POST", url: /\/merge_requests\/42\/approve$/, status: 401, body: { message: "401 Unauthorized" } },
     ]);
     expect(await gl.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+  });
+
+  it("refuses every decision when it does not know its own username", async () => {
+    const stub = fetchStub([]);
+    const anonymous = new GitLabAdapter({ host: "gitlab.com", token: async () => "t", fetch: stub.fetch });
+    expect(await anonymous.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(await anonymous.setApproval(glRef, { action: "withdraw", body: "x" })).toMatchObject({ state: "refused" });
+    expect(stub.calls).toHaveLength(0);
   });
 
   it("adds and removes labels in one update", async () => {

@@ -72,6 +72,16 @@ describe("GitHubAdapter", () => {
     expect(calls[0]!.headers.authorization).toBe("Bearer tok");
   });
 
+  it("marks the files as truncated when the PR has more than were listed", async () => {
+    const pull = (changed_files: number) => ({
+      url: /\/repos\/acme\/web\/pulls\/42$/,
+      body: { title: "t", body: null, html_url: "h", changed_files, base: { sha: "b", ref: "main" }, head: { sha: "h", ref: "f" } },
+    });
+    const files = { url: /\/pulls\/42\/files\?per_page=100$/, body: [{ filename: "src/a.ts", status: "modified", patch: PATCH, changes: 1 }] };
+    expect((await adapter([pull(3001), files]).adapter.getChange("acme/web", 42)).filesTruncated).toBe(true);
+    expect((await adapter([pull(1), files]).adapter.getChange("acme/web", 42)).filesTruncated).toBeUndefined();
+  });
+
   it("returns null for a file missing at a ref", async () => {
     const { adapter: gh } = adapter([
       { url: /\/contents\/\.sentryward\.yaml\?ref=base1$/, status: 404, body: { message: "Not Found" } },
@@ -683,6 +693,30 @@ describe("GitLabAdapter", () => {
     // Just opened: GitLab has not computed the diff yet.
     refs = null;
     expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", baseSha: "main" });
+  });
+
+  it("marks the files as truncated when GitLab counted more than it listed", async () => {
+    const mr = (changes_count: string) => ({
+      url: /\/merge_requests\/7$/,
+      body: {
+        iid: 7,
+        title: "t",
+        state: "opened",
+        sha: "h",
+        source_branch: "f",
+        target_branch: "main",
+        web_url: "w",
+        changes_count,
+        diff_refs: { base_sha: "b", start_sha: "s", head_sha: "h" },
+      },
+    });
+    const diffs = {
+      url: /\/merge_requests\/7\/diffs\?per_page=100$/,
+      body: [{ old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: PATCH }],
+    };
+    expect((await adapter([mr("1000+"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBe(true);
+    expect((await adapter([mr("2"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBe(true);
+    expect((await adapter([mr("1"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBeUndefined();
   });
 
   it("lists open merge requests by iid", async () => {

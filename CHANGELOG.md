@@ -25,7 +25,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   last and independently: a failure marks the review partial, while the forge
   refusing an approval of the account's own change is only a note. The review
   page's sidebar shows the outcome and the reasons, and the Display preview
-  returns what would happen.
+  returns what would happen. Safeguards: `.sentryward.yaml` (and the trigger)
+  can only tighten approval, never turn it on or drop a block; a GitHub
+  approval is not posted when the head moved during the review; a skipped run
+  withdraws the approval when commits arrived since the last review or a skip
+  filter matched; a change whose file list the forge cut short is not
+  approved; `block_labels` sees the labels the review itself sets; and without
+  its own login (`GITHUB_APP_SLUG` for a GitHub App) Sentryward makes no
+  approval decision, since it could not withdraw one later.
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete

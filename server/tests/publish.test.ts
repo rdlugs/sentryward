@@ -585,7 +585,7 @@ describe("walkthrough placement and labels", () => {
 
 describe("publishReview approval", () => {
   const approving = (approval: NonNullable<NonNullable<ConfigOverride["output"]>["approval"]> = {}) =>
-    config({ output: { approval: { enabled: true, ...approval } } });
+    resolveConfig({ global: { output: { ...EVERY_OUTPUT, approval: { enabled: true, ...approval } } } }).config;
   const passing = async (): Promise<ReviewResult> => ({
     ...(await sampleResult()),
     verdict: { verdict: "pass", blockOn: "critical", blocking: [] },
@@ -665,6 +665,35 @@ describe("publishReview approval", () => {
     expect(second.errors).toEqual(["Approval failed: 403 Forbidden"]);
     expect(failing.calls.summaries).toHaveLength(1);
     expect(failing.calls.statuses).toHaveLength(1);
+  });
+
+  it("judges block_labels on the labels this run sets, not the ones fetched before", async () => {
+    const result = await passing();
+    const large = { ...result, walkthrough: { ...result.walkthrough!, blastRadius: "large" as const } };
+    const policy = resolveConfig({
+      global: { output: { ...EVERY_OUTPUT, blastRadiusLabel: true, approval: { enabled: true, blockLabels: ["Large blast radius"] } } },
+    }).config;
+    const added = recordingPublisher();
+    const publication = await publishReview({
+      publisher: added.publisher,
+      changeSet: { ...makeChangeSet(), labels: [] },
+      result: large,
+      config: policy,
+      postedFingerprints: new Set(),
+    });
+    expect(added.calls.labels[0]!.add).toEqual(["Large blast radius"]);
+    expect(publication.approval).toEqual({ state: "withdrawn", reasons: ['The change has the label "Large blast radius"'] });
+
+    // A stale label this run takes off no longer holds the approval back.
+    const removed = recordingPublisher();
+    const small = await publishReview({
+      publisher: removed.publisher,
+      changeSet: { ...makeChangeSet(), labels: ["Large blast radius"] },
+      result: { ...result, walkthrough: { ...result.walkthrough!, blastRadius: "small" as const } },
+      config: policy,
+      postedFingerprints: new Set(),
+    });
+    expect(small.approval?.state).toBe("approved");
   });
 
   it("is not sent once proceed says the job was cancelled", async () => {

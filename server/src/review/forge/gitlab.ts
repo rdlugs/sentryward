@@ -87,6 +87,9 @@ interface GlMergeRequest {
   web_url: string;
   author?: GlUser;
   labels?: string[];
+  // A string, "1000+" once GitLab stops counting; the diffs listing also
+  // stops (at the page cap, or GitLab's own file limit).
+  changes_count?: string | null;
   source_branch: string;
   target_branch: string;
   diff_refs: { base_sha: string; start_sha: string; head_sha: string } | null;
@@ -179,6 +182,15 @@ function toRepo(project: GlProject): ForgeRepo {
     private: project.visibility !== "public",
     webUrl: project.web_url,
   };
+}
+
+// GitLab counts the changed files itself; fewer listed, or a count it gave up
+// on, means the listing is only part of the change.
+function filesTruncated(count: string | null | undefined, listed: number): boolean {
+  if (!count) return false;
+  if (count.endsWith("+")) return true;
+  const total = Number(count);
+  return Number.isFinite(total) && listed < total;
 }
 
 function nextPage(res: Response, current: string): string | null {
@@ -322,6 +334,7 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       authorId: mr.author?.id === undefined ? undefined : String(mr.author.id),
       labels: mr.labels ?? [],
       files: diffs.map(toChangedFileFromGl),
+      ...(filesTruncated(mr.changes_count, diffs.length) ? { filesTruncated: true } : {}),
     };
   }
 
@@ -722,6 +735,14 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   // why. The approval is pinned to the head sha, so a push racing the review
   // fails it rather than approving commits the review never saw.
   async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
+    // Without its own login it cannot see its approval, so it would approve
+    // again on every run and never withdraw.
+    if (!this.selfLogin) {
+      return {
+        state: "refused",
+        note: "Sentryward does not know the connection's GitLab username, so it could not withdraw an approval later",
+      };
+    }
     const mr = this.mergeRequest(ref);
     const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[] }>(`${mr}/approvals`);
     const approved = (approvals.approved_by ?? []).some((entry) => this.isSelfLogin(entry.user.username));

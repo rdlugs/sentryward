@@ -3,7 +3,7 @@ import type { ChangedFile, ForgeProvider } from "../core/models.ts";
 import type { CommitStatus } from "../forge/types.ts";
 import { runReview } from "../pipeline.ts";
 import { inlineComments } from "../publish/inline.ts";
-import { labelChanges } from "../publish/labels.ts";
+import { labelChanges, labelsAfter } from "../publish/labels.ts";
 import { withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummary, summaryPlacement, withInlineSelection } from "../publish/publisher.ts";
 import { commitStatus } from "../publish/status.ts";
@@ -86,6 +86,7 @@ export async function previewPublication(config: Config, provider: ForgeProvider
 
   const placement = summaryPlacement(config, result);
   const files = new Map(change.files.map((file) => [file.path, file]));
+  const labels = result.walkthrough ? labelChanges(result.walkthrough, output) : { add: [], remove: [] };
 
   return {
     provider,
@@ -95,11 +96,12 @@ export async function previewPublication(config: Config, provider: ForgeProvider
       author: change.author ?? "",
       sourceBranch: change.headRef ?? "",
       targetBranch: change.baseRef ?? "",
-      labels: result.walkthrough ? labelChanges(result.walkthrough, output).add : [],
+      labels: labels.add,
       description: withDescriptionSummary(change.description, descriptionSummary(config, result)),
     },
     status: output.postCheck ? commitStatus(result) : null,
-    approval: approvalDecision(config, result, change),
+    // Judged on the labels after this run's own, as publishing does.
+    approval: approvalDecision(config, result, { ...change, labels: labelsAfter(change.labels, labels) }),
     // The sample change has no earlier summary to update.
     summaryComment: placement.summaryCreate ? placement.summary : null,
     walkthroughComment: placement.walkthroughComment,

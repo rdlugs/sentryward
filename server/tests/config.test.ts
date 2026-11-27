@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { loadReviewConfig } from "../src/review/config/load.ts";
 import { parseRepoFile } from "../src/review/config/repoFile.ts";
-import { resolveConfig } from "../src/review/config/resolve.ts";
-import { DEFAULT_CONFIG, configOverrideSchema, configSchema, dashboardOverrideSchema } from "../src/review/config/schema.ts";
+import { NO_APPROVED_AUTHOR, resolveConfig } from "../src/review/config/resolve.ts";
+import { DEFAULT_CONFIG, configOverrideSchema, configSchema, dashboardOverrideSchema, type ConfigOverride } from "../src/review/config/schema.ts";
 import type { ForgeAdapter } from "../src/review/forge/types.ts";
 
 describe("DEFAULT_CONFIG", () => {
@@ -421,15 +421,44 @@ describe("parseRepoFile", () => {
       warnings: [],
     });
     const resolved = resolveConfig({
-      global: { output: { approval: { requestChanges: true, blockLabels: ["hold"] } } },
+      global: { output: { approval: { enabled: true, requestChanges: true, blockLabels: ["hold"] } } },
       repoFile: parseRepoFile(".sentryward.yaml", yaml).override,
     });
-    expect(resolved.config.output.approval).toMatchObject({ enabled: true, requestChanges: true, blockLabels: ["hold"], blockPaths: ["infra/**"] });
-    expect(resolved.sources["output.approval.enabled"]).toBe("repoFile");
+    expect(resolved.config.output.approval).toMatchObject({
+      enabled: true,
+      when: "no_findings",
+      requestChanges: true,
+      blockLabels: ["hold"],
+      blockPaths: ["infra/**"],
+    });
+    expect(resolved.sources["output.approval.enabled"]).toBe("global");
+    expect(resolved.sources["output.approval.when"]).toBe("repoFile");
+    expect(resolved.sources["output.approval.blockPaths"]).toBe("repoFile");
     expect(resolved.sources["output.approval.requestChanges"]).toBe("global");
     for (const bad of ["when: always", "block_on_risk: [auth, auth]", "block_on_risk: [secrets]", "approve: true"]) {
       expect(parseRepoFile(".sentryward.yaml", `output:\n  approval:\n    ${bad}\n`).override).toBeUndefined();
     }
+  });
+
+  it("lets the repository file tighten approval but never loosen it", () => {
+    const dashboard = { output: { approval: { enabled: true, when: "no_findings" as const, blockPaths: ["infra/**"], onlyAuthors: ["alice", "bob"] } } };
+    const approval = (repoFile: ConfigOverride, global: ConfigOverride | undefined = dashboard) => resolveConfig({ global, repoFile });
+
+    // Cannot turn approval on, or clear the workspace's blocks.
+    const on = approval({ output: { approval: { enabled: true } } }, {});
+    expect(on.config.output.approval.enabled).toBe(false);
+    expect(on.warnings).toEqual([expect.stringMatching(/only the dashboard settings can turn approval on/)]);
+    const cleared = approval({ output: { approval: { blockPaths: [], when: "pass" } } });
+    expect(cleared.config.output.approval).toMatchObject({ blockPaths: ["infra/**"], when: "no_findings" });
+    expect(cleared.warnings).toEqual([expect.stringMatching(/when: pass/)]);
+
+    // Can add blocks, narrow the authors, and turn approval off.
+    const tighter = approval({ output: { approval: { blockPaths: ["db/**"], blockLabels: ["hold"], onlyAuthors: ["BOB", "carol"] } } });
+    expect(tighter.config.output.approval).toMatchObject({ blockPaths: ["infra/**", "db/**"], blockLabels: ["hold"], onlyAuthors: ["bob"] });
+    expect(tighter.warnings).toEqual([]);
+    const nobody = approval({ output: { approval: { onlyAuthors: ["carol"] } } });
+    expect(nobody.config.output.approval.onlyAuthors).toEqual([NO_APPROVED_AUTHOR]);
+    expect(approval({ output: { approval: { enabled: false } } }).config.output.approval.enabled).toBe(false);
   });
 
   it("reads review.verify and rejects an unknown mode", () => {

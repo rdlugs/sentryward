@@ -11,12 +11,17 @@ export interface ApprovalDecision {
   reasons: string[];
 }
 
-type Change = Pick<ChangeSet, "author" | "labels" | "files">;
+type Change = Pick<ChangeSet, "author" | "labels" | "files" | "filesTruncated">;
 
 // Policies hold an approval back; they never grant one. Each match is a
 // reason, so the summary of a withdrawn approval says every one.
 export function approvalPolicyReasons(approval: Config["output"]["approval"], change: Change): string[] {
   const reasons: string[] = [];
+  // The forge stopped listing files: the review, the path policy and the risk
+  // policy all saw only part of the change.
+  if (change.filesTruncated) {
+    reasons.push(`The forge listed only ${plural(change.files.length, "file")} of the change, so not all of it was checked`);
+  }
   if (approval.blockPaths.length) {
     const blocked = ignoreMatcher(approval.blockPaths);
     // A rename counts on either side: moving a file out of a protected folder
@@ -48,15 +53,16 @@ export function approvalDecision(config: Config, result: ReviewResult, change: C
   const { approval } = config.output;
   if (!approval.enabled) return null;
   const { verdict, blocking, blockOn } = result.verdict;
-  if (verdict === "error" || result.status !== "completed") {
-    return { action: "withdraw", reasons: ["The review did not complete"] };
-  }
+  if (verdict === "error") return { action: "withdraw", reasons: ["The review did not complete"] };
+  // Blocking findings stand even when part of the review failed, so they come
+  // before the completeness check: they are the better reason to give.
   if (verdict === "blocked") {
     return {
       action: approval.requestChanges ? "request_changes" : "withdraw",
       reasons: [`${plural(blocking.length, "finding")} at or above ${blockOn}`],
     };
   }
+  if (result.status !== "completed") return { action: "withdraw", reasons: ["The review did not complete"] };
   if (approval.when === "no_findings" && result.findings.length) {
     return { action: "withdraw", reasons: [`${plural(result.findings.length, "finding")} still open`] };
   }

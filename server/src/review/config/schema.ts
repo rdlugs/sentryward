@@ -176,8 +176,10 @@ export const HIGH_LEVEL_SUMMARY_PLACEMENTS = ["description", "walkthrough"] as c
 export const APPROVAL_WHEN = ["pass", "no_findings"] as const;
 
 // Turning a clean review into a forge approval (publish/approve.ts). Off by
-// default, and it never merges. Lists replace across layers like any other
-// list. Policies only ever hold an approval back: a change that matches one
+// default, and it never merges. Among the dashboard layers lists replace like
+// any other list; the repository file and the trigger can only tighten
+// (resolve.ts holdApproval), so a repository cannot loosen the workspace's
+// policy. Policies only ever hold an approval back: a change that matches one
 // gets no approval, and an earlier one is withdrawn.
 const approvalShape = {
   enabled: z.boolean(),
