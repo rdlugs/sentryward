@@ -285,7 +285,7 @@ export interface Publication {
   errors: string[]
 }
 
-export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused"
+export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused" | "failed"
 
 // Where a running review is (worker/progress.ts on the server), mirroring
 // reviewStepSchema and reviewStageSchema in server/src/review/core/models.ts.

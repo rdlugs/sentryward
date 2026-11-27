@@ -1710,6 +1710,26 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     expect(await skippedPush()).toMatchObject([{ action: "withdraw", keepAt: "newhead" }]);
   });
 
+  // The last review decided to withdraw (or request changes) but the write
+  // failed: the approval standing at this head is the one it meant to remove.
+  it.each(["withdraw", "request_changes"])("withdraws without keeping the head when the last review's %s failed", async (action) => {
+    await approvingSettings();
+    await reviewed("newhead", { approval: { action, state: "failed", reasons: ["1 finding at or above critical"] } });
+    expect(await skippedPush()).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        body: expect.stringMatching(/no published approval of the current commits is on record/),
+      },
+    ]);
+  });
+
+  it("keeps an approval of the head when the last review's failed write was an approval", async () => {
+    await approvingSettings();
+    await reviewed("newhead", { approval: { action: "approve", state: "failed", reasons: [] } });
+    expect(await skippedPush()).toMatchObject([{ action: "withdraw", keepAt: "newhead" }]);
+  });
+
   // Retention may have pruned the history while the forge approval stands. An
   // approval records its commit but not its target, so nothing shows it still
   // covers the change: it is withdrawn, even at this very head.

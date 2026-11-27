@@ -26,8 +26,9 @@ type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 // refused, leaving an older approval standing: then the forge is asked to
 // withdraw, keeping an approval it can tell covers the current head (GitHub
 // records the commit; GitLab cannot, so it withdraws). That fallback is only
-// used when the last review saw this same head and target: an approval
-// records its commit, never the target it was given for. Without such a
+// used when the last review saw this same head and target and did not decide
+// to withdraw or request changes (a decision whose write failed is still on
+// record): an approval records its commit, never the target it was given for. Without such a
 // record (retention prunes job rows, the head or target moved, or the row
 // predates the target being stored) every approval is withdrawn.
 // Best effort: a failure is logged and the job is still recorded as skipped.
@@ -69,7 +70,10 @@ export async function withdrawStaleApproval(
     const sameHead = last?.headSha === head;
     const sameTarget = last !== null && sameReviewedTarget(last, changeSet);
     if (sameHead && sameTarget && settledApproval(last.publication)) return undefined;
-    if (sameHead && sameTarget) keepAt = head;
+    // keepAt only stands in for a missing record: when the last review
+    // decided against approval (its write failed), an approval at this head
+    // is the one it meant to withdraw.
+    if (sameHead && sameTarget && !decidedAgainst(last.publication)) keepAt = head;
     why =
       last && !sameHead
         ? `commits since the last review were not reviewed (${skip})`
@@ -105,6 +109,13 @@ function settledApproval(publication: unknown): boolean {
     default:
       return false;
   }
+}
+
+// Whether a review decided against approval (withdraw or request changes),
+// whatever became of the write.
+function decidedAgainst(publication: unknown): boolean {
+  const action = (publication as { approval?: { action?: string } } | null)?.approval?.action;
+  return action === "withdraw" || action === "request_changes";
 }
 
 // Whether the last review saw the base commit and target branch the change has

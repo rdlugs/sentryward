@@ -690,6 +690,8 @@ describe("publishReview approval", () => {
       postedFingerprints: new Set(),
     });
     expect(second.errors).toEqual(["Approval failed: 403 Forbidden"]);
+    // The attempted action stays on record for a later skipped run.
+    expect(second.approval).toEqual({ action: "approve", state: "failed", reasons: [] });
     expect(failing.calls.summaries).toHaveLength(1);
     expect(failing.calls.statuses).toHaveLength(1);
   });

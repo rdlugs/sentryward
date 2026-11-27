@@ -862,8 +862,10 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       }
       // A hold label that landed between the read above and the write. Earlier
       // approvals (of older commits, which GitHub still counts) go with this
-      // one, as the label check before the write withdraws them too.
-      if (!moved && unconfirmed === undefined && label !== undefined) {
+      // one, as the label check before the write withdraws them too. It
+      // decides even when the head moved as well: the label holds the change
+      // back whatever a push's review would decide, as it does before the write.
+      if (unconfirmed === undefined && label !== undefined) {
         const earlier = own.filter((review) => review.state === "APPROVED" && review.id !== posted.id);
         try {
           await this.dismissReviews(pulls, [posted, ...earlier], `Sentryward withdrew this approval: the pull request has the label "${label}".`);

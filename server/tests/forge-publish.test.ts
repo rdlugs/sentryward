@@ -43,12 +43,14 @@ const pullAt = (sha: string, base: { sha?: string; ref?: string } = {}, labels: 
   body: { head: { sha }, base: { sha: base.sha ?? "base", ref: base.ref ?? "main" }, labels: labels.map((name) => ({ name })) },
 });
 // The merge request as GitLab's setApproval re-reads it around approving;
-// matches glRef unless told otherwise.
+// matches glRef unless told otherwise. `sha` (the source branch head) follows
+// head_sha unless a test sets it apart, as after a push GitLab has not diffed yet.
 const mrAt = (
-  moved: { head_sha?: string; base_sha?: string; start_sha?: string; target_branch?: string; diff_refs?: null; labels?: string[] } = {},
+  moved: { sha?: string; head_sha?: string; base_sha?: string; start_sha?: string; target_branch?: string; diff_refs?: null; labels?: string[] } = {},
 ): StubRoute => ({
   url: /\/merge_requests\/42$/,
   body: {
+    sha: moved.sha ?? moved.head_sha ?? "head",
     labels: moved.labels ?? [],
     target_branch: moved.target_branch ?? "main",
     diff_refs:
@@ -462,6 +464,27 @@ describe("GitHub publishing", () => {
     ]);
   });
 
+  // The label decides even when a push also landed: a push's review would
+  // decide about the earlier approvals, but the label holds them back now.
+  it("dismisses its earlier approvals for a hold label added while it was posted, even if the head moved too", async () => {
+    const { gh, calls } = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } }] },
+      { ...pullAt("head"), times: 1 },
+      pullAt("newer", {}, ["do-not-merge"]),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok", holdLabels: ["do-not-merge"] })).toEqual({
+      state: "withdrawn",
+      heldLabel: "do-not-merge",
+    });
+    expect(calls.filter((c) => c.method === "PUT").map((c) => c.url)).toEqual([
+      expect.stringMatching(/\/reviews\/9\/dismissals$/),
+      expect.stringMatching(/\/reviews\/2\/dismissals$/),
+    ]);
+  });
+
   it("dismisses its new approval when a hold label was added while it was posted", async () => {
     const { gh, calls } = github([
       { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
@@ -808,6 +831,14 @@ describe("GitLab publishing", () => {
       note: expect.stringMatching(/next review/),
     });
     expect(pushed.calls.some((c) => c.method === "POST")).toBe(false);
+
+    // A push GitLab has not diffed yet: the source sha moved, the diff refs not.
+    const undiffed = gitlab([approvals([]), mrAt({ sha: "newer" })]);
+    expect(await undiffed.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+      state: "refused",
+      note: expect.stringMatching(/next review/),
+    });
+    expect(undiffed.calls.some((c) => c.method === "POST")).toBe(false);
   });
 
   it("withdraws its new approval when the merge request moved while it was posted, or cannot be re-read", async () => {
@@ -822,6 +853,14 @@ describe("GitLab publishing", () => {
     expect(await retargeted.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "refused" });
     expect(retargeted.calls.map((c) => c.method)).toEqual(["GET", "GET", "GET", "POST", "GET", "POST"]);
     expect(retargeted.calls[5]!.url).toMatch(/\/unapprove$/);
+
+    // A push landed during the write, and GitLab has not diffed it yet.
+    const undiffed = gitlab(routes(mrAt({ sha: "newer" })));
+    expect(await undiffed.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+      state: "refused",
+      note: expect.stringMatching(/next review/),
+    });
+    expect(undiffed.calls.at(-1)!.url).toMatch(/\/unapprove$/);
 
     const unreadable = gitlab(routes({ url: /\/merge_requests\/42$/, status: 404, body: { message: "404 Not Found" } }));
     await expect(unreadable.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/approval was withdrawn/);

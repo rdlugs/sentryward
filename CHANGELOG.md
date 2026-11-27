@@ -41,13 +41,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   error saying the approval still stands); when the base sha or target branch
   moved, Sentryward's earlier approval is withdrawn too, since a retarget
   queues no new review (a failed withdrawal is an error); a GitLab approval
-  gets the same checks, comparing the MR's target branch and diff refs before
+  gets the same checks, comparing the MR's target branch, diff refs and
+  source sha (a push GitLab has not diffed yet counts as moved) before
   an approval is reused or posted and again after, unapproving when they moved
   or cannot be re-read; a skipped run keeps the approval
   only when the last review published an approval decision for the current
   head, base sha and target branch, and otherwise asks the forge to withdraw,
   keeping a GitHub approval of the current head only when the last review saw
-  that same head and target (a moved or retargeted base, or no review on
+  that same head and target and did not decide to withdraw or request changes
+  (a failed approval write is recorded with the action it attempted, shown as
+  "Failed" in the sidebar; a moved or retargeted base, or no review on
   record, withdraws every approval; filter skips always withdraw, and so does an approval
   policy that holds the change back as it stands now, such as a hold label
   added since the last review); a change whose file list the forge cut short
@@ -56,7 +59,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   adapter checks it on its own reads of the PR/MR just before and just after
   the write, so a hold label added mid-review or while the approval is posted
   stops or withdraws it (an earlier approval is withdrawn too, whether the
-  label is seen before the write or after it); a GitLab refusal is only a note when GitLab reports the
+  label is seen before the write or after it, and even when the head moved
+  too); a GitLab refusal is only a note when GitLab reports the
   account cannot approve the MR, while other 401/403 errors mark the review
   partial; the preview shows a withdrawal rather than a request for changes on
   GitLab, as publishing does; without its own login (`GITHUB_APP_SLUG` for

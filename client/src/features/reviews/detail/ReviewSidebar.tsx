@@ -73,6 +73,8 @@ function approvalText(approval: NonNullable<Publication["approval"]>, forge: str
       return "Withdrawn"
     case "refused":
       return `Refused by ${forge}`
+    case "failed":
+      return "Failed"
     default:
       // A request for changes already standing is still one.
       if (approval.action === "request_changes") return "Changes requested"

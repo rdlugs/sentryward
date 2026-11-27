@@ -204,7 +204,9 @@ export interface ApprovalAction {
 
 // "refused": the forge would not let Sentryward approve (its own change, or the
 // project prevents it). Expected setups, so a note rather than a failure.
-export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused";
+// "failed": never returned by an adapter; the publisher records it when the
+// write threw, keeping the action that was attempted.
+export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused" | "failed";
 
 export interface ApprovalOutcome {
   state: ApprovalState;

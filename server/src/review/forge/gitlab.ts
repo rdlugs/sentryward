@@ -211,10 +211,12 @@ function errorText(err: unknown): string {
 
 // Whether the merge request still is what the review saw: its head, the diff
 // refs its diff was read against, and its target branch. Without diff refs it
-// cannot be confirmed, which counts as moved.
+// cannot be confirmed, which counts as moved. GitLab prepares diff versions
+// asynchronously, so after a push `sha` (the source branch head) can already
+// be newer while diff_refs still describe the previous version: both count.
 function glMovedFrom(mr: GlMergeRequest, ref: ForgeRef, baseRef: string | undefined): ApprovalOutcome | undefined {
   const refs = mr.diff_refs;
-  if (refs && refs.head_sha !== ref.headSha) return GL_MOVED;
+  if (mr.sha !== ref.headSha || (refs && refs.head_sha !== ref.headSha)) return GL_MOVED;
   if (!refs || refs.base_sha !== ref.baseSha || refs.start_sha !== ref.startSha || (baseRef !== undefined && mr.target_branch !== baseRef)) {
     return GL_BASE_MOVED;
   }

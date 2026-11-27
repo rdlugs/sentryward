@@ -233,6 +233,9 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
           ? { action: "withdraw", state: outcome.state, reasons: [`The change has the label "${outcome.heldLabel}"`] }
           : { action: action.action, state: outcome.state, reasons: action.reasons, ...(outcome.note ? { note: outcome.note } : {}) };
     } catch (err) {
+      // The attempted action is kept: a later skipped run must not keep an
+      // approval this review decided to withdraw (worker/staleApproval.ts).
+      publication.approval = { action: action.action, state: "failed", reasons: action.reasons };
       publication.errors.push(`Approval failed: ${message(err)}`);
     }
   }
