@@ -188,8 +188,10 @@ export interface ApprovalAction {
   action: "approve" | "request_changes" | "withdraw";
   body: string;
   // withdraw only: leave an approval of this commit in place where the forge
-  // records which commit an approval covers (GitHub). For callers that have
-  // no record of what Sentryward last reviewed.
+  // records which commit an approval covers (GitHub). For callers that know
+  // the last review saw this head and target but cannot tell whether it
+  // settled the approval; it says nothing about the target the approval
+  // was given for.
   keepAt?: string;
   // approve only: the target branch the review saw, so an approval is not
   // posted on a change retargeted mid-review (both forges check it).

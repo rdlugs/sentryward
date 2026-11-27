@@ -1644,15 +1644,18 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
       data: { settings: { output: { approval: { enabled: true } }, triggers: { reviewOnPush: false, ...triggers } } },
     });
   const approved = { approval: { action: "approve", state: "approved", reasons: [] } };
-  const reviewed = (headSha: string, publication: object | null = approved) =>
+  // The base and target the stub change reports, unless a test moves them.
+  const reviewed = (headSha: string, publication: object | null = approved, target: { baseSha?: string | null; baseRef?: string | null } = {}) =>
     prisma.reviewJob.create({
       data: {
         repositoryId,
         number: 42,
         headSha,
+        baseSha: target.baseSha === undefined ? "base" : target.baseSha,
         trigger: "manual",
         status: "completed",
         finishedAt: new Date(),
+        ...(target.baseRef !== null ? { result: { change: { baseRef: target.baseRef ?? "main" } } } : {}),
         ...(publication ? { publication } : {}),
       },
     });
@@ -1674,7 +1677,6 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
       {
         action: "withdraw",
         headSha: "newhead",
-        keepAt: "newhead",
         body: expect.stringMatching(/commits since the last review were not reviewed/),
       },
     ]);
@@ -1708,17 +1710,43 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     expect(await skippedPush()).toMatchObject([{ action: "withdraw", keepAt: "newhead" }]);
   });
 
-  // Retention may have pruned the history while the forge approval stands, so
-  // the forge decides, keeping an approval of this very head.
-  it("asks the forge to withdraw, keeping an approval of the head, when no review is on record", async () => {
+  // Retention may have pruned the history while the forge approval stands. An
+  // approval records its commit but not its target, so nothing shows it still
+  // covers the change: it is withdrawn, even at this very head.
+  it("withdraws every approval, keeping none of the head, when no review is on record", async () => {
     await approvingSettings();
     expect(await skippedPush()).toEqual([
       {
         action: "withdraw",
         headSha: "newhead",
-        keepAt: "newhead",
         body: expect.stringMatching(/no published approval of the current commits is on record/),
       },
+    ]);
+  });
+
+  // A retarget or a moved base queues no review, so the approval the last
+  // review settled at this head was given for another target.
+  it("withdraws on a head already reviewed when the base or target branch changed since", async () => {
+    await approvingSettings();
+    await reviewed("newhead", approved, { baseSha: "oldbase" });
+    expect(await skippedPush()).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/target branch moved or was changed since the last review/) },
+    ]);
+  });
+
+  it("withdraws on a head already reviewed for another target branch", async () => {
+    await approvingSettings();
+    await reviewed("newhead", approved, { baseRef: "release" });
+    expect(await skippedPush()).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/target branch moved or was changed since the last review/) },
+    ]);
+  });
+
+  it("withdraws, keeping nothing at the head, when the last review recorded no target", async () => {
+    await approvingSettings();
+    await reviewed("newhead", approved, { baseSha: null, baseRef: null });
+    expect(await skippedPush()).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/target branch moved or was changed since the last review/) },
     ]);
   });
 

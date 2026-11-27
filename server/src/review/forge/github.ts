@@ -860,10 +860,13 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       } catch (err) {
         unconfirmed = err;
       }
-      // A hold label that landed between the read above and the write.
+      // A hold label that landed between the read above and the write. Earlier
+      // approvals (of older commits, which GitHub still counts) go with this
+      // one, as the label check before the write withdraws them too.
       if (!moved && unconfirmed === undefined && label !== undefined) {
+        const earlier = own.filter((review) => review.state === "APPROVED" && review.id !== posted.id);
         try {
-          await this.dismissReviews(pulls, [posted], `Sentryward withdrew this approval: the pull request has the label "${label}".`);
+          await this.dismissReviews(pulls, [posted, ...earlier], `Sentryward withdrew this approval: the pull request has the label "${label}".`);
         } catch (err) {
           throw new Error(`The pull request got the label "${label}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
         }

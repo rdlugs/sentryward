@@ -74,6 +74,8 @@ function approvalText(approval: NonNullable<Publication["approval"]>, forge: str
     case "refused":
       return `Refused by ${forge}`
     default:
+      // A request for changes already standing is still one.
+      if (approval.action === "request_changes") return "Changes requested"
       return approval.reasons.length ? "Not approved" : "Still approved"
   }
 }

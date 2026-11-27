@@ -12,7 +12,9 @@ type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 // still stand: GitHub counts it for newer commits unless branch protection
 // dismisses stale approvals, and GitLab keeps it unless the project resets
 // approvals on push. So it is withdrawn unless the last review settled the
-// approval at the current head, and always when the skip is the team's own
+// approval at the current head, base and target branch (a retarget or a moved
+// base queues no review, so a matching head alone does not show the approval
+// covers the change as it stands), and always when the skip is the team's own
 // filter (a skip label, author, title or branch), which says the change is not
 // for Sentryward to judge, or when a repository file or trigger turned approval
 // off for this change. It is also always withdrawn when an approval policy
@@ -21,10 +23,13 @@ type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 // the approval against the change and settings it saw, not these. A review of
 // the head alone proves nothing: approval
 // may have been off then, or the approval step may have failed or been
-// refused, leaving an older approval standing. Job rows and forge approvals
-// live independently (retention prunes the rows), so without such a record
-// the forge is asked to withdraw, keeping an approval it can tell covers the
-// current head (GitHub records the commit; GitLab cannot, so it withdraws).
+// refused, leaving an older approval standing: then the forge is asked to
+// withdraw, keeping an approval it can tell covers the current head (GitHub
+// records the commit; GitLab cannot, so it withdraws). That fallback is only
+// used when the last review saw this same head and target: an approval
+// records its commit, never the target it was given for. Without such a
+// record (retention prunes job rows, the head or target moved, or the row
+// predates the target being stored) every approval is withdrawn.
 // Best effort: a failure is logged and the job is still recorded as skipped.
 export async function withdrawStaleApproval(
   publisher: Pick<ForgePublisher, "setApproval">,
@@ -59,14 +64,18 @@ export async function withdrawStaleApproval(
         trial: false,
       },
       orderBy: { finishedAt: "desc" },
-      select: { headSha: true, publication: true },
+      select: { headSha: true, baseSha: true, result: true, publication: true },
     });
-    if (last?.headSha === head && settledApproval(last.publication)) return undefined;
-    keepAt = head;
+    const sameHead = last?.headSha === head;
+    const sameTarget = last !== null && sameReviewedTarget(last, changeSet);
+    if (sameHead && sameTarget && settledApproval(last.publication)) return undefined;
+    if (sameHead && sameTarget) keepAt = head;
     why =
-      last && last.headSha !== head
+      last && !sameHead
         ? `commits since the last review were not reviewed (${skip})`
-        : `no published approval of the current commits is on record (${skip})`;
+        : last && !sameTarget
+          ? `the target branch moved or was changed since the last review (${skip})`
+          : `no published approval of the current commits is on record (${skip})`;
   }
   try {
     return await publisher.setApproval(changeSet.forgeRef, {
@@ -96,4 +105,17 @@ function settledApproval(publication: unknown): boolean {
     default:
       return false;
   }
+}
+
+// Whether the last review saw the base commit and target branch the change has
+// now. Anything missing on either side counts as unverified, never as a match.
+function sameReviewedTarget(last: { baseSha: string | null; result: unknown }, changeSet: ChangeSet): boolean {
+  const baseRef = (last.result as { change?: { baseRef?: unknown } } | null)?.change?.baseRef;
+  return (
+    last.baseSha !== null &&
+    last.baseSha === changeSet.forgeRef.baseSha &&
+    typeof baseRef === "string" &&
+    changeSet.baseRef !== undefined &&
+    baseRef === changeSet.baseRef
+  );
 }

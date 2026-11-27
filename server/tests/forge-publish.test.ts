@@ -443,6 +443,25 @@ describe("GitHub publishing", () => {
     expect(await free.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
   });
 
+  it("dismisses its earlier approvals too when a hold label was added while it was posted", async () => {
+    const { gh, calls } = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } }] },
+      { ...pullAt("head"), times: 1 },
+      pullAt("head", {}, ["do-not-merge"]),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok", holdLabels: ["do-not-merge"] })).toEqual({
+      state: "withdrawn",
+      heldLabel: "do-not-merge",
+    });
+    expect(calls.filter((c) => c.method === "PUT").map((c) => c.url)).toEqual([
+      expect.stringMatching(/\/reviews\/9\/dismissals$/),
+      expect.stringMatching(/\/reviews\/2\/dismissals$/),
+    ]);
+  });
+
   it("dismisses its new approval when a hold label was added while it was posted", async () => {
     const { gh, calls } = github([
       { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },

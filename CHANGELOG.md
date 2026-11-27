@@ -45,15 +45,18 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   an approval is reused or posted and again after, unapproving when they moved
   or cannot be re-read; a skipped run keeps the approval
   only when the last review published an approval decision for the current
-  head, and otherwise asks the forge to withdraw, keeping a GitHub approval of
-  the current head (filter skips always withdraw, and so does an approval
+  head, base sha and target branch, and otherwise asks the forge to withdraw,
+  keeping a GitHub approval of the current head only when the last review saw
+  that same head and target (a moved or retargeted base, or no review on
+  record, withdraws every approval; filter skips always withdraw, and so does an approval
   policy that holds the change back as it stands now, such as a hold label
   added since the last review); a change whose file list the forge cut short
   is not approved, including when GitLab's legacy `/changes` endpoint reports
   `overflow` without a file count; when `block_labels` is set the forge
   adapter checks it on its own reads of the PR/MR just before and just after
   the write, so a hold label added mid-review or while the approval is posted
-  stops or withdraws it (an earlier approval is withdrawn too); a GitLab refusal is only a note when GitLab reports the
+  stops or withdraws it (an earlier approval is withdrawn too, whether the
+  label is seen before the write or after it); a GitLab refusal is only a note when GitLab reports the
   account cannot approve the MR, while other 401/403 errors mark the review
   partial; the preview shows a withdrawal rather than a request for changes on
   GitLab, as publishing does; without its own login (`GITHUB_APP_SLUG` for
@@ -65,7 +68,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   after posting dismisses Sentryward's earlier approvals along with the new
   one; and a repository file or trigger that turns approval off while the
   dashboard has it on withdraws an earlier approval (on skipped runs too)
-  instead of leaving it in place.
+  instead of leaving it in place. The sidebar shows a request for changes that
+  was already standing as "Changes requested", not "Still approved".
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete
