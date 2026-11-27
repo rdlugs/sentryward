@@ -215,6 +215,12 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   const approvalGuard = approvalGuardFor(layers, config);
   if (approvalGuard) config.approvalGuard = approvalGuard;
   const approvalWarnings = holdApproval(layers, config, sources);
+  // Said here so the dashboard explains why a clean review is not approved.
+  if (config.output.approval.enabled && config.approvalGuard?.narrowed.length) {
+    approvalWarnings.push(
+      `Automatic approval is held back: the repository file or trigger makes the review report less than the dashboard settings (${config.approvalGuard.narrowed.join(", ")})`,
+    );
+  }
 
   return { config, sources, warnings: [...combinedIssues.map((issue) => issue.message), ...approvalWarnings], combinedIssues };
 }
@@ -300,7 +306,10 @@ function holdApproval(layers: ConfigLayers, config: Config, sources: Record<stri
 // review.blockOn (or stop tool findings blocking) for it. An automatic
 // approval is a security control like the approval policy above: it still
 // answers to the threshold the dashboard layers resolve to, or the effective
-// one where that is stricter. Only set when the dashboard is the stricter one.
+// one where that is stricter. Such a layer can also make findings never
+// appear (a higher floor, fewer categories, more ignored paths), which no
+// threshold recovers, so those settings are listed in `narrowed` and hold the
+// approval back. Only set when the dashboard is the stricter one.
 function approvalGuardFor(layers: ConfigLayers, config: Config): ApprovalGuard | undefined {
   if (!layers.repoFile && !layers.trigger) return undefined;
   const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings, directory: layers.directory }).config;
@@ -309,8 +318,33 @@ function approvalGuardFor(layers: ConfigLayers, config: Config): ApprovalGuard |
     // The lower severity is the stricter threshold.
     blockOn: atLeast(blockOn, dashboard.review.blockOn) ? dashboard.review.blockOn : blockOn,
     toolFindingsBlock: toolFindingsBlock || dashboard.review.toolFindingsBlock,
+    narrowed: narrowedCoverage(dashboard, config),
   };
-  return held.blockOn !== blockOn || held.toolFindingsBlock !== toolFindingsBlock ? held : undefined;
+  return held.blockOn !== blockOn || held.toolFindingsBlock !== toolFindingsBlock || held.narrowed.length ? held : undefined;
+}
+
+const VERIFY_RANK: Record<Config["review"]["verify"], number> = { off: 0, blocking: 1, all: 2 };
+
+// The settings, by config path, where `config` reports less than `dashboard`
+// would: each one removes or demotes findings before the verdict sees them.
+// Depth settings (deep review, agentic context, file context) are left out:
+// they change how hard a pass looks, not which findings it may keep.
+function narrowedCoverage(dashboard: Config, config: Config): string[] {
+  const own = dashboard.review;
+  const eff = config.review;
+  const checks: [string, boolean][] = [
+    ["ignorePaths", config.ignorePaths.some((glob) => !dashboard.ignorePaths.includes(glob))],
+    ["review.categories", own.categories.some((category) => !eff.categories.includes(category))],
+    ["review.severityFloor", eff.severityFloor !== own.severityFloor && atLeast(eff.severityFloor, own.severityFloor)],
+    ["review.minConfidence", eff.minConfidence > own.minConfidence],
+    ["review.maxFindings", eff.maxFindings < own.maxFindings],
+    ["review.maxChunks", eff.maxChunks < own.maxChunks],
+    ["review.toolFindings", own.toolFindings && !eff.toolFindings],
+    ["review.requireEvidence", eff.requireEvidence && !own.requireEvidence],
+    // Verification drops refuted findings and demotes uncertain ones.
+    ["review.verify", VERIFY_RANK[eff.verify] > VERIFY_RANK[own.verify]],
+  ];
+  return checks.filter(([, narrowed]) => narrowed).map(([path]) => path);
 }
 
 // Dashboard rules are held to the thresholds the dashboard layers resolve to

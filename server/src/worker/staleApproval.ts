@@ -2,7 +2,7 @@ import type { ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
 import { skipFilterReason } from "../review/config/filters.ts";
 import type { Config } from "../review/config/schema.ts";
-import { approvalManaged } from "../review/publish/approve.ts";
+import { approvalHoldReasons, approvalManaged } from "../review/publish/approve.ts";
 import type { ChangeSet } from "../review/core/models.ts";
 import type { ApprovalOutcome, ForgePublisher } from "../review/forge/types.ts";
 
@@ -15,7 +15,11 @@ type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 // approval at the current head, and always when the skip is the team's own
 // filter (a skip label, author, title or branch), which says the change is not
 // for Sentryward to judge, or when a repository file or trigger turned approval
-// off for this change. A review of the head alone proves nothing: approval
+// off for this change. It is also always withdrawn when an approval policy
+// holds the change back as it stands now (a hold label added since, a policy
+// the dashboard added, a listing the forge truncated): the last review settled
+// the approval against the change and settings it saw, not these. A review of
+// the head alone proves nothing: approval
 // may have been off then, or the approval step may have failed or been
 // refused, leaving an older approval standing. Job rows and forge approvals
 // live independently (retention prunes the rows), so without such a record
@@ -35,9 +39,16 @@ export async function withdrawStaleApproval(
   const filtered = skip === skipFilterReason(config.triggers, changeSet, job.actor);
   // Vetoed for this run: no earlier approval stands, whatever it covered.
   const vetoed = !config.output.approval.enabled;
+  // Held back by policy now: no earlier approval stands either, so neither
+  // the record of the last review nor keepAt may keep it.
+  const held = vetoed ? [] : approvalHoldReasons(config, changeSet);
   let keepAt: string | undefined;
-  let why = vetoed ? `automatic approval is turned off for this change (${skip})` : skip;
-  if (!filtered && !vetoed) {
+  let why = vetoed
+    ? `automatic approval is turned off for this change (${skip})`
+    : held.length
+      ? `${held.map((reason) => reason.charAt(0).toLowerCase() + reason.slice(1)).join("; ")} (${skip})`
+      : skip;
+  if (!filtered && !vetoed && !held.length) {
     const last = await prisma.reviewJob.findFirst({
       where: {
         repositoryId: job.repositoryId,

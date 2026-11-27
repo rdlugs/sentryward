@@ -75,7 +75,7 @@ describe("approvalDecision", () => {
   });
 
   it("holds the approval to the dashboard's threshold when the verdict passed under a looser one", async () => {
-    const held = { ...config({ requestChanges: true }), approvalGuard: { blockOn: "info" as const, toolFindingsBlock: true } };
+    const held = { ...config({ requestChanges: true }), approvalGuard: { blockOn: "info" as const, toolFindingsBlock: true, narrowed: [] } };
     // Withdraws, never requests changes: the verdict and the status say pass.
     expect(approvalDecision(held, await passing(), change())).toEqual({
       action: "withdraw",
@@ -83,6 +83,19 @@ describe("approvalDecision", () => {
     });
     expect(approvalDecision(held, await passing(false), change())).toEqual({ action: "approve", reasons: [] });
     expect(approvalDecision(config(), await passing(), change())).toEqual({ action: "approve", reasons: [] });
+  });
+
+  it("holds the approval back when a repository file narrowed what the review reports", async () => {
+    const narrowed = resolveConfig({
+      global: { output: { approval: { enabled: true } } },
+      repoFile: { review: { severityFloor: "major" }, ignorePaths: ["src/**"] },
+    }).config;
+    expect(approvalDecision(narrowed, await passing(false), change())).toEqual({
+      action: "withdraw",
+      reasons: [
+        "The repository file or trigger narrowed what the review checks (ignorePaths, review.severityFloor), so it is not approved automatically",
+      ],
+    });
   });
 
   it("names the blocking findings of a partial review rather than calling it incomplete", async () => {

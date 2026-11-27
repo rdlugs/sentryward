@@ -866,6 +866,26 @@ describe("GitLabAdapter", () => {
       ["big.sql", "added", true],
     ]);
     expect(calls.map((c) => c.url.replace(/^.*\/merge_requests\/7/, ""))).toEqual(["", "/diffs?per_page=100", "/changes"]);
+    expect(change.filesTruncated).toBeUndefined();
+  });
+
+  it("marks the files truncated when /changes reports overflow without a count", async () => {
+    const { adapter: gl } = adapter([
+      MR_7,
+      { url: /\/merge_requests\/7\/diffs\?per_page=100$/, status: 404, body: { message: "404 Not Found" } },
+      {
+        url: /\/merge_requests\/7\/changes$/,
+        body: {
+          overflow: true,
+          changes: [{ old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: PATCH }],
+        },
+      },
+    ]);
+
+    const change = await gl.getChange("team/app", 7);
+
+    expect(change.files).toHaveLength(1);
+    expect(change.filesTruncated).toBe(true);
   });
 
   it("does not fall back on non-404 diff errors", async () => {

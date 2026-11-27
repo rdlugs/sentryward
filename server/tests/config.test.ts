@@ -481,15 +481,48 @@ describe("parseRepoFile", () => {
     const loosened = resolveConfig({ global, repoFile: { review: { blockOn: "critical", toolFindingsBlock: false } } }).config;
     // The review itself follows the file; the approval does not.
     expect(loosened.review).toMatchObject({ blockOn: "critical", toolFindingsBlock: false });
-    expect(loosened.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true });
-    expect(resolveConfig({ global, trigger: { review: { blockOn: "critical" } } }).config.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true });
+    expect(loosened.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true, narrowed: [] });
+    expect(resolveConfig({ global, trigger: { review: { blockOn: "critical" } } }).config.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true, narrowed: [] });
 
     // Tightening, or no layer above the dashboard, needs no guard.
     expect(resolveConfig({ global, repoFile: { review: { blockOn: "minor" } } }).config.approvalGuard).toBeUndefined();
     expect(resolveConfig({ global: { review: { blockOn: "critical" } } }).config.approvalGuard).toBeUndefined();
 
-    expect(configOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false } }).success).toBe(false);
-    expect(dashboardOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false } }).success).toBe(false);
+    expect(configOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false, narrowed: [] } }).success).toBe(false);
+    expect(dashboardOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false, narrowed: [] } }).success).toBe(false);
+  });
+
+  it("lists the settings a file loosened that decide which findings exist, for the approval", () => {
+    const global: ConfigOverride = {
+      ignorePaths: ["dist/**"],
+      review: { severityFloor: "minor", minConfidence: 0.5, toolFindings: true, verify: "blocking" },
+      output: { approval: { enabled: true } },
+    };
+    const narrowed = resolveConfig({
+      global,
+      repoFile: {
+        ignorePaths: ["dist/**", "src/**"],
+        review: { severityFloor: "major", minConfidence: 0.9, maxFindings: 1, toolFindings: false, verify: "all", categories: ["bug"] },
+      },
+    });
+    expect(narrowed.config.approvalGuard?.narrowed).toEqual([
+      "ignorePaths",
+      "review.categories",
+      "review.severityFloor",
+      "review.minConfidence",
+      "review.maxFindings",
+      "review.toolFindings",
+      "review.verify",
+    ]);
+    expect(narrowed.warnings).toContainEqual(expect.stringMatching(/^Automatic approval is held back/));
+
+    // Reporting more, or dropping an ignore glob, narrows nothing.
+    const widened = resolveConfig({
+      global,
+      repoFile: { ignorePaths: [], review: { severityFloor: "info", minConfidence: 0.2, verify: "off" } },
+    });
+    expect(widened.config.approvalGuard).toBeUndefined();
+    expect(widened.warnings.some((w) => w.startsWith("Automatic approval is held back"))).toBe(false);
   });
 
   it("reads review.verify and rejects an unknown mode", () => {

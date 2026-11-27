@@ -221,6 +221,12 @@ function glMovedFrom(mr: GlMergeRequest, ref: ForgeRef, baseRef: string | undefi
   return undefined;
 }
 
+// The first hold label the merge request carries, if any.
+function glHeldLabel(mr: GlMergeRequest, holdLabels: string[] | undefined): string | undefined {
+  if (!holdLabels?.length) return undefined;
+  return (mr.labels ?? []).find((name) => holdLabels.includes(name));
+}
+
 function nextPage(res: Response, current: string): string | null {
   const next = res.headers.get("x-next-page");
   if (!next) {
@@ -320,13 +326,16 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   // `/changes` (deprecated, still in API v4) returns the same diff objects in
   // one unpaginated response, so fall back to it only on a 404. The MR itself
   // was just fetched, so a 404 here means the route is missing, not the MR.
-  private async mergeRequestDiffs(base: string): Promise<GlDiff[]> {
+  // `/changes` stops listing past GitLab's diff limits and says so only with
+  // `overflow`: changes_count is optional, so that flag is kept rather than
+  // trusting the count alone to show the listing is partial.
+  private async mergeRequestDiffs(base: string): Promise<{ diffs: GlDiff[]; overflow: boolean }> {
     try {
-      return await this.http.paginate<GlDiff>(`${base}/diffs?per_page=100`, nextPage);
+      return { diffs: await this.http.paginate<GlDiff>(`${base}/diffs?per_page=100`, nextPage), overflow: false };
     } catch (err) {
       if (!isNotFound(err)) throw err;
-      const mr = await this.http.json<{ changes?: GlDiff[] }>(`${base}/changes`);
-      return mr.changes ?? [];
+      const mr = await this.http.json<{ changes?: GlDiff[]; overflow?: boolean }>(`${base}/changes`);
+      return { diffs: mr.changes ?? [], overflow: mr.overflow === true };
     }
   }
 
@@ -338,9 +347,10 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     }
     const refs = mr.diff_refs;
     // The diffs of an MR are fixed by its diff refs.
-    const diffs = await cached(
+    // The cached value carries the overflow flag; the key changed with its shape.
+    const { diffs, overflow } = await cached(
       cache,
-      cacheKey("gitlab-diffs", this.host, project, number, refs.base_sha, refs.start_sha, refs.head_sha),
+      cacheKey("gitlab-diffs-v2", this.host, project, number, refs.base_sha, refs.start_sha, refs.head_sha),
       () => this.mergeRequestDiffs(base),
     );
 
@@ -364,7 +374,7 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       authorId: mr.author?.id === undefined ? undefined : String(mr.author.id),
       labels: mr.labels ?? [],
       files: diffs.map(toChangedFileFromGl),
-      ...(filesTruncated(mr.changes_count, diffs.length) ? { filesTruncated: true } : {}),
+      ...(overflow || filesTruncated(mr.changes_count, diffs.length) ? { filesTruncated: true } : {}),
     };
   }
 
@@ -760,12 +770,6 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     });
   }
 
-  // Labels as the forge has them now, for the approval policy.
-  async getLabels(ref: ForgeRef): Promise<string[]> {
-    const mr = await this.http.json<GlMergeRequest>(this.mergeRequest(ref));
-    return mr.labels ?? [];
-  }
-
   // GitLab approvals carry no text and have no "request changes", so a request
   // for changes only withdraws Sentryward's approval; the summary comment says
   // why. The approval is pinned to the head sha, so a push racing the review
@@ -805,7 +809,17 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     // The sha pin covers the head only: a retarget or a recomputed diff would
     // let an approval stand on a target the review never saw. The merge request
     // is checked before an approval is reused or posted, and again after.
-    const moved = glMovedFrom(await this.http.json<GlMergeRequest>(mr), ref, action.baseRef);
+    const current = await this.http.json<GlMergeRequest>(mr);
+    // A hold label added since the publisher's own label read: this is the
+    // last read before the write, so it decides, and an approval already
+    // given is withdrawn with it, as the label policy would on a fresh review.
+    const label = glHeldLabel(current, action.holdLabels);
+    if (label !== undefined) {
+      if (!approved) return { state: "unchanged", heldLabel: label };
+      await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      return { state: "withdrawn", heldLabel: label };
+    }
+    const moved = glMovedFrom(current, ref, action.baseRef);
     // A retarget queues no review, so an earlier approval would go on counting
     // for a target no review checked: it is withdrawn here. A push queues its
     // own review, which decides about the approval it finds.
@@ -830,10 +844,22 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
     let after: ApprovalOutcome | undefined;
     let unconfirmed: unknown;
+    let afterLabel: string | undefined;
     try {
-      after = glMovedFrom(await this.http.json<GlMergeRequest>(mr), ref, action.baseRef);
+      const reread = await this.http.json<GlMergeRequest>(mr);
+      after = glMovedFrom(reread, ref, action.baseRef);
+      afterLabel = glHeldLabel(reread, action.holdLabels);
     } catch (err) {
       unconfirmed = err;
+    }
+    // A hold label that landed between the read above and the write.
+    if (!after && unconfirmed === undefined && afterLabel !== undefined) {
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (err) {
+        throw new Error(`The merge request got the label "${afterLabel}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { state: "withdrawn", heldLabel: afterLabel };
     }
     if (after || unconfirmed !== undefined) {
       // Withdrawn whenever its freshness is not confirmed; a failure throws so

@@ -227,8 +227,6 @@ function deps(
     setLabels: async (_ref: unknown, add: string[]) => {
       published.labels.push(add);
     },
-    // What getChange reported plus what this run added, as the forge would.
-    getLabels: async () => [...(options.labels ?? []), ...published.labels.flat()],
     setCommitStatus: async (_ref: unknown, status: { state: string }) => {
       published.statuses.push(status.state);
     },
@@ -1738,6 +1736,18 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     await reviewed("newhead");
     const approvals = await skippedPush({}, { "base:.sentryward.yaml": "output:\n  approval:\n    enabled: false\n" });
     expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/automatic approval is turned off/) }]);
+  });
+
+  // The last review settled the approval against the labels it saw; a hold
+  // label added since must not leave it standing, and keepAt must not keep it.
+  it("withdraws on a head already reviewed when an approval policy now holds the change back", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { output: { approval: { enabled: true, blockLabels: ["do-not-merge"] } }, triggers: { reviewOnPush: false } } },
+    });
+    await reviewed("newhead");
+    const approvals = await skippedPush({ labels: ["do-not-merge"] });
+    expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/the change has the label "do-not-merge"/) }]);
   });
 
   it("does nothing while approval is off", async () => {

@@ -4,7 +4,7 @@ import type { ApprovalAction, ApprovalState, ForgePublisher, PostedComment } fro
 import { inlineLimits, inlineSelection } from "../core/buckets.ts";
 import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
-import { approvalBody, approvalDecision, approvalManaged, forgeApprovalDecision, type ApprovalDecision } from "./approve.ts";
+import { approvalBody, approvalDecision, approvalManaged, forgeApprovalDecision } from "./approve.ts";
 import { inlineComments } from "./inline.ts";
 import { labelChanges, labelsAfter } from "./labels.ts";
 import { commitStatus } from "./status.ts";
@@ -212,36 +212,26 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
 
   // Last, so the summary and status already explain the decision when it
   // lands. A refusal (the forge's own rules) is a note, not a failure.
-  let decision = approvalDecision(config, result, { ...changeSet, labels });
+  const decision = approvalDecision(config, result, { ...changeSet, labels });
   if (decision) {
     if (await halted()) return publication;
+    const action = forgeApprovalDecision(ref.provider, decision);
     // The labels above were read before the review: someone may have added a
-    // hold label since. An approval is only given against the labels the
-    // forge has now, and not at all when they cannot be read. Without a label
-    // policy the labels cannot change the decision, so they are not read.
-    if (decision.action === "approve" && config.output.approval.blockLabels.length > 0) {
-      try {
-        const current = await publisher.getLabels(ref);
-        decision = approvalDecision(config, result, { ...changeSet, labels: current })!;
-      } catch (err) {
-        publication.errors.push(`Labels could not be re-read for the approval: ${message(err)}`);
-        decision = {
-          action: "withdraw",
-          reasons: ["The change's current labels could not be read, so the label policy could not be checked"],
-        } satisfies ApprovalDecision;
-      }
-      // The re-read takes a round trip: a cancellation that landed during it
-      // must still stop the approval.
-      if (await halted()) return publication;
-    }
-    decision = forgeApprovalDecision(ref.provider, decision);
+    // hold label since. The adapter checks them on its own reads of the change
+    // just before and after the write, the closest it can get, and withdraws
+    // when one is there.
+    const holdLabels = config.output.approval.blockLabels;
     try {
       const outcome = await publisher.setApproval(ref, {
-        action: decision.action,
-        body: approvalBody(result, decision, input.targetUrl),
+        action: action.action,
+        body: approvalBody(result, action, input.targetUrl),
         ...(changeSet.baseRef ? { baseRef: changeSet.baseRef } : {}),
+        ...(action.action === "approve" && holdLabels.length ? { holdLabels } : {}),
       });
-      publication.approval = { action: decision.action, state: outcome.state, reasons: decision.reasons, ...(outcome.note ? { note: outcome.note } : {}) };
+      publication.approval =
+        outcome.heldLabel !== undefined
+          ? { action: "withdraw", state: outcome.state, reasons: [`The change has the label "${outcome.heldLabel}"`] }
+          : { action: action.action, state: outcome.state, reasons: action.reasons, ...(outcome.note ? { note: outcome.note } : {}) };
     } catch (err) {
       publication.errors.push(`Approval failed: ${message(err)}`);
     }

@@ -299,6 +299,12 @@ function movedFrom(pull: GhPull, ref: ForgeRef, baseRef: string | undefined): Ap
   return undefined;
 }
 
+// The first hold label the pull request carries, if any.
+function heldLabel(pull: GhPull, holdLabels: string[] | undefined): string | undefined {
+  if (!holdLabels?.length) return undefined;
+  return (pull.labels ?? []).map((label) => label.name).find((name) => holdLabels.includes(name));
+}
+
 export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, ForgeThreads {
   readonly provider = "github" as const;
   readonly host: string;
@@ -741,15 +747,6 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     });
   }
 
-  // Labels as the forge has them now, for the approval policy.
-  async getLabels(ref: ForgeRef): Promise<string[]> {
-    const labels = await this.http.paginate<{ name: string }>(
-      `${repoApiPath(ref.project)}/issues/${ref.number}/labels?per_page=100`,
-      linkHeaderNext,
-    );
-    return labels.map((label) => label.name);
-  }
-
   // Sentryward's approval is its latest APPROVED or CHANGES_REQUESTED review:
   // a later COMMENT review does not change it, and a dismissed one shows as
   // DISMISSED. Without its own login it cannot tell its reviews apart, so an
@@ -796,7 +793,19 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     // dismiss stale approvals on push or also require the commit-specific
     // sentryward/review status.
     if (action.action === "approve") {
-      const moved = movedFrom(await this.http.json<GhPull>(pulls), ref, action.baseRef);
+      const pull = await this.http.json<GhPull>(pulls);
+      // A hold label added since the publisher's own label read: this is the
+      // last read before the write, so it decides. An approval already given
+      // is withdrawn with it, as the label policy would on a fresh review.
+      const label = heldLabel(pull, action.holdLabels);
+      if (label !== undefined) {
+        const approvals = own.filter((review) => review.state === "APPROVED");
+        if (approvals.length) {
+          await this.dismissReviews(pulls, approvals, `Sentryward no longer approves this change: it has the label "${label}".`);
+        }
+        return { state: approvals.length ? "withdrawn" : "unchanged", heldLabel: label };
+      }
+      const moved = movedFrom(pull, ref, action.baseRef);
       // A moved base queues no review, so an earlier approval would go on
       // counting for a target no review checked: it is withdrawn here. A push
       // queues its own review, which decides about the approvals it finds.
@@ -843,10 +852,22 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     if (action.action === "approve") {
       let moved: ApprovalOutcome | undefined;
       let unconfirmed: unknown;
+      let label: string | undefined;
       try {
-        moved = movedFrom(await this.http.json<GhPull>(pulls), ref, action.baseRef);
+        const pull = await this.http.json<GhPull>(pulls);
+        moved = movedFrom(pull, ref, action.baseRef);
+        label = heldLabel(pull, action.holdLabels);
       } catch (err) {
         unconfirmed = err;
+      }
+      // A hold label that landed between the read above and the write.
+      if (!moved && unconfirmed === undefined && label !== undefined) {
+        try {
+          await this.dismissReviews(pulls, [posted], `Sentryward withdrew this approval: the pull request has the label "${label}".`);
+        } catch (err) {
+          throw new Error(`The pull request got the label "${label}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
+        }
+        return { state: "withdrawn", heldLabel: label };
       }
       if (moved || unconfirmed !== undefined) {
         // The approval is withdrawn whenever its freshness is not confirmed. A

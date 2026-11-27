@@ -194,6 +194,10 @@ export interface ApprovalAction {
   // approve only: the target branch the review saw, so an approval is not
   // posted on a change retargeted mid-review (both forges check it).
   baseRef?: string;
+  // approve only: labels that hold the approval back (output.approval.
+  // blockLabels). Checked on the reads just before and after the write, so a
+  // label someone adds while the approval is being given still stops it.
+  holdLabels?: string[];
 }
 
 // "refused": the forge would not let Sentryward approve (its own change, or the
@@ -203,6 +207,9 @@ export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "un
 export interface ApprovalOutcome {
   state: ApprovalState;
   note?: string;
+  // The hold label (ApprovalAction.holdLabels) found on the change, so the
+  // approval was not given, or was withdrawn right after it was.
+  heldLabel?: string;
 }
 
 // The change a thread lives on; a webhook knows no more than this.
@@ -239,8 +246,6 @@ export interface ForgePublisher {
   // Adds and removes labels; removing one the change does not carry is not an error.
   setLabels(ref: ForgeRef, add: string[], remove: string[]): Promise<void>;
   setCommitStatus(ref: ForgeRef, status: CommitStatus): Promise<void>;
-  // The labels the change carries now, read from the forge.
-  getLabels(ref: ForgeRef): Promise<string[]>;
   // Approves the change at ref.headSha, requests changes, or withdraws what
   // Sentryward said before. Never merges.
   setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome>;

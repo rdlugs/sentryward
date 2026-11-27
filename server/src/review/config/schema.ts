@@ -482,10 +482,15 @@ export type RuleGuard = z.infer<typeof ruleGuardSchema>;
 // Set by resolution only, like ruleGuard. The verdict follows the merged
 // review.blockOn, which a repository file or trigger may loosen for the review
 // itself; an approval still answers to the dashboard's blocking threshold
-// (publish/approve.ts). Present only when the dashboard is the stricter one.
+// (publish/approve.ts). `narrowed` lists the settings such a layer loosened
+// that decide which findings exist at all (a higher floor, fewer categories,
+// more ignored paths...): no threshold can recover a finding that was never
+// reported, so any of them holds the approval back. Present only when the
+// dashboard is the stricter one or something was narrowed.
 const approvalGuardSchema = z.strictObject({
   blockOn: severitySchema,
   toolFindingsBlock: z.boolean(),
+  narrowed: z.array(z.string()),
 });
 export type ApprovalGuard = z.infer<typeof approvalGuardSchema>;
 

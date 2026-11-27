@@ -38,17 +38,18 @@ const gitlab = (routes: StubRoute[]) => {
 };
 const body = (call: { body?: string }) => JSON.parse(call.body ?? "{}");
 // The pull request as setApproval re-reads it just before and after approving.
-const pullAt = (sha: string, base: { sha?: string; ref?: string } = {}): StubRoute => ({
+const pullAt = (sha: string, base: { sha?: string; ref?: string } = {}, labels: string[] = []): StubRoute => ({
   url: /\/pulls\/42$/,
-  body: { head: { sha }, base: { sha: base.sha ?? "base", ref: base.ref ?? "main" } },
+  body: { head: { sha }, base: { sha: base.sha ?? "base", ref: base.ref ?? "main" }, labels: labels.map((name) => ({ name })) },
 });
 // The merge request as GitLab's setApproval re-reads it around approving;
 // matches glRef unless told otherwise.
 const mrAt = (
-  moved: { head_sha?: string; base_sha?: string; start_sha?: string; target_branch?: string; diff_refs?: null } = {},
+  moved: { head_sha?: string; base_sha?: string; start_sha?: string; target_branch?: string; diff_refs?: null; labels?: string[] } = {},
 ): StubRoute => ({
   url: /\/merge_requests\/42$/,
   body: {
+    labels: moved.labels ?? [],
     target_branch: moved.target_branch ?? "main",
     diff_refs:
       moved.diff_refs === null
@@ -423,9 +424,38 @@ describe("GitHub publishing", () => {
     expect(await stale.gh.setApproval(ghRef, { action: "withdraw", body: "x", keepAt: "head" })).toEqual({ state: "withdrawn" });
   });
 
-  it("reads the pull request's current labels", async () => {
-    const { gh } = github([{ url: /\/issues\/42\/labels\?per_page=100$/, body: [{ name: "do-not-merge" }, { name: "bug" }] }]);
-    expect(await gh.getLabels(ghRef)).toEqual(["do-not-merge", "bug"]);
+  it("does not approve, and withdraws its earlier approval, when a hold label is on the pull request", async () => {
+    const hold = { action: "approve" as const, body: "ok", holdLabels: ["do-not-merge"] };
+    const fresh = github([{ url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }, pullAt("head", {}, ["bug", "do-not-merge"])]);
+    expect(await fresh.gh.setApproval(ghRef, hold)).toEqual({ state: "unchanged", heldLabel: "do-not-merge" });
+    expect(fresh.calls.some((c) => c.method === "POST")).toBe(false);
+
+    const earlier = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } }] },
+      pullAt("head", {}, ["do-not-merge"]),
+      { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} },
+    ]);
+    expect(await earlier.gh.setApproval(ghRef, hold)).toEqual({ state: "withdrawn", heldLabel: "do-not-merge" });
+    expect(earlier.calls.map((c) => c.method)).toEqual(["GET", "GET", "PUT"]);
+
+    // Without a label policy the labels are not consulted.
+    const free = github([{ url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }, pullAt("head", {}, ["do-not-merge"]), { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 1 } }]);
+    expect(await free.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
+  });
+
+  it("dismisses its new approval when a hold label was added while it was posted", async () => {
+    const { gh, calls } = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      { ...pullAt("head"), times: 1 },
+      pullAt("head", {}, ["do-not-merge"]),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok", holdLabels: ["do-not-merge"] })).toEqual({
+      state: "withdrawn",
+      heldLabel: "do-not-merge",
+    });
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "PUT"]);
   });
 
   it("refuses every decision when it does not know its own login", async () => {
@@ -797,9 +827,37 @@ describe("GitLab publishing", () => {
     await expect(unauthorized.gl.setApproval(glRef, { action: "approve", body: "ok" })).rejects.toThrow(/401/);
   });
 
-  it("reads the merge request's current labels", async () => {
-    const { gl } = gitlab([{ url: /\/merge_requests\/42$/, body: { labels: ["do-not-merge"] } }]);
-    expect(await gl.getLabels(glRef)).toEqual(["do-not-merge"]);
+  it("does not approve, and unapproves, when a hold label is on the merge request", async () => {
+    const hold = { action: "approve" as const, body: "ok", holdLabels: ["do-not-merge"] };
+    const fresh = gitlab([
+      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: true } },
+      mrAt({ labels: ["do-not-merge"] }),
+    ]);
+    expect(await fresh.gl.setApproval(glRef, hold)).toEqual({ state: "unchanged", heldLabel: "do-not-merge" });
+    expect(fresh.calls.some((c) => c.method === "POST")).toBe(false);
+
+    const earlier = gitlab([
+      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [{ user: { username: "sentryward-bot" } }], user_can_approve: true } },
+      mrAt({ labels: ["do-not-merge"] }),
+      { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} },
+    ]);
+    expect(await earlier.gl.setApproval(glRef, hold)).toEqual({ state: "withdrawn", heldLabel: "do-not-merge" });
+    expect(earlier.calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual([expect.stringMatching(/\/unapprove$/)]);
+  });
+
+  it("unapproves when a hold label was added while it approved", async () => {
+    const { gl, calls } = gitlab([
+      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: true } },
+      { ...mrAt(), times: 1 },
+      mrAt({ labels: ["do-not-merge"] }),
+      { method: "POST", url: /\/merge_requests\/42\/approve$/, body: {} },
+      { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} },
+    ]);
+    expect(await gl.setApproval(glRef, { action: "approve", body: "ok", holdLabels: ["do-not-merge"] })).toEqual({
+      state: "withdrawn",
+      heldLabel: "do-not-merge",
+    });
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url.replace(/^.*\/merge_requests\/42/, ""))).toEqual(["/approve", "/unapprove"]);
   });
 
   it("refuses every decision when it does not know its own username", async () => {

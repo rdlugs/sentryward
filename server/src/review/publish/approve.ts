@@ -49,6 +49,21 @@ export function approvalPolicyReasons(approval: Config["output"]["approval"], ch
   return reasons;
 }
 
+// Everything that holds an approval back whatever the review found: the
+// policies above, and a repository file or trigger that made the review report
+// less than the dashboard asks (config/resolve.ts approvalGuardFor). Shared
+// with skipped runs (worker/staleApproval.ts), which must not leave standing
+// an approval these forbid.
+export function approvalHoldReasons(config: Config, change: Change): string[] {
+  const narrowed = config.approvalGuard?.narrowed ?? [];
+  return [
+    ...(narrowed.length
+      ? [`The repository file or trigger narrowed what the review checks (${narrowed.join(", ")}), so it is not approved automatically`]
+      : []),
+    ...approvalPolicyReasons(config.output.approval, change),
+  ];
+}
+
 const VETO_LABELS: Record<NonNullable<Config["approvalVeto"]>, string> = {
   repoFile: "the repository file",
   trigger: "the trigger",
@@ -92,7 +107,7 @@ export function approvalDecision(config: Config, result: ReviewResult, change: C
   if (approval.when === "no_findings" && result.findings.length) {
     return { action: "withdraw", reasons: [`${plural(result.findings.length, "finding")} still open`] };
   }
-  const reasons = approvalPolicyReasons(approval, change);
+  const reasons = approvalHoldReasons(config, change);
   return { action: reasons.length ? "withdraw" : "approve", reasons };
 }
 

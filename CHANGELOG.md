@@ -30,7 +30,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   dashboard list repeats an entry), and an approval still answers to the
   dashboard's `block_on` (and tool findings blocking) when the repository file
   or trigger loosens them for the review itself, withdrawing rather than
-  approving; a GitHub approval is not posted (and an
+  approving; a repository file or trigger that makes the review report less
+  than the dashboard settings (more `ignore_paths`, fewer categories, a higher
+  severity floor or confidence, fewer findings or chunks, tool findings off,
+  evidence required, or more verification) holds the approval back, with a
+  config warning saying which settings; a GitHub approval is not posted (and an
   existing one is not reused) when the head, the base sha or the target branch
   moved during the review, and is dismissed again when they moved while it was
   being posted or could not be re-read afterwards (a failed dismissal is an
@@ -39,15 +43,17 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   queues no new review (a failed withdrawal is an error); a GitLab approval
   gets the same checks, comparing the MR's target branch and diff refs before
   an approval is reused or posted and again after, unapproving when they moved
-  or cannot be re-read; a cancellation that lands while the labels are re-read
-  stops the approval; a skipped run keeps the approval
+  or cannot be re-read; a skipped run keeps the approval
   only when the last review published an approval decision for the current
   head, and otherwise asks the forge to withdraw, keeping a GitHub approval of
-  the current head (filter skips always withdraw); a change whose file list
-  the forge cut short is not approved; when `block_labels` is set it is
-  checked against the labels read from the forge just before approving (so a
-  hold label added mid-review counts, and an unreadable label list withholds
-  the approval), and without it the labels are not re-read; a GitLab refusal is only a note when GitLab reports the
+  the current head (filter skips always withdraw, and so does an approval
+  policy that holds the change back as it stands now, such as a hold label
+  added since the last review); a change whose file list the forge cut short
+  is not approved, including when GitLab's legacy `/changes` endpoint reports
+  `overflow` without a file count; when `block_labels` is set the forge
+  adapter checks it on its own reads of the PR/MR just before and just after
+  the write, so a hold label added mid-review or while the approval is posted
+  stops or withdraws it (an earlier approval is withdrawn too); a GitLab refusal is only a note when GitLab reports the
   account cannot approve the MR, while other 401/403 errors mark the review
   partial; the preview shows a withdrawal rather than a request for changes on
   GitLab, as publishing does; without its own login (`GITHUB_APP_SLUG` for

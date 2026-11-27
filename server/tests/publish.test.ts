@@ -103,11 +103,11 @@ function recordingPublisher(
     summaryOnForge?: boolean;
     approval?: ApprovalOutcome | Error;
     // The labels on the forge when publishing starts (setLabels updates them),
-    // or an error for getLabels to throw.
-    forgeLabels?: string[] | Error;
+    // which setApproval checks against holdLabels as the adapters do.
+    forgeLabels?: string[];
   } = {},
 ) {
-  let forgeLabels = options.forgeLabels instanceof Error ? [] : [...(options.forgeLabels ?? [])];
+  let forgeLabels = [...(options.forgeLabels ?? [])];
   const calls = {
     inline: [] as InlineComment[],
     summaries: [] as string[],
@@ -151,10 +151,6 @@ function recordingPublisher(
       calls.labels.push({ add, remove });
       forgeLabels = [...forgeLabels.filter((name) => !remove.includes(name)), ...add];
     },
-    getLabels: async () => {
-      if (options.forgeLabels instanceof Error) throw options.forgeLabels;
-      return forgeLabels;
-    },
     setCommitStatus: async (_ref, status) => {
       calls.statuses.push(status);
     },
@@ -162,6 +158,8 @@ function recordingPublisher(
       if (options.approval instanceof Error) throw options.approval;
       // Published after everything else, so the status must already be set.
       calls.approvals.push({ ...action, body: `${calls.statuses.length}:${action.body}` });
+      const held = action.holdLabels?.find((name) => forgeLabels.includes(name));
+      if (held !== undefined) return { state: "unchanged", heldLabel: held };
       return options.approval ?? { state: action.action === "approve" ? "approved" : "withdrawn" };
     },
     setThreadsResolved: async (_ref, fingerprints, resolved) => {
@@ -725,7 +723,7 @@ describe("publishReview approval", () => {
     expect(small.approval?.state).toBe("approved");
   });
 
-  it("reads the labels again before approving, and withholds approval when it cannot", async () => {
+  it("has the forge check the hold labels at the write, and reports a label found there", async () => {
     const held = recordingPublisher({ forgeLabels: ["do-not-merge"] });
     const publication = await publishReview({
       publisher: held.publisher,
@@ -734,36 +732,32 @@ describe("publishReview approval", () => {
       config: approving({ blockLabels: ["do-not-merge"] }),
       postedFingerprints: new Set(),
     });
-    expect(held.calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
-    expect(publication.approval).toEqual({ action: "withdraw", state: "withdrawn", reasons: ['The change has the label "do-not-merge"'] });
-
-    const unreadable = recordingPublisher({ forgeLabels: new Error("502 Bad Gateway") });
-    const failed = await publishReview({
-      publisher: unreadable.publisher,
-      changeSet: makeChangeSet(),
-      result: await passing(),
-      config: approving({ blockLabels: ["do-not-merge"] }),
-      postedFingerprints: new Set(),
-    });
-    expect(unreadable.calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
-    expect(failed.approval?.reasons).toEqual(["The change's current labels could not be read, so the label policy could not be checked"]);
-    expect(failed.errors).toEqual(["Labels could not be re-read for the approval: 502 Bad Gateway"]);
+    expect(held.calls.approvals.map((a) => [a.action, a.holdLabels])).toEqual([["approve", ["do-not-merge"]]]);
+    expect(publication.approval).toEqual({ action: "withdraw", state: "unchanged", reasons: ['The change has the label "do-not-merge"'] });
   });
 
-  // Without a label policy the labels cannot change the decision, so an
-  // unreadable label list must not cost the approval.
-  it("does not read the labels again when no label policy is set", async () => {
-    const unreadable = recordingPublisher({ forgeLabels: new Error("502 Bad Gateway") });
+  // Without a label policy the labels cannot change the decision.
+  it("sends no hold labels when no label policy is set, or when not approving", async () => {
+    const free = recordingPublisher({ forgeLabels: ["do-not-merge"] });
     const publication = await publishReview({
-      publisher: unreadable.publisher,
+      publisher: free.publisher,
       changeSet: makeChangeSet(),
       result: await passing(),
       config: approving(),
       postedFingerprints: new Set(),
     });
-    expect(unreadable.calls.approvals.map((a) => a.action)).toEqual(["approve"]);
+    expect(free.calls.approvals[0]!.holdLabels).toBeUndefined();
     expect(publication.approval).toEqual({ action: "approve", state: "approved", reasons: [] });
-    expect(publication.errors).toEqual([]);
+
+    const blocked = recordingPublisher();
+    await publishReview({
+      publisher: blocked.publisher,
+      changeSet: makeChangeSet(),
+      result: await sampleResult(),
+      config: approving({ blockLabels: ["do-not-merge"] }),
+      postedFingerprints: new Set(),
+    });
+    expect(blocked.calls.approvals.map((a) => [a.action, a.holdLabels])).toEqual([["withdraw", undefined]]);
   });
 
   it("withdraws instead of requesting changes on GitLab", async () => {
@@ -792,27 +786,6 @@ describe("publishReview approval", () => {
       postedFingerprints: new Set(),
       proceed: async () => calls.statuses.length === 0,
     });
-    expect(publication.stopped).toBe(true);
-    expect(calls.approvals).toEqual([]);
-  });
-
-  it("is not sent when the job was cancelled while the labels were re-read", async () => {
-    const { publisher, calls } = recordingPublisher();
-    let reread = false;
-    const getLabels = publisher.getLabels.bind(publisher);
-    publisher.getLabels = async (ref) => {
-      reread = true;
-      return getLabels(ref);
-    };
-    const publication = await publishReview({
-      publisher,
-      changeSet: makeChangeSet(),
-      result: await passing(),
-      config: approving({ blockLabels: ["do-not-merge"] }),
-      postedFingerprints: new Set(),
-      proceed: async () => !reread,
-    });
-    expect(reread).toBe(true);
     expect(publication.stopped).toBe(true);
     expect(calls.approvals).toEqual([]);
   });
