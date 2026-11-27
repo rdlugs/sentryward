@@ -30,8 +30,10 @@ const github = (routes: StubRoute[]) => {
   const stub = fetchStub(routes);
   return { ...stub, gh: new GitHubAdapter({ host: "github.com", token: async () => "t", selfLogin: "sentryward[bot]", fetch: stub.fetch }) };
 };
+// The token acts as a bot user (setApproval asks once) unless a test's own
+// earlier /user route says otherwise.
 const gitlab = (routes: StubRoute[]) => {
-  const stub = fetchStub(routes);
+  const stub = fetchStub([...routes, { url: /\/api\/v4\/user$/, body: { username: "sentryward-bot", bot: true } }]);
   return { ...stub, gl: new GitLabAdapter({ host: "gitlab.com", token: async () => "t", selfLogin: "sentryward-bot", fetch: stub.fetch }) };
 };
 const body = (call: { body?: string }) => JSON.parse(call.body ?? "{}");
@@ -369,6 +371,29 @@ describe("GitHub publishing", () => {
     expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "PUT"]);
   });
 
+  it("also dismisses its earlier approvals when the base moved while the new one was posted", async () => {
+    const { gh, calls } = github([
+      {
+        url: /\/pulls\/42\/reviews\?per_page=100$/,
+        body: [
+          { id: 2, state: "APPROVED", commit_id: "older", user: { login: "sentryward[bot]" } },
+          { id: 3, state: "APPROVED", commit_id: "older", user: { login: "alice" } },
+        ],
+      },
+      { ...pullAt("head"), times: 1 },
+      pullAt("head", { sha: "newbase" }),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/(9|2)\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+      state: "withdrawn",
+      note: expect.stringMatching(/rerun/),
+    });
+    // The new approval and its own earlier one; never someone else's.
+    const dismissed = calls.filter((c) => c.method === "PUT").map((c) => c.url.match(/reviews\/(\d+)\//)![1]);
+    expect(dismissed).toEqual(["9", "2"]);
+  });
+
   it("dismisses its new approval when the pull request cannot be re-read after posting", async () => {
     const routes = (dismissal: StubRoute) => [
       { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
@@ -409,6 +434,19 @@ describe("GitHub publishing", () => {
     for (const action of ["approve", "request_changes", "withdraw"] as const) {
       expect(await anonymous.setApproval(ghRef, { action, body: "x" })).toMatchObject({ state: "refused" });
     }
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it("refuses every decision on a token connection, which acts as a person", async () => {
+    const stub = fetchStub([]);
+    const person = new GitHubAdapter({ host: "github.com", token: async () => "t", selfLogin: "alice", repoSource: "user", fetch: stub.fetch });
+    for (const action of ["approve", "request_changes", "withdraw"] as const) {
+      expect(await person.setApproval(ghRef, { action, body: "x" })).toMatchObject({
+        state: "refused",
+        note: expect.stringMatching(/GitHub App/),
+      });
+    }
+    // Not even a read: alice's own approvals are never dismissed.
     expect(stub.calls).toHaveLength(0);
   });
 
@@ -670,8 +708,9 @@ describe("GitLab publishing", () => {
     });
     const fresh = gitlab([approvals(["alice"]), mrAt(), { method: "POST", url: /\/merge_requests\/42\/approve$/, body: {} }]);
     expect(await fresh.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toEqual({ state: "approved" });
-    expect(fresh.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET"]);
-    expect(body(fresh.calls[2]!)).toEqual({ sha: "head" });
+    // The first read asks whether the token acts as a bot.
+    expect(fresh.calls.map((c) => c.method)).toEqual(["GET", "GET", "GET", "POST", "GET"]);
+    expect(body(fresh.calls[3]!)).toEqual({ sha: "head" });
 
     const done = gitlab([approvals(["sentryward-bot"]), mrAt()]);
     expect(await done.gl.setApproval(glRef, { action: "approve", body: "ok" })).toEqual({ state: "unchanged" });
@@ -682,7 +721,7 @@ describe("GitLab publishing", () => {
     // No "request changes" on GitLab: it only withdraws, and leaves others' approvals.
     const others = gitlab([approvals(["alice"])]);
     expect(await others.gl.setApproval(glRef, { action: "request_changes", body: "fix" })).toEqual({ state: "unchanged" });
-    expect(others.calls).toHaveLength(1);
+    expect(others.calls).toHaveLength(2);
   });
 
   it("does not approve, or reuse its approval, once the merge request was retargeted or its diff refs moved", async () => {
@@ -704,7 +743,7 @@ describe("GitLab publishing", () => {
     // Its earlier approval no longer covers the target, so it is withdrawn.
     const stale = gitlab([approvals(["sentryward-bot"]), mrAt({ target_branch: "release" }), unapprove]);
     expect(await stale.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "withdrawn" });
-    expect(stale.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST"]);
+    expect(stale.calls.map((c) => c.method)).toEqual(["GET", "GET", "GET", "POST"]);
 
     const stands = gitlab([
       approvals(["sentryward-bot"]),
@@ -732,8 +771,8 @@ describe("GitLab publishing", () => {
     ];
     const retargeted = gitlab(routes(mrAt({ target_branch: "release" })));
     expect(await retargeted.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "refused" });
-    expect(retargeted.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "POST"]);
-    expect(retargeted.calls[4]!.url).toMatch(/\/unapprove$/);
+    expect(retargeted.calls.map((c) => c.method)).toEqual(["GET", "GET", "GET", "POST", "GET", "POST"]);
+    expect(retargeted.calls[5]!.url).toMatch(/\/unapprove$/);
 
     const unreadable = gitlab(routes({ url: /\/merge_requests\/42$/, status: 404, body: { message: "404 Not Found" } }));
     await expect(unreadable.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/approval was withdrawn/);
@@ -769,6 +808,18 @@ describe("GitLab publishing", () => {
     expect(await anonymous.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
     expect(await anonymous.setApproval(glRef, { action: "withdraw", body: "x" })).toMatchObject({ state: "refused" });
     expect(stub.calls).toHaveLength(0);
+  });
+
+  it("refuses every decision when the connection acts as a person, so it never removes their approval", async () => {
+    const { gl, calls } = gitlab([{ url: /\/api\/v4\/user$/, body: { username: "sentryward-bot", bot: false } }]);
+    for (const action of ["approve", "request_changes", "withdraw"] as const) {
+      expect(await gl.setApproval(glRef, { action, body: "x" })).toMatchObject({
+        state: "refused",
+        note: expect.stringMatching(/access token or a service account/),
+      });
+    }
+    // Asked once per adapter; no approvals read, nothing unapproved.
+    expect(calls.map((c) => c.url)).toEqual(["https://gitlab.com/api/v4/user"]);
   });
 
   it("adds and removes labels in one update", async () => {

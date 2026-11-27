@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { ConfigOverride } from "../src/review/config/schema.ts";
 import type { ChangeSet, ReviewResult } from "../src/review/core/models.ts";
-import { approvalBody, approvalDecision } from "../src/review/publish/approve.ts";
+import { approvalBody, approvalDecision, approvalManaged } from "../src/review/publish/approve.ts";
 import { makeChangeSet } from "./helpers/changeSet.ts";
 import { sampleResult } from "./helpers/result.ts";
 
@@ -31,6 +31,19 @@ describe("approvalDecision", () => {
     const off = resolveConfig({}).config;
     expect(off.output.approval.enabled).toBe(false);
     expect(approvalDecision(off, await passing(), change())).toBeNull();
+    expect(approvalManaged(off)).toBe(false);
+  });
+
+  it("withdraws when a repository file vetoes approval the dashboard turned on", async () => {
+    const vetoed = resolveConfig({
+      global: { output: { approval: { enabled: true } } },
+      repoFile: { output: { approval: { enabled: false } } },
+    }).config;
+    expect(approvalManaged(vetoed)).toBe(true);
+    expect(approvalDecision(vetoed, await passing(false), change())).toEqual({
+      action: "withdraw",
+      reasons: ["Automatic approval is turned off in the repository file"],
+    });
   });
 
   it("approves a passing review, and with when: no_findings only one with no findings", async () => {

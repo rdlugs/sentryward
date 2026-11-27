@@ -489,6 +489,12 @@ const approvalGuardSchema = z.strictObject({
 });
 export type ApprovalGuard = z.infer<typeof approvalGuardSchema>;
 
+// Set by resolution only, like the guards: the layer that turned approval off
+// while the dashboard layers have it on. A repository's veto is a per-run
+// decision, not the operator switching the feature off, so an approval given
+// before it is withdrawn rather than left standing (publish/approve.ts).
+export const APPROVAL_VETO_LAYERS = ["repoFile", "trigger"] as const;
+
 const topLevelShape = {
   version: z.literal(1),
   profile: profileNameSchema,
@@ -509,6 +515,7 @@ export const configSchema = z.strictObject({
   ...topLevelShape,
   ruleGuard: ruleGuardSchema.optional(),
   approvalGuard: approvalGuardSchema.optional(),
+  approvalVeto: z.enum(APPROVAL_VETO_LAYERS).optional(),
   llm: z.strictObject(dashboardLlmShape),
   review: z.strictObject(reviewShape),
   output: z.strictObject(outputShape),

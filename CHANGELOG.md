@@ -50,9 +50,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   the approval), and without it the labels are not re-read; a GitLab refusal is only a note when GitLab reports the
   account cannot approve the MR, while other 401/403 errors mark the review
   partial; the preview shows a withdrawal rather than a request for changes on
-  GitLab, as publishing does; and without its own login (`GITHUB_APP_SLUG` for
+  GitLab, as publishing does; without its own login (`GITHUB_APP_SLUG` for
   a GitHub App) Sentryward makes no approval decision, since it could not
-  withdraw one later.
+  withdraw one later; it also makes none on a GitHub token connection or a
+  GitLab connection whose token is not a bot user (project or group access
+  token, service account), since a person's own approval would look like
+  Sentryward's and a withdrawal would remove it; a GitHub base move detected
+  after posting dismisses Sentryward's earlier approvals along with the new
+  one; and a repository file or trigger that turns approval off while the
+  dashboard has it on withdraws an earlier approval (on skipped runs too)
+  instead of leaving it in place.
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete

@@ -49,12 +49,27 @@ export function approvalPolicyReasons(approval: Config["output"]["approval"], ch
   return reasons;
 }
 
+const VETO_LABELS: Record<NonNullable<Config["approvalVeto"]>, string> = {
+  repoFile: "the repository file",
+  trigger: "the trigger",
+};
+
+// Whether this run has anything to say about Sentryward's approval: the
+// dashboard turned it on, even when a repository file or trigger vetoed it for
+// this run (the veto withdraws).
+export function approvalManaged(config: Config): boolean {
+  return config.output.approval.enabled || config.approvalVeto !== undefined;
+}
+
 // What this run asks of Sentryward's approval, or null to leave it alone (the
-// setting is off). Only a completed review may approve: a partial or failed
-// one's silence means nothing, the same rule as the verdict.
+// dashboard has it off). Only a completed review may approve: a partial or
+// failed one's silence means nothing, the same rule as the verdict.
 export function approvalDecision(config: Config, result: ReviewResult, change: Change): ApprovalDecision | null {
   const { approval } = config.output;
-  if (!approval.enabled) return null;
+  if (!approval.enabled) {
+    if (!config.approvalVeto) return null;
+    return { action: "withdraw", reasons: [`Automatic approval is turned off in ${VETO_LABELS[config.approvalVeto]}`] };
+  }
   const { verdict, blocking, blockOn } = result.verdict;
   if (verdict === "error") return { action: "withdraw", reasons: ["The review did not complete"] };
   // Blocking findings stand even when part of the review failed, so they come

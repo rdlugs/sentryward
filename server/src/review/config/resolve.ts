@@ -226,7 +226,10 @@ export const NO_APPROVED_AUTHOR = "(nobody)";
 // and the trigger may tighten what the dashboard layers set, never loosen it.
 // They can turn approval off, ask for "no_findings", and add blocks; an
 // onlyAuthors list narrows the dashboard's. A loosening is ignored with a
-// warning. Returns the warnings; `config` and `sources` are updated in place.
+// warning. Turning off what the dashboard turned on is recorded as a veto
+// (config.approvalVeto), so the run withdraws an earlier approval instead of
+// leaving it alone as it does when the dashboard has approval off. Returns the
+// warnings; `config` and `sources` are updated in place.
 function holdApproval(layers: ConfigLayers, config: Config, sources: Record<string, LayerName>): string[] {
   const repoLayers = (
     [
@@ -248,6 +251,7 @@ function holdApproval(layers: ConfigLayers, config: Config, sources: Record<stri
     if (own.enabled === false && held.enabled) {
       held.enabled = false;
       set.enabled = name;
+      config.approvalVeto = name;
     } else if (own.enabled === true && !held.enabled) {
       warnings.push(`Approval in ${where} was ignored: only the dashboard settings can turn approval on`);
     }

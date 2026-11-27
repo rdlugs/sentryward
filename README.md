@@ -768,7 +768,9 @@ output:
   turn approval off, ask for `when: no_findings`, add `block_paths`,
   `skip_authors`, `block_labels` and `block_on_risk` entries, and narrow
   `only_authors` to logins on both lists. It cannot turn approval on or remove
-  a block; such settings are ignored with a warning.
+  a block; such settings are ignored with a warning. Turning approval off
+  there (or in a trigger) while the dashboard has it on withdraws an approval
+  Sentryward gave earlier, on skipped runs too.
 - **Withdrawing**: on GitLab Sentryward removes its approval. On GitHub it
   dismisses its own approvals; on a protected branch that needs the right to
   dismiss reviews, and without it the review is marked partial with the error.
@@ -794,9 +796,12 @@ output:
   no commit, it is withdrawn. An approval never covers commits Sentryward did
   not review.
 - **Its own account**: Sentryward has to know the login it acts as to find and
-  withdraw its approval. For a GitHub App that means setting
-  `GITHUB_APP_SLUG`; without it (or without a GitLab username on the
-  connection), Sentryward makes no approval decision at all and shows a note.
+  withdraw its approval, and that login must be Sentryward's alone, or a
+  withdrawal would also remove a person's own approval. On GitHub that means a
+  GitHub App connection with `GITHUB_APP_SLUG` set; a token connection acts as
+  a person. On GitLab the connection's token must belong to a bot user (a
+  project or group access token, or a service account). Otherwise Sentryward
+  makes no approval decision at all and shows a note.
 - **Permissions**: GitHub uses the Pull requests (write) permission already
   needed for reviews. GitLab needs a role allowed to approve (Developer or
   above, and an approval rule that includes the account where rules apply).
@@ -807,7 +812,8 @@ output:
   token, say) marks the review partial with the error.
 - Whether an approval from Sentryward counts toward required approvals depends
   on the forge's branch protection or approval rules, not on Sentryward.
-- Turning the setting off leaves any approval already given in place.
+- Turning the setting off in the dashboard leaves any approval already given
+  in place.
 
 The defaults are a quiet setup, the Display tab's Standard preset: inline
 comments, one summary comment and a short PR summary, without the counts,

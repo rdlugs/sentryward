@@ -2,6 +2,7 @@ import type { ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
 import { skipFilterReason } from "../review/config/filters.ts";
 import type { Config } from "../review/config/schema.ts";
+import { approvalManaged } from "../review/publish/approve.ts";
 import type { ChangeSet } from "../review/core/models.ts";
 import type { ApprovalOutcome, ForgePublisher } from "../review/forge/types.ts";
 
@@ -13,7 +14,8 @@ type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 // approvals on push. So it is withdrawn unless the last review settled the
 // approval at the current head, and always when the skip is the team's own
 // filter (a skip label, author, title or branch), which says the change is not
-// for Sentryward to judge. A review of the head alone proves nothing: approval
+// for Sentryward to judge, or when a repository file or trigger turned approval
+// off for this change. A review of the head alone proves nothing: approval
 // may have been off then, or the approval step may have failed or been
 // refused, leaving an older approval standing. Job rows and forge approvals
 // live independently (retention prunes the rows), so without such a record
@@ -27,12 +29,15 @@ export async function withdrawStaleApproval(
   changeSet: ChangeSet,
   skip: string,
 ): Promise<ApprovalOutcome | undefined> {
-  if (!config.output.approval.enabled) return undefined;
+  // A repository veto still withdraws (publish/approve.ts approvalManaged).
+  if (!approvalManaged(config)) return undefined;
   const head = changeSet.forgeRef.headSha;
   const filtered = skip === skipFilterReason(config.triggers, changeSet, job.actor);
+  // Vetoed for this run: no earlier approval stands, whatever it covered.
+  const vetoed = !config.output.approval.enabled;
   let keepAt: string | undefined;
-  let why = skip;
-  if (!filtered) {
+  let why = vetoed ? `automatic approval is turned off for this change (${skip})` : skip;
+  if (!filtered && !vetoed) {
     const last = await prisma.reviewJob.findFirst({
       where: {
         repositoryId: job.repositoryId,

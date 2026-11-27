@@ -761,6 +761,15 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         note: "Sentryward does not know its own GitHub account name (set GITHUB_APP_SLUG), so it could not withdraw an approval later",
       };
     }
+    // A token connection acts as a person: their own approvals carry the same
+    // login, so withdrawing would dismiss them too. Only an App posts as an
+    // identity of its own ("<slug>[bot]"; a login cannot contain brackets).
+    if (!this.options.selfLogin.endsWith("[bot]")) {
+      return {
+        state: "refused",
+        note: "Automatic approval needs a GitHub App connection: this connection acts as a person, so Sentryward could not tell its approvals from theirs",
+      };
+    }
     const pulls = `${repoApiPath(ref.project)}/pulls/${ref.number}`;
     const own = (await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext)).filter(
       (review) => this.isSelfLogin(review.user?.login) && (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED"),
@@ -845,24 +854,30 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         // shows an error: either the check failed, or the approval stands on
         // commits the review never saw.
         const why = unconfirmed !== undefined ? `the pull request could not be re-read (${errorText(unconfirmed)})` : "the pull request moved on during the review";
+        // A moved base queues no review, so earlier approvals are withdrawn
+        // with this one, as before the write. A push queues its own review,
+        // which decides about them.
+        const baseMoved = moved === BASE_MOVED;
+        const earlier = baseMoved ? own.filter((review) => review.state === "APPROVED" && review.id !== posted.id) : [];
         try {
-          await this.http.request(`${pulls}/reviews/${posted.id}/dismissals`, {
-            method: "PUT",
-            body: JSON.stringify({ message: "Sentryward withdrew this approval: the pull request moved on during the review, or could not be checked.", event: "DISMISS" }),
-          });
+          await this.dismissReviews(
+            pulls,
+            [posted, ...earlier],
+            "Sentryward withdrew this approval: the pull request moved on during the review, or could not be checked.",
+          );
         } catch (err) {
           throw new Error(`The approval could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
         }
         if (unconfirmed !== undefined) {
           throw new Error(`Could not confirm the pull request was still at the reviewed commits, so the approval was withdrawn: ${errorText(unconfirmed)}`);
         }
-        return moved!;
+        return earlier.length ? { ...BASE_MOVED, state: "withdrawn" } : moved!;
       }
     }
     return { state: action.action === "approve" ? "approved" : "changes_requested" };
   }
 
-  private async dismissReviews(pulls: string, reviews: GhReview[], message: string): Promise<void> {
+  private async dismissReviews(pulls: string, reviews: Pick<GhReview, "id">[], message: string): Promise<void> {
     for (const review of reviews) {
       await this.http.request(`${pulls}/reviews/${review.id}/dismissals`, {
         method: "PUT",

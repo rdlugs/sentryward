@@ -6,7 +6,7 @@ import type { Finding, ReviewResult } from "../src/review/core/models.ts";
 import type { ApprovalAction, ApprovalOutcome, CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
 import { inlineBody, inlineComments } from "../src/review/publish/inline.ts";
 import { inlineSelection } from "../src/review/core/buckets.ts";
-import { publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
+import { publishes, publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
 import { commitStatus } from "../src/review/publish/status.ts";
 import { toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
 import { makeChangeSet } from "./helpers/changeSet.ts";
@@ -611,6 +611,26 @@ describe("publishReview approval", () => {
     });
     expect(calls.approvals).toEqual([]);
     expect(publication.approval).toBeUndefined();
+  });
+
+  // Unlike the dashboard switching it off, a repository's veto is a decision
+  // about this change, so an earlier approval goes.
+  it("withdraws when the repository file vetoes approval, even with nothing else to publish", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const vetoed = resolveConfig({
+      global: { output: { approval: { enabled: true } } },
+      repoFile: { output: { postInline: false, postSummary: false, postCheck: false, walkthrough: false, approval: { enabled: false } } },
+    }).config;
+    expect(publishes(vetoed)).toBe(true);
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: vetoed,
+      postedFingerprints: new Set(),
+    });
+    expect(calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
+    expect(publication.approval).toMatchObject({ action: "withdraw", reasons: ["Automatic approval is turned off in the repository file"] });
   });
 
   it("approves a passing review last, after the commit status, with a link", async () => {

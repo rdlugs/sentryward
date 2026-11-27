@@ -277,6 +277,8 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   readonly host: string;
   private http: ForgeHttp;
   private selfLogin: string | undefined;
+  // Whether the token acts as a bot user, read once per adapter (setApproval).
+  private actsAsBot: boolean | undefined;
 
   constructor(options: GitLabAdapterOptions) {
     this.selfLogin = options.selfLogin;
@@ -780,6 +782,16 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         note: "Sentryward does not know the connection's GitLab username, so it could not withdraw an approval later",
       };
     }
+    // approved_by names the account, not who clicked: on a person's token their
+    // own approval looks exactly like Sentryward's, and a withdrawal would
+    // remove it. Only a bot user (a project or group access token, a service
+    // account) is an identity Sentryward alone acts as.
+    if (!(await this.tokenActsAsBot())) {
+      return {
+        state: "refused",
+        note: "Automatic approval needs a GitLab project or group access token or a service account: this connection acts as a person, so Sentryward could not tell its approval from theirs",
+      };
+    }
     const mr = this.mergeRequest(ref);
     const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[]; user_can_approve?: boolean }>(
       `${mr}/approvals`,
@@ -881,6 +893,14 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       if (isNotFound(err)) return 0;
       throw err;
     }
+  }
+
+  private async tokenActsAsBot(): Promise<boolean> {
+    if (this.actsAsBot === undefined) {
+      const user = await this.http.json<{ bot?: boolean }>("/user");
+      this.actsAsBot = user.bot === true;
+    }
+    return this.actsAsBot;
   }
 
   // Whether a user is a bot (a project or group access token, a service

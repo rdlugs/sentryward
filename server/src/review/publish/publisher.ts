@@ -4,7 +4,7 @@ import type { ApprovalAction, ApprovalState, ForgePublisher, PostedComment } fro
 import { inlineLimits, inlineSelection } from "../core/buckets.ts";
 import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
-import { approvalBody, approvalDecision, forgeApprovalDecision, type ApprovalDecision } from "./approve.ts";
+import { approvalBody, approvalDecision, approvalManaged, forgeApprovalDecision, type ApprovalDecision } from "./approve.ts";
 import { inlineComments } from "./inline.ts";
 import { labelChanges, labelsAfter } from "./labels.ts";
 import { commitStatus } from "./status.ts";
@@ -323,6 +323,6 @@ export function publishes(config: Config): boolean {
     output.walkthrough ||
     output.blastRadiusLabel ||
     output.effortLabel ||
-    output.approval.enabled
+    approvalManaged(config)
   );
 }

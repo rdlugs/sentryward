@@ -1658,10 +1658,10 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
         ...(publication ? { publication } : {}),
       },
     });
-  async function skippedPush(options: Parameters<typeof deps>[3] = {}) {
+  async function skippedPush(options: Parameters<typeof deps>[3] = {}, files: Parameters<typeof deps>[0] = {}) {
     await enqueue({ repositoryId, number: 42, headSha: "newhead", trigger: "webhook", event: "push" });
     const job = (await claimNext())!;
-    const { runDeps, approvals } = deps({}, {}, undefined, options);
+    const { runDeps, approvals } = deps(files, {}, undefined, options);
     await runJob(job, runDeps);
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(stored.status).toBe("skipped");
@@ -1729,6 +1729,15 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     await reviewed("newhead");
     const approvals = await skippedPush({ labels: ["no-bot"] });
     expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/label "no-bot"/) }]);
+  });
+
+  // The repository turned approval off for this change: whatever the last
+  // review settled, no earlier approval stands.
+  it("withdraws on a head already reviewed when the repository file vetoes approval", async () => {
+    await approvingSettings();
+    await reviewed("newhead");
+    const approvals = await skippedPush({}, { "base:.sentryward.yaml": "output:\n  approval:\n    enabled: false\n" });
+    expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/automatic approval is turned off/) }]);
   });
 
   it("does nothing while approval is off", async () => {

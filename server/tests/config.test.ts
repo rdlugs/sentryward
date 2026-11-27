@@ -458,7 +458,14 @@ describe("parseRepoFile", () => {
     expect(tighter.warnings).toEqual([]);
     const nobody = approval({ output: { approval: { onlyAuthors: ["carol"] } } });
     expect(nobody.config.output.approval.onlyAuthors).toEqual([NO_APPROVED_AUTHOR]);
-    expect(approval({ output: { approval: { enabled: false } } }).config.output.approval.enabled).toBe(false);
+    // Turning off what the dashboard turned on is a veto, which withdraws an
+    // earlier approval; off on both sides is no veto, which leaves it alone.
+    const vetoed = approval({ output: { approval: { enabled: false } } });
+    expect(vetoed.config.output.approval.enabled).toBe(false);
+    expect(vetoed.config.approvalVeto).toBe("repoFile");
+    expect(vetoed.sources["output.approval.enabled"]).toBe("repoFile");
+    expect(approval({ output: { approval: { enabled: false } } }, {}).config.approvalVeto).toBeUndefined();
+    expect(resolveConfig({ global: dashboard, trigger: { output: { approval: { enabled: false } } } }).config.approvalVeto).toBe("trigger");
 
     // A dashboard list that repeats an entry must not hide the one the file adds.
     const repeated = approval(
