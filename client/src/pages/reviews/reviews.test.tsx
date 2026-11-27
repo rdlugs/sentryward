@@ -1141,6 +1141,41 @@ describe("Review detail page", () => {
     ).toBeInTheDocument()
   })
 
+  it("says what became of the approval and why", async () => {
+    const publication = {
+      inlinePosted: [],
+      inlineSkipped: 0,
+      inlineFailed: [],
+      summaryCommentId: "9",
+      statusState: null,
+      approval: { state: "withdrawn", reasons: ["It touches authorization"] },
+      errors: [],
+    }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, publication } } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(await within(sidebar).findByText("Approval: Withdrawn")).toBeInTheDocument()
+    expect(within(sidebar).getByText("It touches authorization")).toBeInTheDocument()
+  })
+
+  it("shows a request for changes already standing as one", async () => {
+    const publication = {
+      inlinePosted: [],
+      inlineSkipped: 0,
+      inlineFailed: [],
+      summaryCommentId: "9",
+      statusState: null,
+      approval: { action: "request_changes", state: "unchanged", reasons: [] },
+      errors: [],
+    }
+    mockApi({ [`GET /api/reviews/${detail.id}`]: { review: { ...detail, publication } } })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}?view=overview` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(await within(sidebar).findByText("Approval: Changes requested")).toBeInTheDocument()
+  })
+
   it("lists failed inline comments and usage in the sidebar", async () => {
     const publication = {
       inlinePosted: [],

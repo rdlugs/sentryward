@@ -9,7 +9,8 @@ import { cancelQueuedForClosedChange, enqueue, enqueueFromWebhook } from "../../
 import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
 import { recordReviewComment } from "../reviewComments.ts";
 import { recordThreadReply } from "../threadReplies.ts";
-import type { ProviderDefinition } from "./types.ts";
+import { withdrawOnRetarget } from "./retarget.ts";
+import type { ProviderDefinition, WebhookOutcome } from "./types.ts";
 import { decryptToken } from "./token.ts";
 
 const DEVELOPER = 30;
@@ -34,7 +35,11 @@ interface GitLabPayload {
     last_commit?: { id: string };
     target_branch?: string;
   };
-  changes?: { draft?: { previous: boolean; current: boolean } };
+  changes?: {
+    draft?: { previous: boolean; current: boolean };
+    // Set when the target branch was changed.
+    target_branch?: { previous: string; current: string };
+  };
   merge_request?: { iid: number; last_commit: { id: string } };
 }
 
@@ -106,12 +111,20 @@ export const gitlabProvider: ProviderDefinition = {
       }
 
       if (event === "Merge Request Hook") {
+        // A retarget withdraws Sentryward's approval (retarget.ts). The same
+        // update may also have brought commits or taken the MR out of draft, so
+        // it still goes through the trigger checks below; the retarget's own
+        // outcome is returned only when there is no review to queue.
+        let retarget: WebhookOutcome | undefined;
+        if (attrs.action === "update" && payload.changes?.target_branch && attrs.iid) {
+          retarget = await withdrawOnRetarget(adapterFor(repo.connection), repo, attrs.iid);
+        }
         // An update only matters when it brought new commits (oldrev is set) or
         // took the MR out of draft, GitLab's equivalent of "ready for review".
         const pushed = attrs.action === "update" && Boolean(attrs.oldrev);
         const ready = attrs.action === "update" && payload.changes?.draft?.current === false;
         const opened = attrs.action === "open" || attrs.action === "reopen" || ready;
-        if (!(opened || pushed) || !attrs.iid || !attrs.last_commit) return { body: { outcome: "ignored" } };
+        if (!(opened || pushed) || !attrs.iid || !attrs.last_commit) return retarget ?? { body: { outcome: "ignored" } };
         const result = await enqueueFromWebhook({
           repositoryId: repo.id,
           number: attrs.iid,
@@ -121,6 +134,8 @@ export const gitlabProvider: ProviderDefinition = {
           actor: payload.user?.username,
           authorId: attrs.author_id === undefined ? undefined : String(attrs.author_id),
         });
+        // A failed withdrawal still fails the delivery, after the push was queued.
+        if (retarget?.status) return retarget;
         return { body: result.queued ? { outcome: "queued", reviewId: result.job.id } : { outcome: result.reason } };
       }
 

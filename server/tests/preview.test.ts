@@ -64,6 +64,16 @@ describe("previewPublication", () => {
     expect(strict.summaryComment).not.toContain("rate limit");
   });
 
+  it("says what would happen to the approval only while approval is on", async () => {
+    expect((await previewPublication(config(), "github")).approval).toBeNull();
+    const requesting = resolveConfig({ global: { output: { ...EVERY_OUTPUT, approval: { enabled: true, requestChanges: true } } } }).config;
+    const approving = await previewPublication(requesting, "github");
+    // The sample's SQL injection blocks the verdict.
+    expect(approving.approval).toEqual({ action: "request_changes", reasons: ["1 finding at or above critical"] });
+    // GitLab has no request for changes, so publishing only withdraws there.
+    expect((await previewPublication(requesting, "gitlab")).approval).toEqual({ action: "withdraw", reasons: ["1 finding at or above critical"] });
+  });
+
   it("shows each optional walkthrough part only while its setting is on", async () => {
     const all = await previewPublication(config(), "github");
     expect(all.summaryComment).toContain("```mermaid\nsequenceDiagram");

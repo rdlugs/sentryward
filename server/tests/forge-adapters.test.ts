@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { GitHubAdapter, quoteCodeSearchTerm } from "../src/review/forge/github.ts";
 import { GitHubApp, githubApiBase } from "../src/review/forge/githubApp.ts";
 import { GitLabAdapter } from "../src/review/forge/gitlab.ts";
+import { ForgeCache } from "../src/review/forge/cache.ts";
 import { ForgeError } from "../src/review/forge/http.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 
@@ -70,6 +71,48 @@ describe("GitHubAdapter", () => {
     ]);
     expect(change.files[0]!.hunks[0]!.addedLines).toEqual([2]);
     expect(calls[0]!.headers.authorization).toBe("Bearer tok");
+  });
+
+  it("marks the files as truncated when the PR has more than were listed", async () => {
+    const pull = (changed_files: number) => ({
+      url: /\/repos\/acme\/web\/pulls\/42$/,
+      body: { title: "t", body: null, html_url: "h", changed_files, base: { sha: "b", ref: "main" }, head: { sha: "h", ref: "f" } },
+    });
+    const files = { url: /\/pulls\/42\/files\?per_page=100$/, body: [{ filename: "src/a.ts", status: "modified", patch: PATCH, changes: 1 }] };
+    expect((await adapter([pull(3001), files]).adapter.getChange("acme/web", 42)).filesTruncated).toBe(true);
+    expect((await adapter([pull(1), files]).adapter.getChange("acme/web", 42)).filesTruncated).toBeUndefined();
+  });
+
+  // The files endpoint lists the PR as it is when asked, so a push between
+  // reading the PR and listing its files would pair new files with old shas.
+  describe("when the pull request moves while its files are listed", () => {
+    const pull = (head: string, times?: number) => ({
+      url: /\/repos\/acme\/web\/pulls\/42$/,
+      body: { title: "t", body: null, html_url: "h", base: { sha: "b", ref: "main" }, head: { sha: head, ref: "f" } },
+      ...(times ? { times } : {}),
+    });
+    const files = (filename: string, times?: number) => ({
+      url: /\/pulls\/42\/files\?per_page=100$/,
+      body: [{ filename, status: "modified", patch: PATCH, changes: 1 }],
+      ...(times ? { times } : {}),
+    });
+
+    it("reads it again and neither returns nor caches the listing it moved under", async () => {
+      const cache = new ForgeCache();
+      // The first read sees h1, the listing is already h2's, and the PR is
+      // read again (h2) after it; the retry then agrees with itself.
+      const { adapter: gh } = adapter([pull("h1", 1), pull("h2"), files("new.ts", 1), files("newer.ts")]);
+      const change = await gh.getChange("acme/web", 42, cache);
+      expect(change.forgeRef.headSha).toBe("h2");
+      expect(change.files.map((f) => f.path)).toEqual(["newer.ts"]);
+      // Only the verified listing (h2's) was cached.
+      expect(cache.size).toBe(1);
+    });
+
+    it("fails when it moves again on the retry", async () => {
+      const { adapter: gh } = adapter([pull("h1", 1), pull("h2", 1), pull("h3", 1), pull("h4"), files("a.ts")]);
+      await expect(gh.getChange("acme/web", 42)).rejects.toThrow(/kept moving while its files were being read/);
+    });
   });
 
   it("returns null for a file missing at a ref", async () => {
@@ -153,7 +196,7 @@ describe("GitHubAdapter", () => {
     const { adapter: gh, calls } = adapter([
       { url: /\/pulls\/42$/, body: { title: "t", state: "open", base: { sha: "b", ref: "main" }, head: { sha: "h", ref: "f" } } },
     ]);
-    expect(await gh.getChangeHead("acme/web", 42)).toEqual({ headSha: "h", baseSha: "b", title: "t", state: "open", isDraft: false });
+    expect(await gh.getChangeHead("acme/web", 42)).toEqual({ headSha: "h", baseSha: "b", baseRef: "main", title: "t", state: "open", isDraft: false });
     expect(calls).toHaveLength(1);
   });
 
@@ -671,18 +714,64 @@ describe("GitLabAdapter", () => {
 
   it("reads a merge request's head and base, falling back to its target branch", async () => {
     let refs: unknown = { base_sha: "b", start_sha: "s", head_sha: "h" };
+    let sha = "h";
     const { adapter: gl } = adapter([
       {
         url: /\/merge_requests\/7$/,
         get body() {
-          return { iid: 7, title: "t", state: "opened", sha: "h", target_branch: "main", diff_refs: refs };
+          return { iid: 7, title: "t", state: "opened", sha, target_branch: "main", diff_refs: refs };
         },
       },
     ]);
-    expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", baseSha: "b", state: "open" });
+    const current = await gl.getChangeHead("team/app", 7);
+    expect(current).toMatchObject({ headSha: "h", baseSha: "b", baseRef: "main", state: "open" });
+    expect(current.liveHeadSha).toBeUndefined();
+    // Pushed, but not diffed yet: the diff's head stays, the live one beside it.
+    sha = "h2";
+    expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", liveHeadSha: "h2" });
     // Just opened: GitLab has not computed the diff yet.
     refs = null;
+    sha = "h";
     expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", baseSha: "main" });
+  });
+
+  it("marks the files as truncated when GitLab counted more than it listed", async () => {
+    const mr = (changes_count: string) => ({
+      url: /\/merge_requests\/7$/,
+      body: {
+        iid: 7,
+        title: "t",
+        state: "opened",
+        sha: "h",
+        source_branch: "f",
+        target_branch: "main",
+        web_url: "w",
+        changes_count,
+        diff_refs: { base_sha: "b", start_sha: "s", head_sha: "h" },
+      },
+    });
+    const diffs = {
+      url: /\/merge_requests\/7\/diffs\?per_page=100$/,
+      body: [{ old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: PATCH }],
+    };
+    expect((await adapter([mr("1000+"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBe(true);
+    expect((await adapter([mr("2"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBe(true);
+    expect((await adapter([mr("1"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBeUndefined();
+  });
+
+  it("carries the MR's live sha beside a diff GitLab has not caught up with", async () => {
+    const mr = (sha: string) => ({
+      url: /\/merge_requests\/7$/,
+      body: { iid: 7, title: "t", state: "opened", sha, source_branch: "f", target_branch: "main", web_url: "w", diff_refs: { base_sha: "b", start_sha: "s", head_sha: "h" } },
+    });
+    const diffs = {
+      url: /\/merge_requests\/7\/diffs\?per_page=100$/,
+      body: [{ old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: PATCH }],
+    };
+    const lagging = await adapter([mr("h2"), diffs]).adapter.getChange("team/app", 7);
+    expect(lagging.forgeRef.headSha).toBe("h");
+    expect(lagging.liveHeadSha).toBe("h2");
+    expect((await adapter([mr("h"), diffs]).adapter.getChange("team/app", 7)).liveHeadSha).toBeUndefined();
   });
 
   it("lists open merge requests by iid", async () => {
@@ -832,6 +921,26 @@ describe("GitLabAdapter", () => {
       ["big.sql", "added", true],
     ]);
     expect(calls.map((c) => c.url.replace(/^.*\/merge_requests\/7/, ""))).toEqual(["", "/diffs?per_page=100", "/changes"]);
+    expect(change.filesTruncated).toBeUndefined();
+  });
+
+  it("marks the files truncated when /changes reports overflow without a count", async () => {
+    const { adapter: gl } = adapter([
+      MR_7,
+      { url: /\/merge_requests\/7\/diffs\?per_page=100$/, status: 404, body: { message: "404 Not Found" } },
+      {
+        url: /\/merge_requests\/7\/changes$/,
+        body: {
+          overflow: true,
+          changes: [{ old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: PATCH }],
+        },
+      },
+    ]);
+
+    const change = await gl.getChange("team/app", 7);
+
+    expect(change.files).toHaveLength(1);
+    expect(change.filesTruncated).toBe(true);
   });
 
   it("does not fall back on non-404 diff errors", async () => {

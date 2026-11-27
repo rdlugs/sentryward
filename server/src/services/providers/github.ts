@@ -20,6 +20,7 @@ import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
 import { getGitHubApp, githubConfigured } from "../githubApp.ts";
 import { recordReviewComment } from "../reviewComments.ts";
 import { recordThreadReply } from "../threadReplies.ts";
+import { withdrawOnRetarget } from "./retarget.ts";
 import type { HeaderReader, ProviderDefinition, RepoWithConnection, WebhookOutcome } from "./types.ts";
 import { decryptToken } from "./token.ts";
 
@@ -44,13 +45,15 @@ export interface GitHubPayload {
   pull_request?: {
     number: number;
     head: { sha: string };
-    base?: { ref: string };
+    base?: { ref: string; sha?: string };
     user?: { id: number };
     // Set on "closed": merged tells a merge from a close.
     merged?: boolean;
     merged_at?: string | null;
     closed_at?: string | null;
   };
+  // "edited" only: what changed. base is set when the target branch was.
+  changes?: { base?: unknown };
   issue?: { number: number; pull_request?: unknown };
   comment?: {
     id?: number;
@@ -140,9 +143,16 @@ function isPullRequestClose(event: string | undefined, payload: GitHubPayload): 
   return event === "pull_request" && payload.action === "closed";
 }
 
+// The target branch was changed. This queues no review, but an approval given
+// for the old target must not go on counting for the new one.
+function isPullRequestRetarget(event: string | undefined, payload: GitHubPayload): boolean {
+  return event === "pull_request" && payload.action === "edited" && Boolean(payload.pull_request) && Boolean(payload.changes?.base);
+}
+
 export function isGithubReviewEvent(event: string | undefined, payload: GitHubPayload): boolean {
   return (
     isPullRequestPush(event, payload) ||
+    isPullRequestRetarget(event, payload) ||
     isPullRequestClose(event, payload) ||
     isReviewCommand(event, payload) ||
     // Covers thread replies too.
@@ -173,6 +183,10 @@ export async function handleGithubEvent(
       closedAt: at ? new Date(at) : null,
     });
     return { body: { outcome: "closed", cancelled } };
+  }
+
+  if (isPullRequestRetarget(event, payload)) {
+    return withdrawOnRetarget(adapterFor(repo.connection), repo, payload.pull_request!.number);
   }
 
   if (isPullRequestPush(event, payload)) {

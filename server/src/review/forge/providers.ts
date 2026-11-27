@@ -27,6 +27,9 @@ export interface ForgeInfo {
   // the first and must not reinterpret the second, whose text can look like a
   // path.
   symlinkReadsAs: "target" | "content";
+  // Whether a review can request changes; elsewhere a request for changes
+  // only withdraws the approval.
+  requestChanges: boolean;
 }
 
 function pathMatcher(pattern: RegExp) {
@@ -53,6 +56,7 @@ export const FORGE_INFO: Record<ForgeProvider, ForgeInfo> = {
     suggestionInfo: (startLine, endLine) => `suggestion:-0+${endLine - startLine}`,
     commitUrl: (changeUrl, sha) => `${changeUrl}/diffs?commit_id=${sha}`,
     symlinkReadsAs: "target",
+    requestChanges: false,
   },
   github: {
     name: "GitHub",
@@ -63,6 +67,7 @@ export const FORGE_INFO: Record<ForgeProvider, ForgeInfo> = {
     suggestionInfo: () => "suggestion",
     commitUrl: (changeUrl, sha) => `${changeUrl}/commits/${sha}`,
     symlinkReadsAs: "content",
+    requestChanges: true,
   },
 };
 

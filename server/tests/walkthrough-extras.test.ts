@@ -322,7 +322,8 @@ describe("issue lookups", () => {
 
     expect(again.files.map((file) => file.path)).toEqual(["a.ts"]);
     expect(stub.calls.filter((call) => call.url.includes("/files"))).toHaveLength(2);
-    // The pull itself, with its title and labels, is always read fresh.
-    expect(stub.calls.filter((call) => call.url.endsWith("/pulls/1"))).toHaveLength(3);
+    // The pull itself, with its title and labels, is always read fresh, and
+    // read again after each listing that is fetched, to check it did not move.
+    expect(stub.calls.filter((call) => call.url.endsWith("/pulls/1"))).toHaveLength(5);
   });
 });

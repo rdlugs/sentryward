@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import request from "supertest";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
+import { holdChangeLock } from "../src/lib/changeLock.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { applyPendingMerges } from "../src/services/backlog.ts";
@@ -435,6 +436,154 @@ describe("POST /api/webhooks/github", () => {
     expect(await prisma.reviewJob.count()).toBe(0);
   });
 
+  // The pull request as it stands after the retarget.
+  const retargetedPull = {
+    url: /\/repos\/acme\/web\/pulls\/42$/,
+    body: { title: "t", state: "open", base: { sha: "newbase", ref: "release" }, head: { sha: "sha1", ref: "f" } },
+  };
+
+  it("withdraws its approval, and queues nothing, when the pull request is retargeted", async () => {
+    const repo = await githubRepo();
+    const pull = retargetedPull;
+    const token = {
+      method: "POST",
+      url: /\/app\/installations\/55\/access_tokens$/,
+      body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+    };
+    const reviews = {
+      url: /\/repos\/acme\/web\/pulls\/42\/reviews\?per_page=100$/,
+      body: [
+        { id: 2, state: "APPROVED", commit_id: "sha1", user: { login: "sentryward-test[bot]" } },
+        { id: 3, state: "CHANGES_REQUESTED", commit_id: "sha1", user: { login: "sentryward-test[bot]" } },
+        { id: 4, state: "APPROVED", commit_id: "sha1", user: { login: "alice" } },
+      ],
+    };
+    const stub = fetchStub([token, pull, reviews, { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    // The last review approved the old target.
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId: repo.id,
+        number: 42,
+        headSha: "sha1",
+        baseSha: "old",
+        trigger: "manual",
+        status: "completed",
+        finishedAt: new Date(),
+        result: { change: { baseRef: "main" } },
+        publication: { approval: { action: "approve", state: "approved", reasons: [] } },
+      },
+    });
+    const retarget = { ...prEvent("edited"), changes: { base: { ref: { from: "main" }, sha: { from: "old" } } } };
+
+    const res = await sendGithub("pull_request", retarget);
+
+    expect(res.body.outcome).toBe("approval_withdrawn");
+    // Only its own approval: its request for changes and alice's approval stay.
+    expect(stub.calls.filter((c) => c.method === "PUT").map((c) => c.url)).toEqual([expect.stringMatching(/reviews\/2\/dismissals$/)]);
+    expect(await prisma.reviewJob.count()).toBe(1);
+
+    // An edit that leaves the target alone (a title, say) is not a retarget.
+    expect((await sendGithub("pull_request", { ...prEvent("edited"), changes: { title: { from: "x" } } })).body.outcome).toBe("ignored");
+  });
+
+  it("fails the delivery when withdrawing on a retarget fails, so it can be redelivered", async () => {
+    await githubRepo();
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([
+        {
+          method: "POST",
+          url: /\/app\/installations\/55\/access_tokens$/,
+          body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        },
+        retargetedPull,
+        { url: /\/pulls\/42\/reviews\?per_page=100$/, status: 502, body: { message: "Bad Gateway" } },
+      ]).fetch,
+    );
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await sendGithub("pull_request", { ...prEvent("edited"), changes: { base: { ref: { from: "main" } } } });
+    quiet.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(res.body.outcome).toBe("failed");
+  });
+
+  // A late or redelivered retarget arrives after a review already settled the
+  // approval for the new target: that approval is the review's, so it stays.
+  it("keeps an approval the last review gave for the retargeted change as it stands", async () => {
+    const repo = await githubRepo();
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId: repo.id,
+        number: 42,
+        headSha: "sha1",
+        baseSha: "newbase",
+        trigger: "manual",
+        status: "completed",
+        finishedAt: new Date(),
+        result: { change: { baseRef: "release" } },
+        publication: { approval: { action: "approve", state: "approved", reasons: [] } },
+      },
+    });
+    const stub = fetchStub([
+      {
+        method: "POST",
+        url: /\/app\/installations\/55\/access_tokens$/,
+        body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      },
+      retargetedPull,
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    const res = await sendGithub("pull_request", { ...prEvent("edited"), changes: { base: { ref: { from: "main" } } } });
+
+    expect(res.body.outcome).toBe("approval_current");
+    expect(stub.calls.filter((c) => c.method === "PUT")).toEqual([]);
+  });
+
+  // A review of the new target that approves while the delivery is being
+  // handled holds the approval lock until its job is stored: the delivery
+  // waits for it and then finds its record, rather than deciding on the state
+  // before the approval and withdrawing it after.
+  it("waits for a run writing its approval and keeps the approval that run settled", async () => {
+    const repo = await githubRepo();
+    const stub = fetchStub([
+      {
+        method: "POST",
+        url: /\/app\/installations\/55\/access_tokens$/,
+        body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      },
+      retargetedPull,
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const lock = await holdChangeLock("approval", repo.id, 42, { timeoutMs: 10_000 });
+
+    const pending = Promise.resolve(sendGithub("pull_request", { ...prEvent("edited"), changes: { base: { ref: { from: "main" } } } }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Nothing read the change while the run held the lock.
+    expect(stub.calls.filter((c) => /\/pulls\/42$/.test(c.url))).toEqual([]);
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId: repo.id,
+        number: 42,
+        headSha: "sha1",
+        baseSha: "newbase",
+        trigger: "manual",
+        status: "completed",
+        finishedAt: new Date(),
+        result: { change: { baseRef: "release" } },
+        publication: { approval: { action: "approve", state: "approved", reasons: [] } },
+      },
+    });
+    await lock.release();
+
+    const res = await pending;
+    expect(res.body.outcome).toBe("approval_current");
+    expect(stub.calls.filter((c) => c.method === "PUT")).toEqual([]);
+  });
+
   it("detaches an uninstalled installation but keeps its review history", async () => {
     const repo = await githubRepo();
     await prisma.reviewJob.create({ data: { repositoryId: repo.id, number: 42, headSha: "sha1", trigger: "manual" } });
@@ -638,6 +787,51 @@ describe("POST /api/webhooks/gitlab/:repoId", () => {
         .outcome,
     ).toBe("queued");
     expect(await prisma.reviewJob.count({ where: { status: { not: "superseded" } } })).toBe(1);
+  });
+
+  const gitlabRetargetRoutes = [
+    { url: /\/api\/v4\/user$/, body: { username: "bot", bot: true } },
+    {
+      url: /\/projects\/team%2Fapp\/merge_requests\/7$/,
+      body: { iid: 7, title: "t", state: "opened", sha: "glsha", target_branch: "release", diff_refs: { base_sha: "b", start_sha: "b", head_sha: "glsha" } },
+    },
+    { url: /\/projects\/team%2Fapp\/merge_requests\/7\/approvals$/, body: { approved_by: [{ user: { username: "bot" } }] } },
+    { method: "POST", url: /\/projects\/team%2Fapp\/merge_requests\/7\/unapprove$/, body: {} },
+  ];
+
+  it("reviews a merge request retargeted and marked ready in one update, and still unapproves", async () => {
+    const repo = await gitlabRepo();
+    const stub = fetchStub(gitlabRetargetRoutes);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    const res = await sendGitlab(repo.id, "Merge Request Hook", {
+      ...mrEvent("update"),
+      changes: { target_branch: { previous: "main", current: "release" }, draft: { previous: true, current: false } },
+    });
+
+    expect(res.body.outcome).toBe("queued");
+    expect(stub.calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual([expect.stringMatching(/\/unapprove$/)]);
+    expect(await prisma.reviewJob.count()).toBe(1);
+  });
+
+  it("unapproves when the merge request is retargeted, and still reviews commits pushed with it", async () => {
+    const repo = await gitlabRepo();
+    const stub = fetchStub(gitlabRetargetRoutes);
+    vi.stubGlobal("fetch", stub.fetch);
+    const changes = { target_branch: { previous: "main", current: "release" } };
+
+    const res = await sendGitlab(repo.id, "Merge Request Hook", { ...mrEvent("update"), changes });
+
+    expect(res.body.outcome).toBe("approval_withdrawn");
+    expect(stub.calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual([expect.stringMatching(/\/unapprove$/)]);
+    expect(await prisma.reviewJob.count()).toBe(0);
+
+    const pushed = await sendGitlab(repo.id, "Merge Request Hook", {
+      ...mrEvent("update", { oldrev: "x", last_commit: { id: "next" } }),
+      changes,
+    });
+    expect(pushed.body.outcome).toBe("queued");
+    expect(stub.calls.filter((c) => c.url.endsWith("/unapprove"))).toHaveLength(2);
   });
 
   it("stores the merge request's author with the queued job", async () => {

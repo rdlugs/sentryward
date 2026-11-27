@@ -1,11 +1,12 @@
 import type { Config } from "../config/schema.ts";
 import type { ChangeSet, ReviewResult } from "../core/models.ts";
-import type { ForgePublisher, PostedComment } from "../forge/types.ts";
+import type { ApprovalAction, ApprovalState, ForgePublisher, PostedComment } from "../forge/types.ts";
 import { inlineLimits, inlineSelection } from "../core/buckets.ts";
 import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
+import { approvalBody, approvalDecision, approvalManaged, forgeApprovalDecision } from "./approve.ts";
 import { inlineComments } from "./inline.ts";
-import { labelChanges } from "./labels.ts";
+import { labelChanges, labelsAfter } from "./labels.ts";
 import { commitStatus } from "./status.ts";
 
 export interface PublishInput {
@@ -23,6 +24,9 @@ export interface PublishInput {
   targetUrl?: string;
   // Asked before each step; false stops publishing (the job was cancelled).
   proceed?: () => Promise<boolean>;
+  // Awaited just before the approval is written; the worker takes the change's
+  // approval lock here (services/providers/retarget.ts says why).
+  beforeApproval?: () => Promise<void>;
 }
 
 export interface Publication {
@@ -40,6 +44,12 @@ export interface Publication {
   threadsReopened?: string[];
   // Threads that could not be moved; they are retried on the next run.
   threadsFailed?: string[];
+  // What became of Sentryward's approval, when output.approval is on: the
+  // forge's answer, why the change was not approved, and the forge's note
+  // when it refused. `action` is what was asked of the forge, so a later
+  // skipped run can tell whether this run approved its head (rows written
+  // before it was recorded lack it).
+  approval?: { action?: ApprovalAction["action"]; state: ApprovalState; reasons: string[]; note?: string };
   // Publishing stopped partway because proceed() said so.
   stopped?: boolean;
   // ReviewResult.heldBack as this run decided it; the caller stores it in the
@@ -52,7 +62,7 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// Inline comments, the summary and the commit status are published
+// Inline comments, the summary, the commit status and the approval are published
 // independently: one failing never stops the others, and each failure is
 // recorded rather than thrown. A cancel is checked between steps: a write
 // already under way still finishes, but nothing after it is sent.
@@ -174,15 +184,20 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
     if (summary) publication.errors.push(`Description summary failed: ${message(err)}`);
   });
 
+  // The labels the change carries after this run, for the approval policy.
+  let labels = changeSet.labels ?? [];
   if (result.walkthrough) {
-    const { add, remove } = labelChanges(result.walkthrough, config.output);
+    const changes = labelChanges(result.walkthrough, config.output);
+    const { add, remove } = changes;
     if (add.length || remove.length) {
       if (await halted()) return publication;
       try {
         await publisher.setLabels(ref, add, remove);
         publication.labels = add;
+        labels = labelsAfter(labels, changes);
       } catch (err) {
         publication.errors.push(`Labels failed: ${message(err)}`);
+        labels = labelsAfter(labels, changes, false);
       }
     }
   }
@@ -195,6 +210,37 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
       publication.statusState = status.state;
     } catch (err) {
       publication.errors.push(`Commit status failed: ${message(err)}`);
+    }
+  }
+
+  // Last, so the summary and status already explain the decision when it
+  // lands. A refusal (the forge's own rules) is a note, not a failure.
+  const decision = approvalDecision(config, result, { ...changeSet, labels });
+  if (decision) {
+    if (await halted()) return publication;
+    const action = forgeApprovalDecision(ref.provider, decision);
+    // The labels above were read before the review: someone may have added a
+    // hold label since. The adapter checks them on its own reads of the change
+    // just before and after the write, the closest it can get, and withdraws
+    // when one is there.
+    const holdLabels = config.output.approval.blockLabels;
+    try {
+      await input.beforeApproval?.();
+      const outcome = await publisher.setApproval(ref, {
+        action: action.action,
+        body: approvalBody(result, action, input.targetUrl),
+        ...(changeSet.baseRef ? { baseRef: changeSet.baseRef } : {}),
+        ...(action.action === "approve" && holdLabels.length ? { holdLabels } : {}),
+      });
+      publication.approval =
+        outcome.heldLabel !== undefined
+          ? { action: "withdraw", state: outcome.state, reasons: [`The change has the label "${outcome.heldLabel}"`] }
+          : { action: action.action, state: outcome.state, reasons: action.reasons, ...(outcome.note ? { note: outcome.note } : {}) };
+    } catch (err) {
+      // The attempted action is kept: a later skipped run must not keep an
+      // approval this review decided to withdraw (worker/staleApproval.ts).
+      publication.approval = { action: action.action, state: "failed", reasons: action.reasons };
+      publication.errors.push(`Approval failed: ${message(err)}`);
     }
   }
 
@@ -273,6 +319,7 @@ export function publishes(config: Config): boolean {
     output.postCheck ||
     output.walkthrough ||
     output.blastRadiusLabel ||
-    output.effortLabel
+    output.effortLabel ||
+    approvalManaged(config)
   );
 }

@@ -173,6 +173,35 @@ export const REVIEW_TRIGGERS = ["manual", "published", "all"] as const;
 export const SUMMARY_TRIGGERS = ["manual", "published"] as const;
 export const HIGH_LEVEL_SUMMARY_PLACEMENTS = ["description", "walkthrough"] as const;
 
+export const APPROVAL_WHEN = ["pass", "no_findings"] as const;
+
+// Turning a clean review into a forge approval (publish/approve.ts). Off by
+// default, and it never merges. Among the dashboard layers lists replace like
+// any other list; the repository file and the trigger can only tighten
+// (resolve.ts holdApproval), so a repository cannot loosen the workspace's
+// policy. Policies only ever hold an approval back: a change that matches one
+// gets no approval, and an earlier one is withdrawn.
+const approvalShape = {
+  enabled: z.boolean(),
+  // "pass" approves whenever the verdict passes (nothing at or above blockOn,
+  // as the commit status says); "no_findings" only a review with no findings.
+  when: z.enum(APPROVAL_WHEN),
+  // Request changes on a blocked verdict instead of only withdrawing an
+  // approval. GitHub only: GitLab has no such review state.
+  requestChanges: z.boolean(),
+  // Globs, matched like ignore_paths: a change touching any of them is left
+  // for people to approve.
+  blockPaths: z.array(z.string().trim().min(1).max(200)).max(50),
+  // When not empty, only changes by these logins are approved.
+  onlyAuthors: z.array(z.string().trim().min(1).max(200)).max(50),
+  skipAuthors: z.array(z.string().trim().min(1).max(200)).max(50),
+  blockLabels: z.array(z.string().trim().min(1).max(200)).max(50),
+  // Risk kinds (context/risk.ts) read from the diff, without a model call.
+  blockOnRisk: z
+    .array(z.enum(RISK_KINDS))
+    .refine((list) => new Set(list).size === list.length, "List each risk kind once"),
+};
+
 const outputShape = {
   walkthrough: z.boolean(),
   postInline: z.boolean(),
@@ -224,6 +253,7 @@ const outputShape = {
   // the comment text: the model still estimates both, for the native labels.
   walkthroughLabels: z.boolean(),
   walkthroughBlastRadius: z.boolean(),
+  approval: z.strictObject(approvalShape),
 };
 
 // Phrases, logins, labels and branch names; matching rules are in filters.ts.
@@ -449,6 +479,27 @@ const ruleGuardSchema = z.strictObject({
 });
 export type RuleGuard = z.infer<typeof ruleGuardSchema>;
 
+// Set by resolution only, like ruleGuard. The verdict follows the merged
+// review.blockOn, which a repository file or trigger may loosen for the review
+// itself; an approval still answers to the dashboard's blocking threshold
+// (publish/approve.ts). `narrowed` lists the settings such a layer loosened
+// that decide which findings exist at all (a higher floor, fewer categories,
+// more ignored paths...): no threshold can recover a finding that was never
+// reported, so any of them holds the approval back. Present only when the
+// dashboard is the stricter one or something was narrowed.
+const approvalGuardSchema = z.strictObject({
+  blockOn: severitySchema,
+  toolFindingsBlock: z.boolean(),
+  narrowed: z.array(z.string()),
+});
+export type ApprovalGuard = z.infer<typeof approvalGuardSchema>;
+
+// Set by resolution only, like the guards: the layer that turned approval off
+// while the dashboard layers have it on. A repository's veto is a per-run
+// decision, not the operator switching the feature off, so an approval given
+// before it is withdrawn rather than left standing (publish/approve.ts).
+export const APPROVAL_VETO_LAYERS = ["repoFile", "trigger"] as const;
+
 const topLevelShape = {
   version: z.literal(1),
   profile: profileNameSchema,
@@ -468,6 +519,8 @@ const topLevelShape = {
 export const configSchema = z.strictObject({
   ...topLevelShape,
   ruleGuard: ruleGuardSchema.optional(),
+  approvalGuard: approvalGuardSchema.optional(),
+  approvalVeto: z.enum(APPROVAL_VETO_LAYERS).optional(),
   llm: z.strictObject(dashboardLlmShape),
   review: z.strictObject(reviewShape),
   output: z.strictObject(outputShape),
@@ -488,7 +541,9 @@ export const configOverrideSchema = z
         agentFiles: z.strictObject(agentFilesShape).partial(),
       })
       .partial(),
-    output: z.strictObject(outputShape).partial(),
+    output: z
+      .strictObject({ ...outputShape, approval: z.strictObject(approvalShape).partial() })
+      .partial(),
     triggers: z.strictObject(triggersShape).partial(),
   })
   .partial();
@@ -630,6 +685,16 @@ export const DEFAULT_CONFIG: Config = {
     highLevelSummaryInstructions: "",
     walkthroughLabels: false,
     walkthroughBlastRadius: true,
+    approval: {
+      enabled: false,
+      when: "pass",
+      requestChanges: false,
+      blockPaths: [],
+      onlyAuthors: [],
+      skipAuthors: [],
+      blockLabels: [],
+      blockOnRisk: [],
+    },
   },
   triggers: {
     review: "published",

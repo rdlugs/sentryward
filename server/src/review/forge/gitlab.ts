@@ -2,7 +2,7 @@ import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
 import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
-import { ForgeError, ForgeHttp, isNotFound, type FetchLike } from "./http.ts";
+import { ForgeError, ForgeHttp, isAmbiguousWriteError, isNotFound, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
 import { MAX_CANDIDATE_ISSUES, MAX_LINKED_ISSUES } from "./issues.ts";
 import {
@@ -18,6 +18,8 @@ import {
   STATUS_CONTEXT,
   MAX_OPEN_CHANGE_PAGES,
   MAX_CODE_SEARCH_RESULTS,
+  type ApprovalAction,
+  type ApprovalOutcome,
   type ChangeDetails,
   type ChangeHead,
   type ForgeUser,
@@ -85,6 +87,9 @@ interface GlMergeRequest {
   web_url: string;
   author?: GlUser;
   labels?: string[];
+  // A string, "1000+" once GitLab stops counting; the diffs listing also
+  // stops (at the page cap, or GitLab's own file limit).
+  changes_count?: string | null;
   source_branch: string;
   target_branch: string;
   diff_refs: { base_sha: string; start_sha: string; head_sha: string } | null;
@@ -179,6 +184,59 @@ function toRepo(project: GlProject): ForgeRepo {
   };
 }
 
+// The MR's sha moves on a push at once, its diff refs only once GitLab has
+// diffed the new commits: until then the diff (and the head it names) is the
+// previous one, and the live head is carried beside it.
+function liveHead(mr: Pick<GlMergeRequest, "sha" | "diff_refs">): { liveHeadSha?: string } {
+  return mr.diff_refs && mr.sha && mr.sha !== mr.diff_refs.head_sha ? { liveHeadSha: mr.sha } : {};
+}
+
+// GitLab counts the changed files itself; fewer listed, or a count it gave up
+// on, means the listing is only part of the change.
+function filesTruncated(count: string | null | undefined, listed: number): boolean {
+  if (!count) return false;
+  if (count.endsWith("+")) return true;
+  const total = Number(count);
+  return Number.isFinite(total) && listed < total;
+}
+
+const GL_MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The merge request moved to a newer commit during the review; the next review decides",
+};
+
+// A retarget or a moved base queues no review (only new commits and reopening
+// do; a retarget webhook only withdraws), so the note says a rerun is needed
+// rather than leaving it to a next review.
+const GL_BASE_MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The merge request's target branch moved or was changed during the review; rerun the review to decide on an approval",
+};
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Whether the merge request still is what the review saw: its head, the diff
+// refs its diff was read against, and its target branch. Without diff refs it
+// cannot be confirmed, which counts as moved. GitLab prepares diff versions
+// asynchronously, so after a push `sha` (the source branch head) can already
+// be newer while diff_refs still describe the previous version: both count.
+function glMovedFrom(mr: GlMergeRequest, ref: ForgeRef, baseRef: string | undefined): ApprovalOutcome | undefined {
+  const refs = mr.diff_refs;
+  if (mr.sha !== ref.headSha || (refs && refs.head_sha !== ref.headSha)) return GL_MOVED;
+  if (!refs || refs.base_sha !== ref.baseSha || refs.start_sha !== ref.startSha || (baseRef !== undefined && mr.target_branch !== baseRef)) {
+    return GL_BASE_MOVED;
+  }
+  return undefined;
+}
+
+// The first hold label the merge request carries, if any.
+function glHeldLabel(mr: GlMergeRequest, holdLabels: string[] | undefined): string | undefined {
+  if (!holdLabels?.length) return undefined;
+  return (mr.labels ?? []).find((name) => holdLabels.includes(name));
+}
+
 function nextPage(res: Response, current: string): string | null {
   const next = res.headers.get("x-next-page");
   if (!next) {
@@ -235,6 +293,8 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   readonly host: string;
   private http: ForgeHttp;
   private selfLogin: string | undefined;
+  // Whether the token acts as a bot user, read once per adapter (setApproval).
+  private actsAsBot: boolean | undefined;
 
   constructor(options: GitLabAdapterOptions) {
     this.selfLogin = options.selfLogin;
@@ -276,13 +336,16 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   // `/changes` (deprecated, still in API v4) returns the same diff objects in
   // one unpaginated response, so fall back to it only on a 404. The MR itself
   // was just fetched, so a 404 here means the route is missing, not the MR.
-  private async mergeRequestDiffs(base: string): Promise<GlDiff[]> {
+  // `/changes` stops listing past GitLab's diff limits and says so only with
+  // `overflow`: changes_count is optional, so that flag is kept rather than
+  // trusting the count alone to show the listing is partial.
+  private async mergeRequestDiffs(base: string): Promise<{ diffs: GlDiff[]; overflow: boolean }> {
     try {
-      return await this.http.paginate<GlDiff>(`${base}/diffs?per_page=100`, nextPage);
+      return { diffs: await this.http.paginate<GlDiff>(`${base}/diffs?per_page=100`, nextPage), overflow: false };
     } catch (err) {
       if (!isNotFound(err)) throw err;
-      const mr = await this.http.json<{ changes?: GlDiff[] }>(`${base}/changes`);
-      return mr.changes ?? [];
+      const mr = await this.http.json<{ changes?: GlDiff[]; overflow?: boolean }>(`${base}/changes`);
+      return { diffs: mr.changes ?? [], overflow: mr.overflow === true };
     }
   }
 
@@ -294,9 +357,10 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     }
     const refs = mr.diff_refs;
     // The diffs of an MR are fixed by its diff refs.
-    const diffs = await cached(
+    // The cached value carries the overflow flag; the key changed with its shape.
+    const { diffs, overflow } = await cached(
       cache,
-      cacheKey("gitlab-diffs", this.host, project, number, refs.base_sha, refs.start_sha, refs.head_sha),
+      cacheKey("gitlab-diffs-v2", this.host, project, number, refs.base_sha, refs.start_sha, refs.head_sha),
       () => this.mergeRequestDiffs(base),
     );
 
@@ -320,6 +384,8 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       authorId: mr.author?.id === undefined ? undefined : String(mr.author.id),
       labels: mr.labels ?? [],
       files: diffs.map(toChangedFileFromGl),
+      ...(overflow || filesTruncated(mr.changes_count, diffs.length) ? { filesTruncated: true } : {}),
+      ...liveHead(mr),
     };
   }
 
@@ -328,6 +394,8 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return {
       headSha: mr.diff_refs?.head_sha ?? mr.sha,
       baseSha: mr.diff_refs?.base_sha ?? mr.target_branch,
+      baseRef: mr.target_branch,
+      ...liveHead(mr),
       title: mr.title,
       state: mr.state === "merged" ? "merged" : mr.state === "closed" ? "closed" : "open",
       isDraft: mr.draft ?? mr.work_in_progress ?? false,
@@ -715,6 +783,146 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     });
   }
 
+  // GitLab approvals carry no text and have no "request changes", so a request
+  // for changes only withdraws Sentryward's approval; the summary comment says
+  // why. The approval is pinned to the head sha, so a push racing the review
+  // fails it rather than approving commits the review never saw; the target
+  // branch and diff refs are compared around the write (below). Approvals
+  // record no commit, so ApprovalAction.keepAt cannot apply: without history
+  // a withdrawal goes ahead, which errs on the side of no approval.
+  async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
+    // Without its own login it cannot see its approval, so it would approve
+    // again on every run and never withdraw.
+    if (!this.selfLogin) {
+      return {
+        state: "refused",
+        note: "Sentryward does not know the connection's GitLab username, so it could not withdraw an approval later",
+      };
+    }
+    // approved_by names the account, not who clicked: on a person's token their
+    // own approval looks exactly like Sentryward's, and a withdrawal would
+    // remove it. Only a bot user (a project or group access token, a service
+    // account) is an identity Sentryward alone acts as.
+    if (!(await this.tokenActsAsBot())) {
+      return {
+        state: "refused",
+        note: "Automatic approval needs a GitLab project or group access token or a service account: this connection acts as a person, so Sentryward could not tell its approval from theirs",
+      };
+    }
+    const mr = this.mergeRequest(ref);
+    const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[]; user_can_approve?: boolean }>(
+      `${mr}/approvals`,
+    );
+    const approved = (approvals.approved_by ?? []).some((entry) => this.isSelfLogin(entry.user.username));
+    if (action.action !== "approve") {
+      if (!approved) return { state: "unchanged" };
+      await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      return { state: "withdrawn" };
+    }
+    // The sha pin covers the head only: a retarget or a recomputed diff would
+    // let an approval stand on a target the review never saw. The merge request
+    // is checked before an approval is reused or posted, and again after.
+    const current = await this.http.json<GlMergeRequest>(mr);
+    // A hold label added since the publisher's own label read: this is the
+    // last read before the write, so it decides, and an approval already
+    // given is withdrawn with it, as the label policy would on a fresh review.
+    const label = glHeldLabel(current, action.holdLabels);
+    if (label !== undefined) {
+      if (!approved) return { state: "unchanged", heldLabel: label };
+      await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      return { state: "withdrawn", heldLabel: label };
+    }
+    const moved = glMovedFrom(current, ref, action.baseRef);
+    // A retarget queues no review, so an earlier approval would go on counting
+    // for a target no review checked: it is withdrawn here. A push during the
+    // review queues its own review, which decides about the approval it finds.
+    // A push GitLab had not diffed when this review read the change never gets
+    // here: it may be the push that queued this very review, so the lag holds
+    // the approval back and the decision is a withdrawal (publish/approve.ts).
+    if (moved === GL_BASE_MOVED && approved) {
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (err) {
+        throw new Error(`The merge request's target branch moved during the review, and withdrawing the earlier approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { ...GL_BASE_MOVED, state: "withdrawn" };
+    }
+    if (moved) return moved;
+    if (approved) return { state: "unchanged" };
+    // GitLab says outright when this account may not approve this MR (the
+    // project prevents author approval, the token opened it, or its role or
+    // the approval rules leave it out). Only that is an expected refusal: a
+    // 401 or 403 from the approve call itself may be a revoked or
+    // under-scoped token, which has to show as an error.
+    if (approvals.user_can_approve === false) {
+      return { state: "refused", note: "GitLab did not let this account approve the merge request" };
+    }
+    try {
+      await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
+    } catch (err) {
+      if (!isAmbiguousWriteError(err)) throw err;
+      // A timeout or a server error does not show the approval was not given;
+      // one that landed gets the same checks as one whose answer arrived.
+      await this.reconcileApproval(mr, err);
+    }
+    let after: ApprovalOutcome | undefined;
+    let unconfirmed: unknown;
+    let afterLabel: string | undefined;
+    try {
+      const reread = await this.http.json<GlMergeRequest>(mr);
+      after = glMovedFrom(reread, ref, action.baseRef);
+      afterLabel = glHeldLabel(reread, action.holdLabels);
+    } catch (err) {
+      unconfirmed = err;
+    }
+    // A hold label that landed between the read above and the write.
+    if (!after && unconfirmed === undefined && afterLabel !== undefined) {
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (err) {
+        throw new Error(`The merge request got the label "${afterLabel}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { state: "withdrawn", heldLabel: afterLabel };
+    }
+    if (after || unconfirmed !== undefined) {
+      // Withdrawn whenever its freshness is not confirmed; a failure throws so
+      // the review shows an error, as on GitHub.
+      const why = unconfirmed !== undefined ? `the merge request could not be re-read (${errorText(unconfirmed)})` : "the merge request moved on during the review";
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (err) {
+        throw new Error(`The approval could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
+      }
+      if (unconfirmed !== undefined) {
+        throw new Error(`Could not confirm the merge request was still at the reviewed commits, so the approval was withdrawn: ${errorText(unconfirmed)}`);
+      }
+      return after!;
+    }
+    return { state: "approved" };
+  }
+
+  // After an approve call with no clear answer: returns when Sentryward's
+  // approval is there (the checks after the write then decide about it), and
+  // rethrows when it is not. When that cannot be read, the approval is
+  // withdrawn blind, erring on the side of no approval.
+  private async reconcileApproval(mr: string, writeError: unknown): Promise<void> {
+    let approved: boolean;
+    try {
+      const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[] }>(`${mr}/approvals`);
+      approved = (approvals.approved_by ?? []).some((entry) => this.isSelfLogin(entry.user.username));
+    } catch (readError) {
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (unapproveError) {
+        throw new Error(
+          `Approving gave no clear answer (${errorText(writeError)}), checking whether it landed failed (${errorText(readError)}), and withdrawing it failed too, so it may stand unchecked: ${errorText(unapproveError)}`,
+        );
+      }
+      throw new Error(`Approving gave no clear answer (${errorText(writeError)}) and checking whether it landed failed, so any approval was withdrawn: ${errorText(readError)}`);
+    }
+    if (!approved) throw writeError;
+  }
+
   // Project hooks need Maintainer access; callers treat a failure as "automatic
   // reviews unavailable" rather than an error.
   async createHook(repo: HookTarget, url: string, token: string): Promise<string> {
@@ -756,6 +964,14 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       if (isNotFound(err)) return 0;
       throw err;
     }
+  }
+
+  private async tokenActsAsBot(): Promise<boolean> {
+    if (this.actsAsBot === undefined) {
+      const user = await this.http.json<{ bot?: boolean }>("/user");
+      this.actsAsBot = user.bot === true;
+    }
+    return this.actsAsBot;
   }
 
   // Whether a user is a bot (a project or group access token, a service

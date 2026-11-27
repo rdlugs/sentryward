@@ -138,6 +138,14 @@ function deps(
     tools?: { annotations: ToolAnnotation[]; warnings: string[] } | Error;
     // What getChange throws instead of answering.
     changeError?: Error;
+    // The labels getChange reports.
+    labels?: string[];
+    // The source branch's live head getChange reports beside a lagging diff
+    // (GitLab's MR sha before its diff refs catch up).
+    liveHead?: string;
+    // How many reads report liveHead before the diff catches up; absent means
+    // every read does.
+    liveHeadReads?: number;
     // A summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
     // Directory listings by "<ref>:<path>"; recorded as "dir:<ref>:<path>".
@@ -148,16 +156,23 @@ function deps(
   const reads: string[] = [];
   const toolReads: string[] = [];
   const published: Published = { inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] };
+  const approvals: { action: string; body: string; headSha: string; keepAt?: string }[] = [];
+  let changeReads = 0;
   const forge = {
     provider: "github" as const,
     getChange: async (_p: string, _n: number, cache?: ForgeCache) => {
       reads.push(cache ? "change:cached" : "change");
+      changeReads += 1;
       if (options.changeError) throw options.changeError;
       const change = makeChangeSet(!cache && options.freshFiles ? options.freshFiles : options.files);
       return {
         ...change,
         title: options.title ?? change.title,
         author: "alice",
+        ...(options.labels ? { labels: options.labels } : {}),
+        ...(options.liveHead && (options.liveHeadReads === undefined || changeReads <= options.liveHeadReads)
+          ? { liveHeadSha: options.liveHead }
+          : {}),
         forgeRef: { ...change.forgeRef, headSha: options.head ?? "newhead", ...(options.base ? { baseSha: options.base } : {}) },
       };
     },
@@ -231,6 +246,10 @@ function deps(
       published.threads.push({ fingerprints, resolved });
       return { updated: fingerprints, failed: [] };
     },
+    setApproval: async (ref: { headSha: string }, action: { action: string; body: string; keepAt?: string }) => {
+      approvals.push({ ...action, headSha: ref.headSha });
+      return { state: action.action === "approve" ? "approved" : "withdrawn" };
+    },
   } as unknown as Forge;
   const model = fakeModel(answers);
   const connections = Object.fromEntries(
@@ -242,7 +261,7 @@ function deps(
     credentialsFor: async () => ({ keys, baseUrls: {}, connections }),
     cache: options.cache,
   };
-  return { runDeps, reads, toolReads, model, published };
+  return { runDeps, reads, toolReads, model, published, approvals };
 }
 
 // These tests call runJob directly, one run after another, so nothing releases
@@ -1626,6 +1645,227 @@ describe("runJob with automatic triggers", () => {
     expect(pending).toBe(0);
     const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(stored.status).toBe("skipped");
+  });
+});
+
+describe("runJob withdraws a stale approval on a skipped run", () => {
+  const approvingSettings = (triggers: Record<string, unknown> = {}) =>
+    prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { output: { approval: { enabled: true } }, triggers: { reviewOnPush: false, ...triggers } } },
+    });
+  const approved = { approval: { action: "approve", state: "approved", reasons: [] } };
+  // The base and target the stub change reports, unless a test moves them.
+  const reviewed = (headSha: string, publication: object | null = approved, target: { baseSha?: string | null; baseRef?: string | null } = {}) =>
+    prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 42,
+        headSha,
+        baseSha: target.baseSha === undefined ? "base" : target.baseSha,
+        trigger: "manual",
+        status: "completed",
+        finishedAt: new Date(),
+        ...(target.baseRef !== null ? { result: { change: { baseRef: target.baseRef ?? "main" } } } : {}),
+        ...(publication ? { publication } : {}),
+      },
+    });
+  async function skippedPush(options: Parameters<typeof deps>[3] = {}, files: Parameters<typeof deps>[0] = {}) {
+    await enqueue({ repositoryId, number: 42, headSha: "newhead", trigger: "webhook", event: "push" });
+    const job = (await claimNext())!;
+    const { runDeps, approvals } = deps(files, {}, undefined, options);
+    await runJob(job, runDeps);
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("skipped");
+    return approvals;
+  }
+
+  it("withdraws when commits arrived since the last review", async () => {
+    await approvingSettings();
+    await reviewed("oldhead");
+    const approvals = await skippedPush();
+    expect(approvals).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        body: expect.stringMatching(/commits since the last review were not reviewed/),
+      },
+    ]);
+  });
+
+  it("leaves it alone when the last review published an approval decision for this head", async () => {
+    await approvingSettings();
+    await reviewed("newhead");
+    expect(await skippedPush()).toEqual([]);
+  });
+
+  // GitLab moves the MR's sha on a push at once but its diff refs later: the
+  // diff fetched still names the reviewed head, while the branch moved on.
+  it("withdraws when the forge's diff still names the reviewed head but the branch moved on", async () => {
+    await approvingSettings();
+    await reviewed("newhead");
+    expect(await skippedPush({ liveHead: "pushed" })).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        body: expect.stringMatching(/had not yet computed the diff of the latest push \(pushed\)/),
+      },
+    ]);
+  });
+
+  // The head was reviewed, but that review left no approval behind (approval
+  // was off, or the step failed or was refused), so a standing approval may
+  // be an older one: the forge decides by the approval's own commit.
+  it("asks the forge, keeping an approval of the head, when the review of this head published no approval", async () => {
+    await approvingSettings();
+    await reviewed("newhead", null);
+    expect(await skippedPush()).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        keepAt: "newhead",
+        body: expect.stringMatching(/no published approval of the current commits is on record/),
+      },
+    ]);
+  });
+
+  it("does not trust an unchanged outcome recorded without its action", async () => {
+    await approvingSettings();
+    await reviewed("newhead", { approval: { state: "unchanged", reasons: [] } });
+    expect(await skippedPush()).toMatchObject([{ action: "withdraw", keepAt: "newhead" }]);
+  });
+
+  // The last review decided to withdraw (or request changes) but the write
+  // failed: the approval standing at this head is the one it meant to remove.
+  it.each(["withdraw", "request_changes"])("withdraws without keeping the head when the last review's %s failed", async (action) => {
+    await approvingSettings();
+    await reviewed("newhead", { approval: { action, state: "failed", reasons: ["1 finding at or above critical"] } });
+    expect(await skippedPush()).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        body: expect.stringMatching(/no published approval of the current commits is on record/),
+      },
+    ]);
+  });
+
+  it("keeps an approval of the head when the last review's failed write was an approval", async () => {
+    await approvingSettings();
+    await reviewed("newhead", { approval: { action: "approve", state: "failed", reasons: [] } });
+    expect(await skippedPush()).toMatchObject([{ action: "withdraw", keepAt: "newhead" }]);
+  });
+
+  // Retention may have pruned the history while the forge approval stands. An
+  // approval records its commit but not its target, so nothing shows it still
+  // covers the change: it is withdrawn, even at this very head.
+  it("withdraws every approval, keeping none of the head, when no review is on record", async () => {
+    await approvingSettings();
+    expect(await skippedPush()).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        body: expect.stringMatching(/no published approval of the current commits is on record/),
+      },
+    ]);
+  });
+
+  // A retarget or a moved base queues no review, so the approval the last
+  // review settled at this head was given for another target.
+  it("withdraws on a head already reviewed when the base or target branch changed since", async () => {
+    await approvingSettings();
+    await reviewed("newhead", approved, { baseSha: "oldbase" });
+    expect(await skippedPush()).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/target branch moved or was changed since the last review/) },
+    ]);
+  });
+
+  it("withdraws on a head already reviewed for another target branch", async () => {
+    await approvingSettings();
+    await reviewed("newhead", approved, { baseRef: "release" });
+    expect(await skippedPush()).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/target branch moved or was changed since the last review/) },
+    ]);
+  });
+
+  it("withdraws, keeping nothing at the head, when the last review recorded no target", async () => {
+    await approvingSettings();
+    await reviewed("newhead", approved, { baseSha: null, baseRef: null });
+    expect(await skippedPush()).toEqual([
+      { action: "withdraw", headSha: "newhead", body: expect.stringMatching(/target branch moved or was changed since the last review/) },
+    ]);
+  });
+
+  it("withdraws for a skip label even on a head already reviewed", async () => {
+    await approvingSettings({ reviewOnPush: true, skipLabels: ["no-bot"] });
+    await reviewed("newhead");
+    const approvals = await skippedPush({ labels: ["no-bot"] });
+    expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/label "no-bot"/) }]);
+  });
+
+  // The repository turned approval off for this change: whatever the last
+  // review settled, no earlier approval stands.
+  it("withdraws on a head already reviewed when the repository file vetoes approval", async () => {
+    await approvingSettings();
+    await reviewed("newhead");
+    const approvals = await skippedPush({}, { "base:.sentryward.yaml": "output:\n  approval:\n    enabled: false\n" });
+    expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/automatic approval is turned off/) }]);
+  });
+
+  // The last review settled the approval against the labels it saw; a hold
+  // label added since must not leave it standing, and keepAt must not keep it.
+  it("withdraws on a head already reviewed when an approval policy now holds the change back", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { output: { approval: { enabled: true, blockLabels: ["do-not-merge"] } }, triggers: { reviewOnPush: false } } },
+    });
+    await reviewed("newhead");
+    const approvals = await skippedPush({ labels: ["do-not-merge"] });
+    expect(approvals).toEqual([{ action: "withdraw", headSha: "newhead", body: expect.stringMatching(/the change has the label "do-not-merge"/) }]);
+  });
+
+  it("does nothing while approval is off", async () => {
+    await prisma.repository.update({ where: { id: repositoryId }, data: { settings: { triggers: { reviewOnPush: false } } } });
+    await reviewed("oldhead");
+    expect(await skippedPush()).toEqual([]);
+  });
+});
+
+describe("runJob while the forge has not diffed the latest push", () => {
+  beforeEach(async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { output: { approval: { enabled: true } } } },
+    });
+  });
+
+  it("waits for the diff of the push and approves what it reviewed", async () => {
+    const job = await claimedJob();
+    const { runDeps, reads, approvals } = deps({}, { code_review: { findings: [] } }, undefined, { liveHead: "pushed", liveHeadReads: 1 });
+    runDeps.diffWaitMs = [0, 0, 0];
+
+    await runJob(job, runDeps);
+
+    // One wait was enough: the second read had the diff.
+    expect(reads.filter((read) => read.startsWith("change"))).toHaveLength(2);
+    expect(approvals).toEqual([expect.objectContaining({ action: "approve", headSha: "newhead" })]);
+  });
+
+  // The run may be the one the push queued, so no later review would withdraw
+  // an approval it left standing.
+  it("withdraws the approval when the diff still lags after waiting", async () => {
+    const job = await claimedJob();
+    const { runDeps, reads, approvals } = deps({}, { code_review: { findings: [] } }, undefined, { liveHead: "pushed" });
+    runDeps.diffWaitMs = [0];
+
+    await runJob(job, runDeps);
+
+    expect(reads.filter((read) => read.startsWith("change"))).toHaveLength(2);
+    expect(approvals).toEqual([expect.objectContaining({ action: "withdraw", headSha: "newhead" })]);
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("completed");
+    expect((stored.publication as { approval: { reasons: string[] } }).approval.reasons).toEqual([
+      expect.stringMatching(/had not yet computed the diff of the latest push \(pushed\)/),
+    ]);
   });
 });
 

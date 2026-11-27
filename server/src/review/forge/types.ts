@@ -16,6 +16,11 @@ export interface ChangeHead {
   // A ref to read the base revision at: GitLab gives only the target branch
   // until it has computed the MR's diff.
   baseSha: string;
+  // The target branch, when the forge says.
+  baseRef?: string;
+  // As ChangeSet.liveHeadSha: set when the source branch has moved past the
+  // diff headSha describes (GitLab only).
+  liveHeadSha?: string;
   title: string;
   state: "open" | "closed" | "merged";
   isDraft: boolean;
@@ -181,6 +186,45 @@ export interface CommitStatus {
 
 export const STATUS_CONTEXT = "sentryward/review";
 
+// What the review asks of Sentryward's own approval on the change
+// (publish/approve.ts). Withdrawing only ever touches Sentryward's approval or
+// request for changes, never anyone else's.
+export interface ApprovalAction {
+  action: "approve" | "request_changes" | "withdraw";
+  body: string;
+  // withdraw only: leave an approval of this commit in place where the forge
+  // records which commit an approval covers (GitHub). For callers that know
+  // the last review saw this head and target but cannot tell whether it
+  // settled the approval; it says nothing about the target the approval
+  // was given for.
+  keepAt?: string;
+  // withdraw only: dismiss Sentryward's approvals and keep a request for
+  // changes (GitHub; GitLab has none). For a retarget, which leaves no review
+  // vouching for an approval but does not make a request for changes wrong.
+  approvalsOnly?: boolean;
+  // approve only: the target branch the review saw, so an approval is not
+  // posted on a change retargeted mid-review (both forges check it).
+  baseRef?: string;
+  // approve only: labels that hold the approval back (output.approval.
+  // blockLabels). Checked on the reads just before and after the write, so a
+  // label someone adds while the approval is being given still stops it.
+  holdLabels?: string[];
+}
+
+// "refused": the forge would not let Sentryward approve (its own change, or the
+// project prevents it). Expected setups, so a note rather than a failure.
+// "failed": never returned by an adapter; the publisher records it when the
+// write threw, keeping the action that was attempted.
+export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused" | "failed";
+
+export interface ApprovalOutcome {
+  state: ApprovalState;
+  note?: string;
+  // The hold label (ApprovalAction.holdLabels) found on the change, so the
+  // approval was not given, or was withdrawn right after it was.
+  heldLabel?: string;
+}
+
 // The change a thread lives on; a webhook knows no more than this.
 export interface ThreadTarget {
   project: string;
@@ -215,6 +259,9 @@ export interface ForgePublisher {
   // Adds and removes labels; removing one the change does not carry is not an error.
   setLabels(ref: ForgeRef, add: string[], remove: string[]): Promise<void>;
   setCommitStatus(ref: ForgeRef, status: CommitStatus): Promise<void>;
+  // Approves the change at ref.headSha, requests changes, or withdraws what
+  // Sentryward said before. Never merges.
+  setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome>;
   // Resolves (or reopens) Sentryward's own inline threads for these findings,
   // found by the hidden fingerprint marker in each thread's first comment.
   setThreadsResolved(ref: ForgeRef, fingerprints: string[], resolved: boolean): Promise<ThreadResult>;

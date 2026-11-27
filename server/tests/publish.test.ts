@@ -3,10 +3,10 @@ import { resolveConfig } from "../src/review/config/resolve.ts";
 import type { ConfigOverride } from "../src/review/config/schema.ts";
 import { DESCRIPTION_END, DESCRIPTION_START, WALKTHROUGH_MARKER, markersIn } from "../src/review/core/markers.ts";
 import type { Finding, ReviewResult } from "../src/review/core/models.ts";
-import type { CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
+import type { ApprovalAction, ApprovalOutcome, CommitStatus, ForgePublisher, InlineComment } from "../src/review/forge/types.ts";
 import { inlineBody, inlineComments } from "../src/review/publish/inline.ts";
 import { inlineSelection } from "../src/review/core/buckets.ts";
-import { publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
+import { publishes, publishReview, summaryPlacement, withInlineSelection } from "../src/review/publish/publisher.ts";
 import { commitStatus } from "../src/review/publish/status.ts";
 import { toMarkdown, walkthroughMarkdown } from "../src/review/render/markdown.ts";
 import { makeChangeSet } from "./helpers/changeSet.ts";
@@ -101,8 +101,13 @@ function recordingPublisher(
     failThreads?: boolean;
     // Whether a summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
+    approval?: ApprovalOutcome | Error;
+    // The labels on the forge when publishing starts (setLabels updates them),
+    // which setApproval checks against holdLabels as the adapters do.
+    forgeLabels?: string[];
   } = {},
 ) {
+  let forgeLabels = [...(options.forgeLabels ?? [])];
   const calls = {
     inline: [] as InlineComment[],
     summaries: [] as string[],
@@ -111,6 +116,7 @@ function recordingPublisher(
     descriptions: [] as string[],
     labels: [] as { add: string[]; remove: string[] }[],
     threads: [] as { fingerprints: string[]; resolved: boolean }[],
+    approvals: [] as ApprovalAction[],
     // Which kind of comment went up when, across the kinds.
     order: [] as string[],
   };
@@ -143,9 +149,18 @@ function recordingPublisher(
     },
     setLabels: async (_ref, add, remove) => {
       calls.labels.push({ add, remove });
+      forgeLabels = [...forgeLabels.filter((name) => !remove.includes(name)), ...add];
     },
     setCommitStatus: async (_ref, status) => {
       calls.statuses.push(status);
+    },
+    setApproval: async (_ref, action) => {
+      if (options.approval instanceof Error) throw options.approval;
+      // Published after everything else, so the status must already be set.
+      calls.approvals.push({ ...action, body: `${calls.statuses.length}:${action.body}` });
+      const held = action.holdLabels?.find((name) => forgeLabels.includes(name));
+      if (held !== undefined) return { state: "unchanged", heldLabel: held };
+      return options.approval ?? { state: action.action === "approve" ? "approved" : "withdrawn" };
     },
     setThreadsResolved: async (_ref, fingerprints, resolved) => {
       if (options.failThreads) throw new Error("GraphQL request failed: nope");
@@ -572,5 +587,208 @@ describe("walkthrough placement and labels", () => {
 
     const off = await publish({});
     expect(off.calls.labels).toEqual([]);
+  });
+});
+
+describe("publishReview approval", () => {
+  const approving = (approval: NonNullable<NonNullable<ConfigOverride["output"]>["approval"]> = {}) =>
+    resolveConfig({ global: { output: { ...EVERY_OUTPUT, approval: { enabled: true, ...approval } } } }).config;
+  const passing = async (): Promise<ReviewResult> => ({
+    ...(await sampleResult()),
+    verdict: { verdict: "pass", blockOn: "critical", blocking: [] },
+  });
+
+  it("leaves the approval alone while it is off", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: config(),
+      postedFingerprints: new Set(),
+    });
+    expect(calls.approvals).toEqual([]);
+    expect(publication.approval).toBeUndefined();
+  });
+
+  // Unlike the dashboard switching it off, a repository's veto is a decision
+  // about this change, so an earlier approval goes.
+  it("withdraws when the repository file vetoes approval, even with nothing else to publish", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const vetoed = resolveConfig({
+      global: { output: { approval: { enabled: true } } },
+      repoFile: { output: { postInline: false, postSummary: false, postCheck: false, walkthrough: false, approval: { enabled: false } } },
+    }).config;
+    expect(publishes(vetoed)).toBe(true);
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: vetoed,
+      postedFingerprints: new Set(),
+    });
+    expect(calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
+    expect(publication.approval).toMatchObject({ action: "withdraw", reasons: ["Automatic approval is turned off in the repository file"] });
+  });
+
+  it("approves a passing review last, after the commit status, with a link", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+      targetUrl: "http://sentryward/reviews/1",
+    });
+    expect(calls.approvals).toHaveLength(1);
+    expect(calls.approvals[0]!.body.startsWith("1:")).toBe(true);
+    expect(calls.approvals[0]!.action).toBe("approve");
+    expect(calls.approvals[0]!.body).toContain("No findings at or above critical");
+    expect(calls.approvals[0]!.body).toContain("http://sentryward/reviews/1");
+    expect(publication.approval).toEqual({ action: "approve", state: "approved", reasons: [] });
+    expect(publication.errors).toEqual([]);
+  });
+
+  it("withdraws on a blocked verdict, or requests changes when asked", async () => {
+    const blocked = await sampleResult();
+    for (const [requestChanges, action] of [
+      [false, "withdraw"],
+      [true, "request_changes"],
+    ] as const) {
+      const { publisher, calls } = recordingPublisher();
+      const publication = await publishReview({
+        publisher,
+        changeSet: makeChangeSet(),
+        result: blocked,
+        config: approving({ requestChanges }),
+        postedFingerprints: new Set(),
+      });
+      expect(calls.approvals.map((a) => a.action)).toEqual([action]);
+      expect(publication.approval?.reasons).toEqual(["1 finding at or above critical"]);
+    }
+  });
+
+  it("records a refusal as a note and a failure as an error, without stopping the rest", async () => {
+    const refused = recordingPublisher({ approval: { state: "refused", note: "own change" } });
+    const first = await publishReview({
+      publisher: refused.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(first.approval).toEqual({ action: "approve", state: "refused", reasons: [], note: "own change" });
+    expect(first.errors).toEqual([]);
+
+    const failing = recordingPublisher({ approval: new Error("403 Forbidden") });
+    const second = await publishReview({
+      publisher: failing.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(second.errors).toEqual(["Approval failed: 403 Forbidden"]);
+    // The attempted action stays on record for a later skipped run.
+    expect(second.approval).toEqual({ action: "approve", state: "failed", reasons: [] });
+    expect(failing.calls.summaries).toHaveLength(1);
+    expect(failing.calls.statuses).toHaveLength(1);
+  });
+
+  it("judges block_labels on the labels this run sets, not the ones fetched before", async () => {
+    const result = await passing();
+    const large = { ...result, walkthrough: { ...result.walkthrough!, blastRadius: "large" as const } };
+    const policy = resolveConfig({
+      global: { output: { ...EVERY_OUTPUT, blastRadiusLabel: true, approval: { enabled: true, blockLabels: ["Large blast radius"] } } },
+    }).config;
+    const added = recordingPublisher();
+    const publication = await publishReview({
+      publisher: added.publisher,
+      changeSet: { ...makeChangeSet(), labels: [] },
+      result: large,
+      config: policy,
+      postedFingerprints: new Set(),
+    });
+    expect(added.calls.labels[0]!.add).toEqual(["Large blast radius"]);
+    expect(publication.approval).toEqual({ action: "withdraw", state: "withdrawn", reasons: ['The change has the label "Large blast radius"'] });
+
+    // A stale label this run takes off no longer holds the approval back.
+    const removed = recordingPublisher();
+    const small = await publishReview({
+      publisher: removed.publisher,
+      changeSet: { ...makeChangeSet(), labels: ["Large blast radius"] },
+      result: { ...result, walkthrough: { ...result.walkthrough!, blastRadius: "small" as const } },
+      config: policy,
+      postedFingerprints: new Set(),
+    });
+    expect(small.approval?.state).toBe("approved");
+  });
+
+  it("has the forge check the hold labels at the write, and reports a label found there", async () => {
+    const held = recordingPublisher({ forgeLabels: ["do-not-merge"] });
+    const publication = await publishReview({
+      publisher: held.publisher,
+      changeSet: { ...makeChangeSet(), labels: [] },
+      result: await passing(),
+      config: approving({ blockLabels: ["do-not-merge"] }),
+      postedFingerprints: new Set(),
+    });
+    expect(held.calls.approvals.map((a) => [a.action, a.holdLabels])).toEqual([["approve", ["do-not-merge"]]]);
+    expect(publication.approval).toEqual({ action: "withdraw", state: "unchanged", reasons: ['The change has the label "do-not-merge"'] });
+  });
+
+  // Without a label policy the labels cannot change the decision.
+  it("sends no hold labels when no label policy is set, or when not approving", async () => {
+    const free = recordingPublisher({ forgeLabels: ["do-not-merge"] });
+    const publication = await publishReview({
+      publisher: free.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(free.calls.approvals[0]!.holdLabels).toBeUndefined();
+    expect(publication.approval).toEqual({ action: "approve", state: "approved", reasons: [] });
+
+    const blocked = recordingPublisher();
+    await publishReview({
+      publisher: blocked.publisher,
+      changeSet: makeChangeSet(),
+      result: await sampleResult(),
+      config: approving({ blockLabels: ["do-not-merge"] }),
+      postedFingerprints: new Set(),
+    });
+    expect(blocked.calls.approvals.map((a) => [a.action, a.holdLabels])).toEqual([["withdraw", undefined]]);
+  });
+
+  it("withdraws instead of requesting changes on GitLab", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const changeSet = makeChangeSet();
+    const publication = await publishReview({
+      publisher,
+      changeSet: { ...changeSet, forgeRef: { ...changeSet.forgeRef, provider: "gitlab", host: "gitlab.com" } },
+      result: await sampleResult(),
+      config: approving({ requestChanges: true }),
+      postedFingerprints: new Set(),
+    });
+    expect(calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
+    expect(calls.approvals[0]!.body).toContain("no longer approves");
+    expect(publication.approval?.reasons).toEqual(["1 finding at or above critical"]);
+  });
+
+  it("is not sent once proceed says the job was cancelled", async () => {
+    const { publisher, calls } = recordingPublisher();
+    // Every step up to the commit status goes through, then the cancel lands.
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+      proceed: async () => calls.statuses.length === 0,
+    });
+    expect(publication.stopped).toBe(true);
+    expect(calls.approvals).toEqual([]);
   });
 });

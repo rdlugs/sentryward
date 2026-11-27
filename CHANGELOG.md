@@ -10,6 +10,99 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Automatic approval. With `output.approval.enabled` on (**Approve clean
+  reviews** on the Display tab, off by default) a clean review approves the
+  PR/MR (a GitHub `APPROVE` review at the head commit, a GitLab approval pinned
+  to the head sha), and a later review that is not clean withdraws it
+  (GitHub dismisses Sentryward's own approvals, GitLab unapproves). It never
+  merges. `when` is `pass` (the verdict passes, as the commit status says) or
+  `no_findings`; a partial or failed review never approves. Policies hold an
+  approval back: `block_paths` globs (either side of a rename),
+  `only_authors` and `skip_authors` (any case), `block_labels` and
+  `block_on_risk` (auth, database writes or API routes, found in the diff
+  without a model call). `request_changes` requests changes on a blocked
+  verdict instead of only withdrawing (GitHub only). The approval is published
+  last and independently: a failure marks the review partial, while the forge
+  refusing an approval of the account's own change is only a note. The review
+  page's sidebar shows the outcome and the reasons, and the Display preview
+  returns what would happen. Safeguards: `.sentryward.yaml` (and the trigger)
+  can only tighten approval, never turn it on or drop a block (even when a
+  dashboard list repeats an entry), and an approval still answers to the
+  dashboard's `block_on` (and tool findings blocking) when the repository file
+  or trigger loosens them for the review itself, withdrawing rather than
+  approving; a repository file or trigger that makes the review report less
+  than the dashboard settings (more `ignore_paths`, fewer categories, a higher
+  severity floor or confidence, fewer findings or chunks, tool findings off,
+  evidence required, or more verification) holds the approval back, with a
+  config warning saying which settings; a GitHub approval is not posted (and an
+  existing one is not reused) when the head, the base sha or the target branch
+  moved during the review, and is dismissed again when they moved while it was
+  being posted or could not be re-read afterwards (a failed dismissal is an
+  error saying the approval still stands); when the base sha or target branch
+  moved, Sentryward's earlier approval is withdrawn too, since a retarget
+  queues no new review (a failed withdrawal is an error); a GitLab approval
+  gets the same checks, comparing the MR's target branch, diff refs and
+  source sha (a push GitLab has not diffed yet counts as moved) before
+  an approval is reused or posted and again after, unapproving when they moved
+  or cannot be re-read; a skipped run keeps the approval
+  only when the last review published an approval decision for the current
+  head, base sha and target branch, and otherwise asks the forge to withdraw,
+  keeping a GitHub approval of the current head only when the last review saw
+  that same head and target and did not decide to withdraw or request changes
+  (a failed approval write is recorded with the action it attempted, shown as
+  "Failed" in the sidebar; a moved or retargeted base, or no review on
+  record, withdraws every approval; filter skips always withdraw, and so does an approval
+  policy that holds the change back as it stands now, such as a hold label
+  added since the last review); a change whose file list the forge cut short
+  is not approved, including when GitLab's legacy `/changes` endpoint reports
+  `overflow` without a file count; when `block_labels` is set the forge
+  adapter checks it on its own reads of the PR/MR just before and just after
+  the write, so a hold label added mid-review or while the approval is posted
+  stops or withdraws it (an earlier approval is withdrawn too, whether the
+  label is seen before the write or after it, and even when the head moved
+  too); a GitLab refusal is only a note when GitLab reports the
+  account cannot approve the MR, while other 401/403 errors mark the review
+  partial; the preview shows a withdrawal rather than a request for changes on
+  GitLab, as publishing does; without its own login (`GITHUB_APP_SLUG` for
+  a GitHub App) Sentryward makes no approval decision, since it could not
+  withdraw one later; it also makes none on a GitHub token connection or a
+  GitLab connection whose token is not a bot user (project or group access
+  token, service account), since a person's own approval would look like
+  Sentryward's and a withdrawal would remove it; a GitHub base move detected
+  after posting dismisses Sentryward's earlier approvals along with the new
+  one; and a repository file or trigger that turns approval off while the
+  dashboard has it on withdraws an earlier approval (on skipped runs too)
+  instead of leaving it in place; retargeting a PR/MR withdraws Sentryward's
+  approval from the webhook, even when automatic reviews are off (a GitHub
+  request for changes stays, and a failed withdrawal fails the delivery so it
+  can be redelivered); a GitHub request for changes gets the same head and
+  base checks before and after it is posted as an approval, withdrawing
+  Sentryward's earlier approvals rather than posting on commits the review
+  never saw, and dismissing the new request along with them when the PR moved
+  while it was posted; and an approval (or request for changes) write that
+  timed out, dropped or got a server error is checked against the forge, so
+  one that landed gets the same freshness checks (a GitLab approval that
+  cannot be checked is unapproved). The sidebar shows a request for changes that
+  was already standing as "Changes requested", not "Still approved". A change
+  is not approved when the forge withheld the diff of a file the review would
+  have read (GitLab's too large or collapsed diffs, GitHub's large files). A
+  retarget webhook keeps an approval the last review settled at the change's
+  current head, base sha and target branch, so a late or redelivered delivery
+  does not revoke an approval given for the new target. A skipped GitLab run
+  compares the MR's current source sha, not the diff refs GitLab may not have
+  updated yet, before keeping an approval. A GitLab update that retargets an MR
+  and marks it ready in one go is still reviewed. GitHub's file listing is
+  checked against the PR read again after it, and read once more (or the run
+  fails) when the PR moved meanwhile, so a review never pairs one push's files
+  with another's commits, in the change or in the forge cache. A GitLab run
+  that finds a push GitLab has not diffed yet waits briefly for the diff; if
+  it is still not ready, the review goes ahead on the previous diff and
+  withdraws the approval, since that run may be the one the push queued. A
+  retarget webhook and a run writing its approval take the same per-change
+  lock (the run holds it until its job is stored, the delivery waits up to 8
+  seconds and fails to be redelivered past that), so a delivery can no longer
+  withdraw an approval a review of the new target gave while it was handled.
+
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete
   requirements and shows a table per issue: each requirement marked met,

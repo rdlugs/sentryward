@@ -11,6 +11,7 @@ import {
   type DashboardOverride,
   type ProfileName,
   type RuleGuard,
+  type ApprovalGuard,
 } from "./schema.ts";
 import { atLeast } from "../core/severity.ts";
 
@@ -211,10 +212,140 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   const config = configSchema.parse(merged);
   const ruleGuard = guardFor(layers, config, sources);
   if (ruleGuard) config.ruleGuard = ruleGuard;
+  const approvalGuard = approvalGuardFor(layers, config);
+  if (approvalGuard) config.approvalGuard = approvalGuard;
+  const approvalWarnings = holdApproval(layers, config, sources);
+  // Said here so the dashboard explains why a clean review is not approved.
+  if (config.output.approval.enabled && config.approvalGuard?.narrowed.length) {
+    approvalWarnings.push(
+      `Automatic approval is held back: the repository file or trigger makes the review report less than the dashboard settings (${config.approvalGuard.narrowed.join(", ")})`,
+    );
+  }
 
-  return { config, sources, warnings: combinedIssues.map((issue) => issue.message), combinedIssues };
+  return { config, sources, warnings: [...combinedIssues.map((issue) => issue.message), ...approvalWarnings], combinedIssues };
 }
 
+// Logins cannot contain parentheses on either forge, so this matches nobody.
+export const NO_APPROVED_AUTHOR = "(nobody)";
+
+// The approval policy is a security control, like rules: the repository file
+// and the trigger may tighten what the dashboard layers set, never loosen it.
+// They can turn approval off, ask for "no_findings", and add blocks; an
+// onlyAuthors list narrows the dashboard's. A loosening is ignored with a
+// warning. Turning off what the dashboard turned on is recorded as a veto
+// (config.approvalVeto), so the run withdraws an earlier approval instead of
+// leaving it alone as it does when the dashboard has approval off. Returns the
+// warnings; `config` and `sources` are updated in place.
+function holdApproval(layers: ConfigLayers, config: Config, sources: Record<string, LayerName>): string[] {
+  const repoLayers = (
+    [
+      ["repoFile", layers.repoFile],
+      ["trigger", layers.trigger],
+    ] as const
+  ).flatMap(([name, layer]) => (layer?.output?.approval ? [[name, layer.output.approval] as const] : []));
+  if (!repoLayers.length) return [];
+
+  const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings, directory: layers.directory });
+  const base = dashboard.config.output.approval;
+  const held = { ...base };
+  const set: Partial<Record<keyof typeof held, LayerName>> = {};
+  const warnings: string[] = [];
+  const union = <T>(a: T[], b: T[] | undefined) => [...new Set([...a, ...(b ?? [])])];
+
+  for (const [name, own] of repoLayers) {
+    const where = LAYER_LABELS[name];
+    if (own.enabled === false && held.enabled) {
+      held.enabled = false;
+      set.enabled = name;
+      config.approvalVeto = name;
+    } else if (own.enabled === true && !held.enabled) {
+      warnings.push(`Approval in ${where} was ignored: only the dashboard settings can turn approval on`);
+    }
+    if (own.when === "no_findings" && held.when !== "no_findings") {
+      held.when = "no_findings";
+      set.when = name;
+    } else if (own.when === "pass" && held.when === "no_findings") {
+      warnings.push(`Approval "when: pass" in ${where} was ignored: the dashboard settings approve only reviews with no findings`);
+    }
+    // Withdrawing and requesting changes both hold the approval back.
+    if (own.requestChanges !== undefined && own.requestChanges !== held.requestChanges) {
+      held.requestChanges = own.requestChanges;
+      set.requestChanges = name;
+    }
+    for (const key of ["blockPaths", "skipAuthors", "blockLabels", "blockOnRisk"] as const) {
+      // Asks whether the layer adds a member, not whether the length grew: the
+      // union also dedupes the dashboard's own list, which may repeat entries.
+      const theirs: string[] = own[key] ?? [];
+      if (theirs.some((item) => !(held[key] as string[]).includes(item))) {
+        (held as Record<typeof key, string[]>)[key] = union<string>(held[key], theirs);
+        set[key] = name;
+      }
+    }
+    if (own.onlyAuthors?.length) {
+      if (!held.onlyAuthors.length) {
+        held.onlyAuthors = [...own.onlyAuthors];
+      } else {
+        const theirs = new Set(own.onlyAuthors.map((login) => login.toLowerCase()));
+        const both = held.onlyAuthors.filter((login) => theirs.has(login.toLowerCase()));
+        // An empty intersection must still approve nobody, not everybody.
+        held.onlyAuthors = both.length ? both : [NO_APPROVED_AUTHOR];
+      }
+      set.onlyAuthors = name;
+    }
+  }
+
+  config.output.approval = held;
+  for (const key of Object.keys(held) as (keyof typeof held)[]) {
+    const path = `output.approval.${key}`;
+    sources[path] = set[key] ?? dashboard.sources[path] ?? "default";
+  }
+  return warnings;
+}
+
+// The verdict is the review's own, so a repository file or trigger may loosen
+// review.blockOn (or stop tool findings blocking) for it. An automatic
+// approval is a security control like the approval policy above: it still
+// answers to the threshold the dashboard layers resolve to, or the effective
+// one where that is stricter. Such a layer can also make findings never
+// appear (a higher floor, fewer categories, more ignored paths), which no
+// threshold recovers, so those settings are listed in `narrowed` and hold the
+// approval back. Only set when the dashboard is the stricter one.
+function approvalGuardFor(layers: ConfigLayers, config: Config): ApprovalGuard | undefined {
+  if (!layers.repoFile && !layers.trigger) return undefined;
+  const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings, directory: layers.directory }).config;
+  const { blockOn, toolFindingsBlock } = config.review;
+  const held: ApprovalGuard = {
+    // The lower severity is the stricter threshold.
+    blockOn: atLeast(blockOn, dashboard.review.blockOn) ? dashboard.review.blockOn : blockOn,
+    toolFindingsBlock: toolFindingsBlock || dashboard.review.toolFindingsBlock,
+    narrowed: narrowedCoverage(dashboard, config),
+  };
+  return held.blockOn !== blockOn || held.toolFindingsBlock !== toolFindingsBlock || held.narrowed.length ? held : undefined;
+}
+
+const VERIFY_RANK: Record<Config["review"]["verify"], number> = { off: 0, blocking: 1, all: 2 };
+
+// The settings, by config path, where `config` reports less than `dashboard`
+// would: each one removes or demotes findings before the verdict sees them.
+// Depth settings (deep review, agentic context, file context) are left out:
+// they change how hard a pass looks, not which findings it may keep.
+function narrowedCoverage(dashboard: Config, config: Config): string[] {
+  const own = dashboard.review;
+  const eff = config.review;
+  const checks: [string, boolean][] = [
+    ["ignorePaths", config.ignorePaths.some((glob) => !dashboard.ignorePaths.includes(glob))],
+    ["review.categories", own.categories.some((category) => !eff.categories.includes(category))],
+    ["review.severityFloor", eff.severityFloor !== own.severityFloor && atLeast(eff.severityFloor, own.severityFloor)],
+    ["review.minConfidence", eff.minConfidence > own.minConfidence],
+    ["review.maxFindings", eff.maxFindings < own.maxFindings],
+    ["review.maxChunks", eff.maxChunks < own.maxChunks],
+    ["review.toolFindings", own.toolFindings && !eff.toolFindings],
+    ["review.requireEvidence", eff.requireEvidence && !own.requireEvidence],
+    // Verification drops refuted findings and demotes uncertain ones.
+    ["review.verify", VERIFY_RANK[eff.verify] > VERIFY_RANK[own.verify]],
+  ];
+  return checks.filter(([, narrowed]) => narrowed).map(([path]) => path);
+}
 
 // Dashboard rules are held to the thresholds the dashboard layers resolve to
 // on their own, profile included, or to the effective ones where those are

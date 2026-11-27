@@ -17,6 +17,19 @@ export type ContextMode = "static" | "agentic"
 export type DeepEnabled = boolean | "auto"
 // Mirror RISK_KINDS in server/src/review/core/models.ts.
 export type RiskKind = "auth" | "database" | "api"
+export type ApprovalWhen = "pass" | "no_findings"
+
+// output.approval (server/src/review/publish/approve.ts).
+export interface ApprovalSettings {
+  enabled: boolean
+  when: ApprovalWhen
+  requestChanges: boolean
+  blockPaths: string[]
+  onlyAuthors: string[]
+  skipAuthors: string[]
+  blockLabels: string[]
+  blockOnRisk: RiskKind[]
+}
 
 // A team rule; mirrors ruleSchema in server/src/review/config/schema.ts.
 export interface Rule {
@@ -121,6 +134,7 @@ export interface ConfigOverride {
     highLevelSummaryInstructions?: string
     walkthroughLabels?: boolean
     walkthroughBlastRadius?: boolean
+    approval?: Partial<ApprovalSettings>
   }
   triggers?: {
     review?: ReviewTrigger
@@ -222,6 +236,7 @@ export interface EffectiveConfig {
     highLevelSummaryInstructions: string
     walkthroughLabels: boolean
     walkthroughBlastRadius: boolean
+    approval: ApprovalSettings
   }
   triggers: {
     review: ReviewTrigger

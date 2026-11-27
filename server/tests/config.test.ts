@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { loadReviewConfig } from "../src/review/config/load.ts";
 import { parseRepoFile } from "../src/review/config/repoFile.ts";
-import { resolveConfig } from "../src/review/config/resolve.ts";
-import { DEFAULT_CONFIG, configOverrideSchema, configSchema, dashboardOverrideSchema } from "../src/review/config/schema.ts";
+import { NO_APPROVED_AUTHOR, resolveConfig } from "../src/review/config/resolve.ts";
+import { DEFAULT_CONFIG, configOverrideSchema, configSchema, dashboardOverrideSchema, type ConfigOverride } from "../src/review/config/schema.ts";
 import type { ForgeAdapter } from "../src/review/forge/types.ts";
 
 describe("DEFAULT_CONFIG", () => {
@@ -403,6 +403,126 @@ describe("parseRepoFile", () => {
     expect(parseRepoFile(".sentryward.yaml", "triggers:\n  pause_after_pushes: 1\n").override).toBeUndefined();
     expect(parseRepoFile(".sentryward.yaml", "triggers:\n  pause_window_minutes: 0\n").override).toBeUndefined();
     expect(DEFAULT_CONFIG.triggers).toMatchObject({ pauseOnBurst: false, pauseAfterPushes: 5, pauseWindowMinutes: 15 });
+  });
+
+  it("reads output.approval, merging it field by field over the dashboard's", () => {
+    expect(DEFAULT_CONFIG.output.approval).toMatchObject({ enabled: false, when: "pass", requestChanges: false, blockOnRisk: [] });
+    const yaml = [
+      "output:",
+      "  approval:",
+      "    enabled: true",
+      "    when: no_findings",
+      "    block_paths: [infra/**]",
+      "    block_on_risk: [auth, database]",
+      "",
+    ].join("\n");
+    expect(parseRepoFile(".sentryward.yaml", yaml)).toEqual({
+      override: { output: { approval: { enabled: true, when: "no_findings", blockPaths: ["infra/**"], blockOnRisk: ["auth", "database"] } } },
+      warnings: [],
+    });
+    const resolved = resolveConfig({
+      global: { output: { approval: { enabled: true, requestChanges: true, blockLabels: ["hold"] } } },
+      repoFile: parseRepoFile(".sentryward.yaml", yaml).override,
+    });
+    expect(resolved.config.output.approval).toMatchObject({
+      enabled: true,
+      when: "no_findings",
+      requestChanges: true,
+      blockLabels: ["hold"],
+      blockPaths: ["infra/**"],
+    });
+    expect(resolved.sources["output.approval.enabled"]).toBe("global");
+    expect(resolved.sources["output.approval.when"]).toBe("repoFile");
+    expect(resolved.sources["output.approval.blockPaths"]).toBe("repoFile");
+    expect(resolved.sources["output.approval.requestChanges"]).toBe("global");
+    for (const bad of ["when: always", "block_on_risk: [auth, auth]", "block_on_risk: [secrets]", "approve: true"]) {
+      expect(parseRepoFile(".sentryward.yaml", `output:\n  approval:\n    ${bad}\n`).override).toBeUndefined();
+    }
+  });
+
+  it("lets the repository file tighten approval but never loosen it", () => {
+    const dashboard = { output: { approval: { enabled: true, when: "no_findings" as const, blockPaths: ["infra/**"], onlyAuthors: ["alice", "bob"] } } };
+    const approval = (repoFile: ConfigOverride, global: ConfigOverride | undefined = dashboard) => resolveConfig({ global, repoFile });
+
+    // Cannot turn approval on, or clear the workspace's blocks.
+    const on = approval({ output: { approval: { enabled: true } } }, {});
+    expect(on.config.output.approval.enabled).toBe(false);
+    expect(on.warnings).toEqual([expect.stringMatching(/only the dashboard settings can turn approval on/)]);
+    const cleared = approval({ output: { approval: { blockPaths: [], when: "pass" } } });
+    expect(cleared.config.output.approval).toMatchObject({ blockPaths: ["infra/**"], when: "no_findings" });
+    expect(cleared.warnings).toEqual([expect.stringMatching(/when: pass/)]);
+
+    // Can add blocks, narrow the authors, and turn approval off.
+    const tighter = approval({ output: { approval: { blockPaths: ["db/**"], blockLabels: ["hold"], onlyAuthors: ["BOB", "carol"] } } });
+    expect(tighter.config.output.approval).toMatchObject({ blockPaths: ["infra/**", "db/**"], blockLabels: ["hold"], onlyAuthors: ["bob"] });
+    expect(tighter.warnings).toEqual([]);
+    const nobody = approval({ output: { approval: { onlyAuthors: ["carol"] } } });
+    expect(nobody.config.output.approval.onlyAuthors).toEqual([NO_APPROVED_AUTHOR]);
+    // Turning off what the dashboard turned on is a veto, which withdraws an
+    // earlier approval; off on both sides is no veto, which leaves it alone.
+    const vetoed = approval({ output: { approval: { enabled: false } } });
+    expect(vetoed.config.output.approval.enabled).toBe(false);
+    expect(vetoed.config.approvalVeto).toBe("repoFile");
+    expect(vetoed.sources["output.approval.enabled"]).toBe("repoFile");
+    expect(approval({ output: { approval: { enabled: false } } }, {}).config.approvalVeto).toBeUndefined();
+    expect(resolveConfig({ global: dashboard, trigger: { output: { approval: { enabled: false } } } }).config.approvalVeto).toBe("trigger");
+
+    // A dashboard list that repeats an entry must not hide the one the file adds.
+    const repeated = approval(
+      { output: { approval: { blockLabels: ["wip"] } } },
+      { output: { approval: { enabled: true, blockLabels: ["hold", "hold"] } } },
+    );
+    expect(repeated.config.output.approval.blockLabels).toEqual(["hold", "wip"]);
+    expect(repeated.sources["output.approval.blockLabels"]).toBe("repoFile");
+  });
+
+  it("holds the dashboard's blocking threshold for approval when a file loosens the review's", () => {
+    const global: ConfigOverride = { review: { blockOn: "major", toolFindingsBlock: true } };
+    const loosened = resolveConfig({ global, repoFile: { review: { blockOn: "critical", toolFindingsBlock: false } } }).config;
+    // The review itself follows the file; the approval does not.
+    expect(loosened.review).toMatchObject({ blockOn: "critical", toolFindingsBlock: false });
+    expect(loosened.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true, narrowed: [] });
+    expect(resolveConfig({ global, trigger: { review: { blockOn: "critical" } } }).config.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true, narrowed: [] });
+
+    // Tightening, or no layer above the dashboard, needs no guard.
+    expect(resolveConfig({ global, repoFile: { review: { blockOn: "minor" } } }).config.approvalGuard).toBeUndefined();
+    expect(resolveConfig({ global: { review: { blockOn: "critical" } } }).config.approvalGuard).toBeUndefined();
+
+    expect(configOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false, narrowed: [] } }).success).toBe(false);
+    expect(dashboardOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false, narrowed: [] } }).success).toBe(false);
+  });
+
+  it("lists the settings a file loosened that decide which findings exist, for the approval", () => {
+    const global: ConfigOverride = {
+      ignorePaths: ["dist/**"],
+      review: { severityFloor: "minor", minConfidence: 0.5, toolFindings: true, verify: "blocking" },
+      output: { approval: { enabled: true } },
+    };
+    const narrowed = resolveConfig({
+      global,
+      repoFile: {
+        ignorePaths: ["dist/**", "src/**"],
+        review: { severityFloor: "major", minConfidence: 0.9, maxFindings: 1, toolFindings: false, verify: "all", categories: ["bug"] },
+      },
+    });
+    expect(narrowed.config.approvalGuard?.narrowed).toEqual([
+      "ignorePaths",
+      "review.categories",
+      "review.severityFloor",
+      "review.minConfidence",
+      "review.maxFindings",
+      "review.toolFindings",
+      "review.verify",
+    ]);
+    expect(narrowed.warnings).toContainEqual(expect.stringMatching(/^Automatic approval is held back/));
+
+    // Reporting more, or dropping an ignore glob, narrows nothing.
+    const widened = resolveConfig({
+      global,
+      repoFile: { ignorePaths: [], review: { severityFloor: "info", minConfidence: 0.2, verify: "off" } },
+    });
+    expect(widened.config.approvalGuard).toBeUndefined();
+    expect(widened.warnings.some((w) => w.startsWith("Automatic approval is held back"))).toBe(false);
   });
 
   it("reads review.verify and rejects an unknown mode", () => {

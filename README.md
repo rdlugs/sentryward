@@ -590,7 +590,7 @@ details in `.env`:
 
 | Permission | Access | Used for | Without it |
 | --- | --- | --- | --- |
-| Pull requests | read and write | Reading changes, posting reviews, labels, description updates | Reviews cannot run or publish |
+| Pull requests | read and write | Reading changes, posting reviews, labels, description updates, [approvals](#automatic-approval) | Reviews cannot run or publish |
 | Contents | read | Diffs, files and `.sentryward.yaml` | Reviews cannot run |
 | Commit statuses | read and write | The `sentryward/review` status | No commit status |
 | Issues | read | Linked and related issues in the walkthrough | Those parts are skipped with a warning |
@@ -649,8 +649,8 @@ it finishes it publishes, each step independently:
     so a later run only opens threads for the slots left. Findings either one
     holds back are written out in full in the summary comment, under "Not
     posted inline"; a finding that already has a thread never is.
-  - GitHub: one review posted as `COMMENT`, never approve or request changes.
-    GitLab: one discussion per finding.
+  - GitHub: one review posted as `COMMENT`; approving is a separate step (see
+    the approval below). GitLab: one discussion per finding.
   - Suggestions use each forge's suggestion syntax.
   - Each comment carries a hidden fingerprint, so a later run never posts the
     same finding twice, even if Sentryward's own records are lost.
@@ -728,6 +728,92 @@ it finishes it publishes, each step independently:
   default): `success` (pass), `failure` (blocked) or `error` (incomplete;
   GitLab shows it as `failed`), linking to the review in the dashboard. Turn it
   on for branch protection to require it.
+- **The approval**, when `output.approval.enabled` is on (it is off by
+  default), published last. See [Automatic approval](#automatic-approval).
+
+### Automatic approval
+
+With `output.approval.enabled` on (**Approve clean reviews** on the Display
+tab), a clean review approves the PR/MR, and a later review that is not clean
+withdraws that approval. Sentryward never merges.
+
+```yaml
+output:
+  approval:
+    enabled: true
+    when: pass               # or no_findings
+    request_changes: false   # GitHub only
+    block_paths: ["infra/**", "**/migrations/**"]
+    only_authors: []         # empty: anyone's changes
+    skip_authors: ["octocat"]
+    block_labels: ["needs-review"]
+    block_on_risk: [auth]    # auth, database, api
+```
+
+- **Clean** means the verdict passes (nothing at or above `block_on`, as the
+  commit status says), or with `when: no_findings` that the review found
+  nothing at all. A partial or failed review never approves.
+- **Policies** only hold an approval back. A change that touches a
+  `block_paths` glob (either side of a rename), is by an author outside
+  `only_authors` or in `skip_authors` (any case), carries a `block_labels`
+  label (case-sensitive) or touches one of the `block_on_risk` kinds (found by
+  pattern in the diff, as for deep review) is not approved. Neither is a change
+  whose file list the forge cut short (GitHub lists at most 3000 files), since
+  part of it went unchecked. `block_labels` is matched against the labels the
+  change carries after the review sets its own (blast radius, effort), read
+  from the forge again just before approving, so a label someone added during
+  the review counts; if they cannot be read, the change is not approved. The
+  review page's sidebar lists the reasons.
+- **Repository file**: `.sentryward.yaml` can only tighten approval. It can
+  turn approval off, ask for `when: no_findings`, add `block_paths`,
+  `skip_authors`, `block_labels` and `block_on_risk` entries, and narrow
+  `only_authors` to logins on both lists. It cannot turn approval on or remove
+  a block; such settings are ignored with a warning. Turning approval off
+  there (or in a trigger) while the dashboard has it on withdraws an approval
+  Sentryward gave earlier, on skipped runs too.
+- **Withdrawing**: on GitLab Sentryward removes its approval. On GitHub it
+  dismisses its own approvals; on a protected branch that needs the right to
+  dismiss reviews, and without it the review is marked partial with the error.
+  With `request_changes` on, a blocked review requests changes instead (GitHub
+  only; GitLab has no such state, so there it only withdraws).
+- GitHub approvals are tied to the head commit, so a push gets a fresh approval
+  once it is reviewed. Before approving, Sentryward checks the pull request's
+  head again and does not approve if a push landed mid-review (shown as a
+  note); after approving it checks once more and dismisses its approval if the
+  head moved in between. GitHub has no conditional write, so a push in the
+  instant between the approval and that last check can still be covered until
+  the push's own review decides. If this approval gates merges, turn on
+  "Dismiss stale pull request approvals when new commits are pushed" in branch
+  protection, or also require the `sentryward/review` status check, which is
+  set per commit. GitLab approvals are pinned to the head sha, so such a push
+  makes the approval fail rather than approve unseen commits.
+- **Skipped runs**: when a run is skipped (automatic reviews off for pushes, a
+  draft, a burst pause, a skip filter), Sentryward withdraws its approval if
+  commits arrived since the last review, or if the skip came from a skip
+  label, author, title or branch filter. When no earlier review is on record
+  (its history was pruned), it still asks the forge to withdraw; on GitHub an
+  approval of the current head is kept, while on GitLab, where approvals record
+  no commit, it is withdrawn. An approval never covers commits Sentryward did
+  not review.
+- **Its own account**: Sentryward has to know the login it acts as to find and
+  withdraw its approval, and that login must be Sentryward's alone, or a
+  withdrawal would also remove a person's own approval. On GitHub that means a
+  GitHub App connection with `GITHUB_APP_SLUG` set; a token connection acts as
+  a person. On GitLab the connection's token must belong to a bot user (a
+  project or group access token, or a service account). Otherwise Sentryward
+  makes no approval decision at all and shows a note.
+- **Permissions**: GitHub uses the Pull requests (write) permission already
+  needed for reviews. GitLab needs a role allowed to approve (Developer or
+  above, and an approval rule that includes the account where rules apply).
+  The forge refuses an approval of the account's own change (GitHub always,
+  GitLab when the project prevents author approval); that is shown as a note,
+  not a failure. On GitLab only an account GitLab reports as unable to approve
+  the MR counts as a refusal; any other 401 or 403 (a revoked or under-scoped
+  token, say) marks the review partial with the error.
+- Whether an approval from Sentryward counts toward required approvals depends
+  on the forge's branch protection or approval rules, not on Sentryward.
+- Turning the setting off in the dashboard leaves any approval already given
+  in place.
 
 The defaults are a quiet setup, the Display tab's Standard preset: inline
 comments, one summary comment and a short PR summary, without the counts,

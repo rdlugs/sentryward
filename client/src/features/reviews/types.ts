@@ -279,8 +279,13 @@ export interface Publication {
   inlineFailed: { fingerprint: string; error: string }[]
   summaryCommentId: string | null
   statusState: string | null
+  // What became of Sentryward's approval, when output.approval is on
+  // (server/src/review/publish/publisher.ts). Absent on older rows.
+  approval?: { action?: "approve" | "request_changes" | "withdraw"; state: ApprovalState; reasons: string[]; note?: string }
   errors: string[]
 }
+
+export type ApprovalState = "approved" | "changes_requested" | "withdrawn" | "unchanged" | "refused" | "failed"
 
 // Where a running review is (worker/progress.ts on the server), mirroring
 // reviewStepSchema and reviewStageSchema in server/src/review/core/models.ts.

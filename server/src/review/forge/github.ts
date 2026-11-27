@@ -2,7 +2,7 @@ import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
 import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
-import { ForgeError, ForgeHttp, isNotFound, linkHeaderNext, type FetchLike } from "./http.ts";
+import { ForgeError, ForgeHttp, isAmbiguousWriteError, isNotFound, linkHeaderNext, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
 import { githubApiBase } from "./githubApp.ts";
 import { closingIssueNumbers, MAX_CANDIDATE_ISSUES } from "./issues.ts";
@@ -13,6 +13,8 @@ import {
   MAX_OPEN_CHANGE_PAGES,
   MAX_CODE_SEARCH_RESULTS,
   MAX_COMPARE_FILES,
+  type ApprovalAction,
+  type ApprovalOutcome,
   type ChangeDetails,
   type ChangeHead,
   type ForgeUser,
@@ -88,6 +90,8 @@ interface GhPull {
   html_url: string;
   user?: GhUser | null;
   labels?: { name: string }[];
+  // Total files in the PR, which the files endpoint stops listing at 3000.
+  changed_files?: number;
   base: { sha: string; ref: string; repo?: { full_name: string } | null };
   // `label` is owner:branch; `repo` is null once a fork has been deleted.
   head: { sha: string; ref: string; label?: string; repo?: { full_name: string } | null };
@@ -220,6 +224,13 @@ interface GhComment {
   user: { login: string } | null;
 }
 
+interface GhReview {
+  id: number;
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
+  commit_id: string | null;
+  user: { login: string } | null;
+}
+
 interface GhThread {
   id: string;
   isResolved: boolean;
@@ -262,6 +273,40 @@ function reviewComment(comment: InlineComment) {
     ...(comment.endLine > comment.startLine ? { start_line: comment.startLine, start_side: "RIGHT" as const } : {}),
     body: comment.body,
   };
+}
+
+const MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The pull request moved to a newer commit during the review; the next review decides",
+};
+
+// A moved base queues no review (only new commits and reopening do; a
+// retarget webhook only withdraws), so the note says a rerun is needed rather
+// than leaving it to a next review.
+const BASE_MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The pull request's target branch moved or was changed during the review; rerun the review to decide on an approval",
+};
+
+// The pull request's head or base moved while its files were listed.
+class PullMovedError extends Error {}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Whether the pull request still is what the review saw: its head, and the
+// base its diff and the repository's policy were read against.
+function movedFrom(pull: GhPull, ref: ForgeRef, baseRef: string | undefined): ApprovalOutcome | undefined {
+  if (pull.head.sha !== ref.headSha) return MOVED;
+  if (pull.base.sha !== ref.baseSha || (baseRef !== undefined && pull.base.ref !== baseRef)) return BASE_MOVED;
+  return undefined;
+}
+
+// The first hold label the pull request carries, if any.
+function heldLabel(pull: GhPull, holdLabels: string[] | undefined): string | undefined {
+  if (!holdLabels?.length) return undefined;
+  return (pull.labels ?? []).map((label) => label.name).find((name) => holdLabels.includes(name));
 }
 
 export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, ForgeThreads {
@@ -313,12 +358,20 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   }
 
   async getChange(project: string, number: number, cache?: ForgeCache): Promise<ChangeSet> {
-    const repoPath = repoApiPath(project);
-    const pull = await this.http.json<GhPull>(`${repoPath}/pulls/${number}`);
-    // The files of a PR are fixed by its base and head.
-    const files = await cached(cache, cacheKey("github-files", this.host, project, number, pull.base.sha, pull.head.sha), () =>
-      this.http.paginate<GhFile>(`${repoPath}/pulls/${number}/files?per_page=100`, linkHeaderNext, MAX_FILE_PAGES),
-    );
+    let read: { pull: GhPull; files: GhFile[] };
+    try {
+      read = await this.readPullFiles(project, number, cache);
+    } catch (err) {
+      if (!(err instanceof PullMovedError)) throw err;
+      // One retry: a push landing mid-read is common, two in a row are not.
+      try {
+        read = await this.readPullFiles(project, number, cache);
+      } catch (again) {
+        if (!(again instanceof PullMovedError)) throw again;
+        throw new Error(`Pull request #${number} kept moving while its files were being read; rerun the review`);
+      }
+    }
+    const { pull, files } = read;
 
     return {
       forgeRef: {
@@ -340,7 +393,26 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       authorId: pull.user?.id === undefined ? undefined : String(pull.user.id),
       labels: (pull.labels ?? []).map((label) => label.name),
       files: files.map(toChangedFileFromGh),
+      ...(pull.changed_files !== undefined && files.length < pull.changed_files ? { filesTruncated: true } : {}),
     };
+  }
+
+  // The files endpoint lists the PR as it is when asked, not at the shas read
+  // before it, so a push between the two reads would pair the new files with
+  // the old commits, both in the change set (which the approval's freshness
+  // checks compare against) and in the cache. The PR is read again after the
+  // listing, inside the memoized fetch: a listing the PR moved under throws, so
+  // it is neither used nor cached.
+  private async readPullFiles(project: string, number: number, cache?: ForgeCache): Promise<{ pull: GhPull; files: GhFile[] }> {
+    const repoPath = repoApiPath(project);
+    const pull = await this.http.json<GhPull>(`${repoPath}/pulls/${number}`);
+    const files = await cached(cache, cacheKey("github-files", this.host, project, number, pull.base.sha, pull.head.sha), async () => {
+      const listed = await this.http.paginate<GhFile>(`${repoPath}/pulls/${number}/files?per_page=100`, linkHeaderNext, MAX_FILE_PAGES);
+      const after = await this.http.json<GhPull>(`${repoPath}/pulls/${number}`);
+      if (after.head.sha !== pull.head.sha || after.base.sha !== pull.base.sha) throw new PullMovedError();
+      return listed;
+    });
+    return { pull, files };
   }
 
   async getChangeHead(project: string, number: number): Promise<ChangeHead> {
@@ -349,6 +421,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return {
       headSha: pull.head.sha,
       baseSha: pull.base.sha,
+      baseRef: pull.base.ref,
       title: pull.title,
       state: merged ? "merged" : pull.state,
       isDraft: pull.draft ?? false,
@@ -598,8 +671,9 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return String(created.id);
   }
 
-  // One review carries every inline comment, posted as COMMENT: Sentryward never
-  // approves or requests changes. If GitHub rejects the batch (one bad anchor
+  // One review carries every inline comment, posted as COMMENT: approving or
+  // requesting changes is setApproval's separate step, so a failed approval
+  // never costs the comments. If GitHub rejects the batch (one bad anchor
   // fails the whole request), each comment is retried on its own so one
   // problem does not lose the rest.
   async postInlineComments(ref: ForgeRef, comments: InlineComment[]): Promise<InlineResult> {
@@ -702,6 +776,213 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         ...(status.targetUrl ? { target_url: status.targetUrl } : {}),
       }),
     });
+  }
+
+  // Sentryward's approval is its latest APPROVED or CHANGES_REQUESTED review:
+  // a later COMMENT review does not change it, and a dismissed one shows as
+  // DISMISSED. Without its own login it cannot tell its reviews apart, so an
+  // approval could never be withdrawn: it refuses to decide at all.
+  async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
+    if (!this.options.selfLogin) {
+      return {
+        state: "refused",
+        note: "Sentryward does not know its own GitHub account name (set GITHUB_APP_SLUG), so it could not withdraw an approval later",
+      };
+    }
+    // A token connection acts as a person: their own approvals carry the same
+    // login, so withdrawing would dismiss them too. Only an App posts as an
+    // identity of its own ("<slug>[bot]"; a login cannot contain brackets).
+    if (!this.options.selfLogin.endsWith("[bot]")) {
+      return {
+        state: "refused",
+        note: "Automatic approval needs a GitHub App connection: this connection acts as a person, so Sentryward could not tell its approvals from theirs",
+      };
+    }
+    const pulls = `${repoApiPath(ref.project)}/pulls/${ref.number}`;
+    const own = (await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext)).filter(
+      (review) => this.isSelfLogin(review.user?.login) && (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED"),
+    );
+    const current = own.at(-1);
+    if (action.action === "withdraw") {
+      // A retarget withdraws approvals only: a request for changes is no less
+      // right on another target.
+      const targets = action.approvalsOnly ? own.filter((review) => review.state === "APPROVED") : own;
+      if (!targets.length) return { state: "unchanged" };
+      // The caller has no record of what was reviewed (job history pruned), so
+      // the approval's own commit decides: one at the current head stands.
+      if (action.keepAt && current?.state === "APPROVED" && current.commit_id === action.keepAt) {
+        return { state: "unchanged" };
+      }
+      await this.dismissReviews(pulls, targets, action.body);
+      return { state: "withdrawn" };
+    }
+    const approve = action.action === "approve";
+    const approvals = own.filter((review) => review.state === "APPROVED");
+    // GitHub accepts a review of an older commit and counts an approval for
+    // the newer ones unless branch protection dismisses stale approvals, so a
+    // push (or a retarget) that raced the review must not inherit it, and a
+    // request for changes must not land on commits the review never saw.
+    // GitHub has no conditional write, so the head and base are checked before
+    // posting (cheap, catches most races) and again after, dismissing the
+    // review if they moved in between or cannot be confirmed. A push in the
+    // moment between the post and that second read can still slip through;
+    // teams that gate merges on this approval should dismiss stale approvals
+    // on push or also require the commit-specific sentryward/review status.
+    const pull = await this.http.json<GhPull>(pulls);
+    if (approve) {
+      // A hold label added since the publisher's own label read: this is the
+      // last read before the write, so it decides. An approval already given
+      // is withdrawn with it, as the label policy would on a fresh review.
+      const label = heldLabel(pull, action.holdLabels);
+      if (label !== undefined) {
+        if (approvals.length) {
+          await this.dismissReviews(pulls, approvals, `Sentryward no longer approves this change: it has the label "${label}".`);
+        }
+        return { state: approvals.length ? "withdrawn" : "unchanged", heldLabel: label };
+      }
+    }
+    const moved = movedFrom(pull, ref, action.baseRef);
+    // A moved base queues no review, so an earlier approval would go on
+    // counting for a target no review checked: it is withdrawn here. A push
+    // queues its own review, which decides about the approvals it finds, but a
+    // review that decided to request changes has already decided against them:
+    // with its request not posted, an earlier approval must not stand in its place.
+    if (moved && approvals.length && (moved === BASE_MOVED || !approve)) {
+      try {
+        await this.dismissReviews(
+          pulls,
+          approvals,
+          moved === BASE_MOVED
+            ? "Sentryward withdrew this approval: the pull request's target branch moved or was changed since it was given."
+            : "Sentryward withdrew this approval: a later review asked for changes, and the pull request moved on before they could be requested.",
+        );
+      } catch (err) {
+        throw new Error(`The pull request moved during the review, and withdrawing the earlier approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { ...moved, state: "withdrawn" };
+    }
+    if (moved) return moved;
+    // An approval follows the head, so a push gets a fresh one (branch
+    // protection may dismiss stale approvals). One already at the head is
+    // reused only once the check above showed the pull request is still at
+    // the head and base this review saw, so this review vouches for it. A
+    // request for changes stands until it is withdrawn; the summary comment
+    // already says what is wrong.
+    if (approve && current?.state === "APPROVED" && current.commit_id === ref.headSha) {
+      return { state: "unchanged" };
+    }
+    if (!approve && current?.state === "CHANGES_REQUESTED") {
+      return { state: "unchanged" };
+    }
+    let posted: { id: number };
+    try {
+      posted = await this.http.json<{ id: number }>(`${pulls}/reviews`, {
+        method: "POST",
+        body: JSON.stringify({
+          commit_id: ref.headSha,
+          event: approve ? "APPROVE" : "REQUEST_CHANGES",
+          body: action.body,
+        }),
+      });
+    } catch (err) {
+      // A token's own pull request: GitHub refuses any review decision on it.
+      if (err instanceof ForgeError && err.status === 422 && /own pull request/i.test(err.message)) {
+        return { state: "refused", note: "GitHub does not allow a review decision on a pull request opened by the same account" };
+      }
+      if (!isAmbiguousWriteError(err)) throw err;
+      // A timeout or a server error does not show the review was not posted;
+      // one that landed gets the same checks as one whose answer arrived.
+      const landed = await this.landedReview(pulls, own, ref.headSha, approve ? "APPROVED" : "CHANGES_REQUESTED", err);
+      if (!landed) throw err;
+      posted = landed;
+    }
+    let after: ApprovalOutcome | undefined;
+    let unconfirmed: unknown;
+    let label: string | undefined;
+    try {
+      const reread = await this.http.json<GhPull>(pulls);
+      after = movedFrom(reread, ref, action.baseRef);
+      if (approve) label = heldLabel(reread, action.holdLabels);
+    } catch (err) {
+      unconfirmed = err;
+    }
+    const earlier = approvals.filter((review) => review.id !== posted.id);
+    // A hold label that landed between the read above and the write. Earlier
+    // approvals (of older commits, which GitHub still counts) go with this
+    // one, as the label check before the write withdraws them too. It
+    // decides even when the head moved as well: the label holds the change
+    // back whatever a push's review would decide, as it does before the write.
+    if (unconfirmed === undefined && label !== undefined) {
+      try {
+        await this.dismissReviews(pulls, [posted, ...earlier], `Sentryward withdrew this approval: the pull request has the label "${label}".`);
+      } catch (err) {
+        throw new Error(`The pull request got the label "${label}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { state: "withdrawn", heldLabel: label };
+    }
+    if (after || unconfirmed !== undefined) {
+      // The review is withdrawn whenever its freshness is not confirmed. A
+      // failure here throws rather than returning a note, so the review
+      // shows an error: either the check failed, or the review stands on
+      // commits it never saw.
+      const why = unconfirmed !== undefined ? `the pull request could not be re-read (${errorText(unconfirmed)})` : "the pull request moved on during the review";
+      // A moved base queues no review, so earlier approvals are withdrawn
+      // with this one, as before the write. A push queues its own review,
+      // which decides about them. A request for changes always takes them
+      // along: it superseded them, and dismissing it must not bring them back.
+      const withEarlier = after === BASE_MOVED || !approve ? earlier : [];
+      const noun = approve ? "approval" : "request for changes";
+      try {
+        await this.dismissReviews(
+          pulls,
+          [posted, ...withEarlier],
+          approve
+            ? "Sentryward withdrew this approval: the pull request moved on during the review, or could not be checked."
+            : "Sentryward withdrew this review: the pull request moved on during the review, or could not be checked.",
+        );
+      } catch (err) {
+        throw new Error(`The ${noun} could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
+      }
+      if (unconfirmed !== undefined) {
+        throw new Error(`Could not confirm the pull request was still at the reviewed commits, so the ${noun} was withdrawn: ${errorText(unconfirmed)}`);
+      }
+      if (!approve) return { ...after!, state: "withdrawn" };
+      return withEarlier.length ? { ...BASE_MOVED, state: "withdrawn" } : after!;
+    }
+    return { state: approve ? "approved" : "changes_requested" };
+  }
+
+  // After a write with no clear answer: Sentryward's review of this kind at
+  // the head that was not there before the write, if one landed. A failed
+  // listing leaves the write's outcome unknown, which is an error of its own.
+  private async landedReview(
+    pulls: string,
+    before: GhReview[],
+    headSha: string,
+    state: "APPROVED" | "CHANGES_REQUESTED",
+    writeError: unknown,
+  ): Promise<{ id: number } | undefined> {
+    const known = new Set(before.map((review) => review.id));
+    let reviews: GhReview[];
+    try {
+      reviews = await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext);
+    } catch (err) {
+      throw new Error(
+        `Posting the review decision gave no clear answer (${errorText(writeError)}), and checking whether it landed failed, so it may stand unchecked: ${errorText(err)}`,
+      );
+    }
+    return reviews
+      .filter((review) => this.isSelfLogin(review.user?.login) && review.state === state && review.commit_id === headSha && !known.has(review.id))
+      .at(-1);
+  }
+
+  private async dismissReviews(pulls: string, reviews: Pick<GhReview, "id">[], message: string): Promise<void> {
+    for (const review of reviews) {
+      await this.http.request(`${pulls}/reviews/${review.id}/dismissals`, {
+        method: "PUT",
+        body: JSON.stringify({ message: message.slice(0, 1000), event: "DISMISS" }),
+      });
+    }
   }
 
   // Threads can only be resolved through GraphQL. GitHub Enterprise serves it

@@ -81,6 +81,16 @@ const schema: ConfigSchema = {
       highLevelSummaryInstructions: "",
       walkthroughLabels: true,
       walkthroughBlastRadius: true,
+      approval: {
+        enabled: false,
+        when: "pass",
+        requestChanges: false,
+        blockPaths: [],
+        onlyAuthors: [],
+        skipAuthors: [],
+        blockLabels: [],
+        blockOnRisk: [],
+      },
     },
     triggers: {
       review: "published",
@@ -186,6 +196,9 @@ describe("toSettings", () => {
       toolSupport: INHERIT,
       deepReview: INHERIT,
       agentFiles: INHERIT,
+      approval: INHERIT,
+      approvalWhen: INHERIT,
+      approvalRequestChanges: INHERIT,
     }
     expect(form.choices).toEqual(inherit)
     const next = {
@@ -202,6 +215,41 @@ describe("toSettings", () => {
       },
     })
     expect(toForm(toSettings({}, next)).lists.ignoreTitles).toEqual(["WIP", "Do not review"])
+  })
+
+  it("saves the approval settings under output.approval and reads them back", () => {
+    const form = toForm({})
+    expect(form.approvalRisk).toBeUndefined()
+    expect(form.lists.approvalBlockPaths).toEqual([])
+    const next = {
+      ...form,
+      choices: { ...form.choices, approval: "true", approvalWhen: "no_findings", approvalRequestChanges: "false" },
+      lists: { ...form.lists, approvalBlockPaths: [" infra/** "], approvalSkipAuthors: ["octocat"] },
+      approvalRisk: ["auth"],
+    }
+    const saved = toSettings({}, next)
+    expect(saved).toEqual({
+      output: {
+        approval: {
+          enabled: true,
+          when: "no_findings",
+          requestChanges: false,
+          blockPaths: ["infra/**"],
+          skipAuthors: ["octocat"],
+          blockOnRisk: ["auth"],
+        },
+      },
+    })
+    // The trigger skip list of the same name is a different setting.
+    expect(saved.triggers).toBeUndefined()
+    const back = toForm(saved)
+    expect(back.lists.approvalSkipAuthors).toEqual(["octocat"])
+    expect(back.lists.skipAuthors).toEqual([])
+    expect(back.choices.approval).toBe("true")
+    expect(back.approvalRisk).toEqual(["auth"])
+    // An empty risk list is a real value: no kind holds approval back.
+    expect(toSettings({}, { ...form, approvalRisk: [] })).toEqual({ output: { approval: { blockOnRisk: [] } } })
+    expect(toSettings(saved, { ...back, choices: { ...back.choices, approval: INHERIT } }).output?.approval?.enabled).toBeUndefined()
   })
 
   it("reads the legacy trigger keys into the code review trigger and drops them on save", () => {
