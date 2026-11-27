@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { GitHubAdapter, quoteCodeSearchTerm } from "../src/review/forge/github.ts";
 import { GitHubApp, githubApiBase } from "../src/review/forge/githubApp.ts";
 import { GitLabAdapter } from "../src/review/forge/gitlab.ts";
+import { ForgeCache } from "../src/review/forge/cache.ts";
 import { ForgeError } from "../src/review/forge/http.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 
@@ -80,6 +81,38 @@ describe("GitHubAdapter", () => {
     const files = { url: /\/pulls\/42\/files\?per_page=100$/, body: [{ filename: "src/a.ts", status: "modified", patch: PATCH, changes: 1 }] };
     expect((await adapter([pull(3001), files]).adapter.getChange("acme/web", 42)).filesTruncated).toBe(true);
     expect((await adapter([pull(1), files]).adapter.getChange("acme/web", 42)).filesTruncated).toBeUndefined();
+  });
+
+  // The files endpoint lists the PR as it is when asked, so a push between
+  // reading the PR and listing its files would pair new files with old shas.
+  describe("when the pull request moves while its files are listed", () => {
+    const pull = (head: string, times?: number) => ({
+      url: /\/repos\/acme\/web\/pulls\/42$/,
+      body: { title: "t", body: null, html_url: "h", base: { sha: "b", ref: "main" }, head: { sha: head, ref: "f" } },
+      ...(times ? { times } : {}),
+    });
+    const files = (filename: string, times?: number) => ({
+      url: /\/pulls\/42\/files\?per_page=100$/,
+      body: [{ filename, status: "modified", patch: PATCH, changes: 1 }],
+      ...(times ? { times } : {}),
+    });
+
+    it("reads it again and neither returns nor caches the listing it moved under", async () => {
+      const cache = new ForgeCache();
+      // The first read sees h1, the listing is already h2's, and the PR is
+      // read again (h2) after it; the retry then agrees with itself.
+      const { adapter: gh } = adapter([pull("h1", 1), pull("h2"), files("new.ts", 1), files("newer.ts")]);
+      const change = await gh.getChange("acme/web", 42, cache);
+      expect(change.forgeRef.headSha).toBe("h2");
+      expect(change.files.map((f) => f.path)).toEqual(["newer.ts"]);
+      // Only the verified listing (h2's) was cached.
+      expect(cache.size).toBe(1);
+    });
+
+    it("fails when it moves again on the retry", async () => {
+      const { adapter: gh } = adapter([pull("h1", 1), pull("h2", 1), pull("h3", 1), pull("h4"), files("a.ts")]);
+      await expect(gh.getChange("acme/web", 42)).rejects.toThrow(/kept moving while its files were being read/);
+    });
   });
 
   it("returns null for a file missing at a ref", async () => {

@@ -14,7 +14,7 @@ export interface ApprovalDecision {
   reasons: string[];
 }
 
-type Change = Pick<ChangeSet, "author" | "labels" | "files" | "filesTruncated">;
+type Change = Pick<ChangeSet, "author" | "labels" | "files" | "filesTruncated" | "liveHeadSha">;
 
 // Policies hold an approval back; they never grant one. Each match is a
 // reason, so the summary of a withdrawn approval says every one.
@@ -58,6 +58,15 @@ export function approvalHoldReasons(config: Config, change: Change): string[] {
   const narrowed = config.approvalGuard?.narrowed ?? [];
   const withheld = withheldPatches(change.files, config.ignorePaths);
   return [
+    // GitLab moves the merge request's sha on a push at once but serves the
+    // previous diff until it has diffed the new commits. The run reviewing that
+    // diff may be the one the push queued, so no later review would withdraw
+    // an approval it leaves standing.
+    ...(change.liveHeadSha !== undefined
+      ? [
+          `The forge had not yet computed the diff of the latest push (${change.liveHeadSha.slice(0, 8)}), so the newest commits were not checked; rerun the review to decide on an approval`,
+        ]
+      : []),
     ...(narrowed.length
       ? [`The repository file or trigger narrowed what the review checks (${narrowed.join(", ")}), so it is not approved automatically`]
       : []),

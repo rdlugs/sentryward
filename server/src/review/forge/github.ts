@@ -288,6 +288,9 @@ const BASE_MOVED: ApprovalOutcome = {
   note: "The pull request's target branch moved or was changed during the review; rerun the review to decide on an approval",
 };
 
+// The pull request's head or base moved while its files were listed.
+class PullMovedError extends Error {}
+
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -355,12 +358,20 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   }
 
   async getChange(project: string, number: number, cache?: ForgeCache): Promise<ChangeSet> {
-    const repoPath = repoApiPath(project);
-    const pull = await this.http.json<GhPull>(`${repoPath}/pulls/${number}`);
-    // The files of a PR are fixed by its base and head.
-    const files = await cached(cache, cacheKey("github-files", this.host, project, number, pull.base.sha, pull.head.sha), () =>
-      this.http.paginate<GhFile>(`${repoPath}/pulls/${number}/files?per_page=100`, linkHeaderNext, MAX_FILE_PAGES),
-    );
+    let read: { pull: GhPull; files: GhFile[] };
+    try {
+      read = await this.readPullFiles(project, number, cache);
+    } catch (err) {
+      if (!(err instanceof PullMovedError)) throw err;
+      // One retry: a push landing mid-read is common, two in a row are not.
+      try {
+        read = await this.readPullFiles(project, number, cache);
+      } catch (again) {
+        if (!(again instanceof PullMovedError)) throw again;
+        throw new Error(`Pull request #${number} kept moving while its files were being read; rerun the review`);
+      }
+    }
+    const { pull, files } = read;
 
     return {
       forgeRef: {
@@ -384,6 +395,24 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       files: files.map(toChangedFileFromGh),
       ...(pull.changed_files !== undefined && files.length < pull.changed_files ? { filesTruncated: true } : {}),
     };
+  }
+
+  // The files endpoint lists the PR as it is when asked, not at the shas read
+  // before it, so a push between the two reads would pair the new files with
+  // the old commits, both in the change set (which the approval's freshness
+  // checks compare against) and in the cache. The PR is read again after the
+  // listing, inside the memoized fetch: a listing the PR moved under throws, so
+  // it is neither used nor cached.
+  private async readPullFiles(project: string, number: number, cache?: ForgeCache): Promise<{ pull: GhPull; files: GhFile[] }> {
+    const repoPath = repoApiPath(project);
+    const pull = await this.http.json<GhPull>(`${repoPath}/pulls/${number}`);
+    const files = await cached(cache, cacheKey("github-files", this.host, project, number, pull.base.sha, pull.head.sha), async () => {
+      const listed = await this.http.paginate<GhFile>(`${repoPath}/pulls/${number}/files?per_page=100`, linkHeaderNext, MAX_FILE_PAGES);
+      const after = await this.http.json<GhPull>(`${repoPath}/pulls/${number}`);
+      if (after.head.sha !== pull.head.sha || after.base.sha !== pull.base.sha) throw new PullMovedError();
+      return listed;
+    });
+    return { pull, files };
   }
 
   async getChangeHead(project: string, number: number): Promise<ChangeHead> {

@@ -54,6 +54,7 @@ import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
 import { pushBurst } from "./burst.ts";
 import { incrementFor } from "./incremental.ts";
+import { holdChangeLock, type HeldLock } from "../lib/changeLock.ts";
 import { progressRecorder, reviewSteps, type ProgressRecorder, type WriteProgress } from "./progress.ts";
 import {
   ACCESS_LOST_REASON,
@@ -97,7 +98,14 @@ export interface RunJobDeps {
   resolveHost?: Resolve;
   // Where the dashboard's progress is written; absent means the job row.
   recordProgress?: WriteProgress;
+  // How long to wait, one entry per retry, for the forge to diff a push it
+  // already shows (GitLab, ChangeSet.liveHeadSha); absent means no waiting.
+  diffWaitMs?: number[];
 }
+
+// Bounds how long a run holds the change's approval lock (the approval write
+// and storing the job); past it the lock is let go rather than block webhooks.
+const APPROVAL_LOCK_MS = 120_000;
 
 const defaultDeps: RunJobDeps = {
   adapterFor: adapterForConnection,
@@ -105,6 +113,7 @@ const defaultDeps: RunJobDeps = {
   generateFor: createGenerate,
   credentialsFor: llmCredentialsFor,
   cache: forgeCache,
+  diffWaitMs: [2000, 5000, 10000],
 };
 
 // Pure trigger decisions, kept with the skip filters so the API's trigger
@@ -284,6 +293,15 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     throw new Error(CREDENTIALS_REJECTED_REASON);
   }
   if (repo.connection.credentialsRejectedAt) await recordCredentials(repo.connection, true);
+  // The job a push queued can start before GitLab has diffed that push, and
+  // would then review the previous diff. A short wait usually gets the new
+  // one; if not, the review goes ahead and the lag holds back the approval
+  // (publish/approve.ts approvalHoldReasons).
+  for (const wait of deps.diffWaitMs ?? []) {
+    if (changeSet.liveHeadSha === undefined) break;
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    changeSet = await forge.getChange(repo.fullPath, job.number, cacheFor(savedDisablesCache));
+  }
   // Stored now, not with the result, so a run that is skipped, cancelled or
   // fails from here on can still be found by the change's title.
   await recordTitle(job.id, changeSet.title, changeSet.authorId);
@@ -662,73 +680,85 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   let publication = null;
   let threadOutcome: ThreadOutcome | null = null;
-  if (publishing) {
-    const already = await prisma.postedFinding.findMany({
-      where: { repositoryId: repo.id, number: job.number },
-      select: { fingerprint: true },
-    });
-    // The same transitions syncFindings writes after the job is stored, plus
-    // thread updates an earlier run could not make.
-    const threads = threadOperations(findings, findingTransitions(findings, result));
-    progress.set({ stage: "publishing" });
-    publication = await publishReview({
-      publisher: forge,
-      changeSet,
-      result,
-      config,
-      postedFingerprints: new Set(already.map((row) => row.fingerprint)),
-      resolvedFingerprints: threads.resolve,
-      reopenedFingerprints: threads.reopen,
-      targetUrl,
-      // A cancel can land while publishing; the watch is stopped by now, so
-      // the claim is checked before each step instead.
-      proceed: ownsClaim,
-    });
-    if (publication.summaryCommentId) summaryPosted = true;
-    // Like the lifecycle: the summary was rendered with it, so a re-render
-    // from the stored result must hold back the same findings.
-    if (publication.heldBack) result = { ...result, heldBack: publication.heldBack };
-    if (resolvesThreads(config)) {
-      threadOutcome = { attempted: [...threads.resolve, ...threads.reopen], failed: publication.threadsFailed ?? [] };
-    }
-    if (publication.inlinePosted.length) {
-      await prisma.postedFinding.createMany({
-        data: publication.inlinePosted.map((posted) => ({
-          repositoryId: repo.id,
-          number: job.number,
-          fingerprint: posted.fingerprint,
-          forgeCommentId: posted.forgeCommentId,
-        })),
-        skipDuplicates: true,
+  // Held from the approval write until the job is stored, so a retarget
+  // webhook sees either no approval from this run or its record
+  // (services/providers/retarget.ts). Released in the finally below.
+  let approvalLock: HeldLock | undefined;
+  let stored = false;
+  try {
+    if (publishing) {
+      const already = await prisma.postedFinding.findMany({
+        where: { repositoryId: repo.id, number: job.number },
+        select: { fingerprint: true },
       });
+      // The same transitions syncFindings writes after the job is stored, plus
+      // thread updates an earlier run could not make.
+      const threads = threadOperations(findings, findingTransitions(findings, result));
+      progress.set({ stage: "publishing" });
+      publication = await publishReview({
+        publisher: forge,
+        changeSet,
+        result,
+        config,
+        postedFingerprints: new Set(already.map((row) => row.fingerprint)),
+        resolvedFingerprints: threads.resolve,
+        reopenedFingerprints: threads.reopen,
+        targetUrl,
+        // A cancel can land while publishing; the watch is stopped by now, so
+        // the claim is checked before each step instead.
+        proceed: ownsClaim,
+        beforeApproval: async () => {
+          approvalLock = await holdChangeLock("approval", repo.id, job.number, { timeoutMs: APPROVAL_LOCK_MS });
+        },
+      });
+      if (publication.summaryCommentId) summaryPosted = true;
+      // Like the lifecycle: the summary was rendered with it, so a re-render
+      // from the stored result must hold back the same findings.
+      if (publication.heldBack) result = { ...result, heldBack: publication.heldBack };
+      if (resolvesThreads(config)) {
+        threadOutcome = { attempted: [...threads.resolve, ...threads.reopen], failed: publication.threadsFailed ?? [] };
+      }
+      if (publication.inlinePosted.length) {
+        await prisma.postedFinding.createMany({
+          data: publication.inlinePosted.map((posted) => ({
+            repositoryId: repo.id,
+            number: job.number,
+            fingerprint: posted.fingerprint,
+            forgeCommentId: posted.forgeCommentId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+      // The comments that did go up are recorded above so a later run does not
+      // repost them; the job itself keeps the cancel, and findings are not synced.
+      if (publication.stopped) {
+        await cancel(true);
+        return;
+      }
     }
-    // The comments that did go up are recorded above so a later run does not
-    // repost them; the job itself keeps the cancel, and findings are not synced.
-    if (publication.stopped) {
-      await cancel(true);
-      return;
-    }
-  }
 
-  // A review that ran but could not be fully published is partial: the result
-  // stands, and the job says what did not reach the forge.
-  const errors = [...result.errors, ...(publication?.errors ?? [])];
-  const status = result.status === "completed" && publication?.errors.length ? "partial" : result.status;
-  // recordProgress only writes running jobs, so a stage still queued behind
-  // an earlier write (publishing, after a quick publish) would be dropped
-  // once the job is stored. Waiting here lets the last stage reach the row.
-  await progress.flush();
-  const stored = await complete(job.id, job.attempts, {
-    status,
-    verdict: result.verdict.verdict,
-    result,
-    summary: summarize(result),
-    publication,
-    resolvedConfig,
-    error: errors.length ? errors.join("\n") : null,
-    headSha: ref.headSha,
-    baseSha: ref.baseSha,
-  });
+    // A review that ran but could not be fully published is partial: the result
+    // stands, and the job says what did not reach the forge.
+    const errors = [...result.errors, ...(publication?.errors ?? [])];
+    const status = result.status === "completed" && publication?.errors.length ? "partial" : result.status;
+    // recordProgress only writes running jobs, so a stage still queued behind
+    // an earlier write (publishing, after a quick publish) would be dropped
+    // once the job is stored. Waiting here lets the last stage reach the row.
+    await progress.flush();
+    stored = await complete(job.id, job.attempts, {
+      status,
+      verdict: result.verdict.verdict,
+      result,
+      summary: summarize(result),
+      publication,
+      resolvedConfig,
+      error: errors.length ? errors.join("\n") : null,
+      headSha: ref.headSha,
+      baseSha: ref.baseSha,
+    });
+  } finally {
+    await approvalLock?.release();
+  }
   // A run superseded or cancelled meanwhile no longer speaks for the change,
   // and a trial never does. The review itself is stored by now, so a failed
   // sync must not fail the job.

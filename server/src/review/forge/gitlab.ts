@@ -834,8 +834,11 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     }
     const moved = glMovedFrom(current, ref, action.baseRef);
     // A retarget queues no review, so an earlier approval would go on counting
-    // for a target no review checked: it is withdrawn here. A push queues its
-    // own review, which decides about the approval it finds.
+    // for a target no review checked: it is withdrawn here. A push during the
+    // review queues its own review, which decides about the approval it finds.
+    // A push GitLab had not diffed when this review read the change never gets
+    // here: it may be the push that queued this very review, so the lag holds
+    // the approval back and the decision is a withdrawal (publish/approve.ts).
     if (moved === GL_BASE_MOVED && approved) {
       try {
         await this.http.request(`${mr}/unapprove`, { method: "POST" });

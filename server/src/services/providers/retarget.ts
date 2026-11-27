@@ -1,6 +1,12 @@
+import { holdChangeLock, type HeldLock } from "../../lib/changeLock.ts";
 import type { ForgeAdapter, ForgePublisher } from "../../review/forge/types.ts";
 import { lastPublishedReview, sameReviewedTarget, settledApproval } from "../approvalRecord.ts";
 import type { RepoWithConnection, WebhookOutcome } from "./types.ts";
+
+// How long a delivery waits for a run that is writing its approval, and how
+// long it may hold the lock itself (two forge reads and a withdrawal).
+const RETARGET_LOCK_WAIT_MS = 8_000;
+const RETARGET_LOCK_MS = 30_000;
 
 const RETARGET_BODY =
   "Sentryward withdrew this approval: the target branch was changed since it was given. Rerun the review to decide on an approval.";
@@ -26,19 +32,39 @@ export async function withdrawOnRetarget(
   repo: RepoWithConnection,
   number: number,
 ): Promise<WebhookOutcome> {
-  if (await settledForCurrentTarget(forge, repo, number)) return { body: { outcome: "approval_current" } };
+  // The check and the withdrawal are one step against approval publication: a
+  // review of the new target could otherwise approve and store its record
+  // between them, and the withdrawal would remove that fresh approval. A run
+  // holds the same lock from its approval write until its job is stored
+  // (worker/runJob.ts), so here either its record is already readable (and
+  // keeps the approval) or its approval is not written yet (and its own
+  // checks of the target run after this withdrawal). The wait is bounded so
+  // the delivery is answered in time; one that times out fails, to be
+  // redelivered.
+  let lock: HeldLock;
   try {
-    // Withdrawing reads the change by project and number only; the shas are
-    // not known from the delivery and not needed.
-    const outcome = await forge.setApproval(
-      { provider: repo.provider, host: repo.host, project: repo.fullPath, number, baseSha: "", startSha: "", headSha: "" },
-      { action: "withdraw", approvalsOnly: true, body: RETARGET_BODY },
-    );
-    return { body: { outcome: outcome.state === "withdrawn" ? "approval_withdrawn" : "ignored" } };
+    lock = await holdChangeLock("approval", repo.id, number, { timeoutMs: RETARGET_LOCK_MS, waitMs: RETARGET_LOCK_WAIT_MS });
   } catch (err) {
-    // A constant format string: the path is forge-provided text.
-    console.error("[webhook] could not withdraw the approval on retargeted change %s#%d", repo.fullPath, number, err);
+    console.error("[webhook] could not lock retargeted change %s#%d", repo.fullPath, number, err);
     return { status: 500, body: { outcome: "failed" } };
+  }
+  try {
+    if (await settledForCurrentTarget(forge, repo, number)) return { body: { outcome: "approval_current" } };
+    try {
+      // Withdrawing reads the change by project and number only; the shas are
+      // not known from the delivery and not needed.
+      const outcome = await forge.setApproval(
+        { provider: repo.provider, host: repo.host, project: repo.fullPath, number, baseSha: "", startSha: "", headSha: "" },
+        { action: "withdraw", approvalsOnly: true, body: RETARGET_BODY },
+      );
+      return { body: { outcome: outcome.state === "withdrawn" ? "approval_withdrawn" : "ignored" } };
+    } catch (err) {
+      // A constant format string: the path is forge-provided text.
+      console.error("[webhook] could not withdraw the approval on retargeted change %s#%d", repo.fullPath, number, err);
+      return { status: 500, body: { outcome: "failed" } };
+    }
+  } finally {
+    await lock.release();
   }
 }
 

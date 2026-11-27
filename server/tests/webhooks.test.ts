@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import request from "supertest";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
+import { holdChangeLock } from "../src/lib/changeLock.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { applyPendingMerges } from "../src/services/backlog.ts";
@@ -538,6 +539,47 @@ describe("POST /api/webhooks/github", () => {
 
     const res = await sendGithub("pull_request", { ...prEvent("edited"), changes: { base: { ref: { from: "main" } } } });
 
+    expect(res.body.outcome).toBe("approval_current");
+    expect(stub.calls.filter((c) => c.method === "PUT")).toEqual([]);
+  });
+
+  // A review of the new target that approves while the delivery is being
+  // handled holds the approval lock until its job is stored: the delivery
+  // waits for it and then finds its record, rather than deciding on the state
+  // before the approval and withdrawing it after.
+  it("waits for a run writing its approval and keeps the approval that run settled", async () => {
+    const repo = await githubRepo();
+    const stub = fetchStub([
+      {
+        method: "POST",
+        url: /\/app\/installations\/55\/access_tokens$/,
+        body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      },
+      retargetedPull,
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const lock = await holdChangeLock("approval", repo.id, 42, { timeoutMs: 10_000 });
+
+    const pending = Promise.resolve(sendGithub("pull_request", { ...prEvent("edited"), changes: { base: { ref: { from: "main" } } } }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Nothing read the change while the run held the lock.
+    expect(stub.calls.filter((c) => /\/pulls\/42$/.test(c.url))).toEqual([]);
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId: repo.id,
+        number: 42,
+        headSha: "sha1",
+        baseSha: "newbase",
+        trigger: "manual",
+        status: "completed",
+        finishedAt: new Date(),
+        result: { change: { baseRef: "release" } },
+        publication: { approval: { action: "approve", state: "approved", reasons: [] } },
+      },
+    });
+    await lock.release();
+
+    const res = await pending;
     expect(res.body.outcome).toBe("approval_current");
     expect(stub.calls.filter((c) => c.method === "PUT")).toEqual([]);
   });

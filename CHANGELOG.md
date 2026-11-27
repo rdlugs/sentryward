@@ -91,7 +91,17 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   does not revoke an approval given for the new target. A skipped GitLab run
   compares the MR's current source sha, not the diff refs GitLab may not have
   updated yet, before keeping an approval. A GitLab update that retargets an MR
-  and marks it ready in one go is still reviewed.
+  and marks it ready in one go is still reviewed. GitHub's file listing is
+  checked against the PR read again after it, and read once more (or the run
+  fails) when the PR moved meanwhile, so a review never pairs one push's files
+  with another's commits, in the change or in the forge cache. A GitLab run
+  that finds a push GitLab has not diffed yet waits briefly for the diff; if
+  it is still not ready, the review goes ahead on the previous diff and
+  withdraws the approval, since that run may be the one the push queued. A
+  retarget webhook and a run writing its approval take the same per-change
+  lock (the run holds it until its job is stored, the delivery waits up to 8
+  seconds and fails to be redelivered past that), so a delivery can no longer
+  withdraw an approval a review of the new target gave while it was handled.
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete

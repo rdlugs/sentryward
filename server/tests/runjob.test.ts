@@ -143,6 +143,9 @@ function deps(
     // The source branch's live head getChange reports beside a lagging diff
     // (GitLab's MR sha before its diff refs catch up).
     liveHead?: string;
+    // How many reads report liveHead before the diff catches up; absent means
+    // every read does.
+    liveHeadReads?: number;
     // A summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
     // Directory listings by "<ref>:<path>"; recorded as "dir:<ref>:<path>".
@@ -154,10 +157,12 @@ function deps(
   const toolReads: string[] = [];
   const published: Published = { inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] };
   const approvals: { action: string; body: string; headSha: string; keepAt?: string }[] = [];
+  let changeReads = 0;
   const forge = {
     provider: "github" as const,
     getChange: async (_p: string, _n: number, cache?: ForgeCache) => {
       reads.push(cache ? "change:cached" : "change");
+      changeReads += 1;
       if (options.changeError) throw options.changeError;
       const change = makeChangeSet(!cache && options.freshFiles ? options.freshFiles : options.files);
       return {
@@ -165,7 +170,9 @@ function deps(
         title: options.title ?? change.title,
         author: "alice",
         ...(options.labels ? { labels: options.labels } : {}),
-        ...(options.liveHead ? { liveHeadSha: options.liveHead } : {}),
+        ...(options.liveHead && (options.liveHeadReads === undefined || changeReads <= options.liveHeadReads)
+          ? { liveHeadSha: options.liveHead }
+          : {}),
         forgeRef: { ...change.forgeRef, headSha: options.head ?? "newhead", ...(options.base ? { baseSha: options.base } : {}) },
       };
     },
@@ -1701,7 +1708,7 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
       {
         action: "withdraw",
         headSha: "newhead",
-        body: expect.stringMatching(/commits since the last review were not reviewed/),
+        body: expect.stringMatching(/had not yet computed the diff of the latest push \(pushed\)/),
       },
     ]);
   });
@@ -1820,6 +1827,45 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     await prisma.repository.update({ where: { id: repositoryId }, data: { settings: { triggers: { reviewOnPush: false } } } });
     await reviewed("oldhead");
     expect(await skippedPush()).toEqual([]);
+  });
+});
+
+describe("runJob while the forge has not diffed the latest push", () => {
+  beforeEach(async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { settings: { output: { approval: { enabled: true } } } },
+    });
+  });
+
+  it("waits for the diff of the push and approves what it reviewed", async () => {
+    const job = await claimedJob();
+    const { runDeps, reads, approvals } = deps({}, { code_review: { findings: [] } }, undefined, { liveHead: "pushed", liveHeadReads: 1 });
+    runDeps.diffWaitMs = [0, 0, 0];
+
+    await runJob(job, runDeps);
+
+    // One wait was enough: the second read had the diff.
+    expect(reads.filter((read) => read.startsWith("change"))).toHaveLength(2);
+    expect(approvals).toEqual([expect.objectContaining({ action: "approve", headSha: "newhead" })]);
+  });
+
+  // The run may be the one the push queued, so no later review would withdraw
+  // an approval it left standing.
+  it("withdraws the approval when the diff still lags after waiting", async () => {
+    const job = await claimedJob();
+    const { runDeps, reads, approvals } = deps({}, { code_review: { findings: [] } }, undefined, { liveHead: "pushed" });
+    runDeps.diffWaitMs = [0];
+
+    await runJob(job, runDeps);
+
+    expect(reads.filter((read) => read.startsWith("change"))).toHaveLength(2);
+    expect(approvals).toEqual([expect.objectContaining({ action: "withdraw", headSha: "newhead" })]);
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("completed");
+    expect((stored.publication as { approval: { reasons: string[] } }).approval.reasons).toEqual([
+      expect.stringMatching(/had not yet computed the diff of the latest push \(pushed\)/),
+    ]);
   });
 });
 

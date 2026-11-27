@@ -24,6 +24,9 @@ export interface PublishInput {
   targetUrl?: string;
   // Asked before each step; false stops publishing (the job was cancelled).
   proceed?: () => Promise<boolean>;
+  // Awaited just before the approval is written; the worker takes the change's
+  // approval lock here (services/providers/retarget.ts says why).
+  beforeApproval?: () => Promise<void>;
 }
 
 export interface Publication {
@@ -222,6 +225,7 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
     // when one is there.
     const holdLabels = config.output.approval.blockLabels;
     try {
+      await input.beforeApproval?.();
       const outcome = await publisher.setApproval(ref, {
         action: action.action,
         body: approvalBody(result, action, input.targetUrl),
