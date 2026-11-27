@@ -111,12 +111,13 @@ export const gitlabProvider: ProviderDefinition = {
       }
 
       if (event === "Merge Request Hook") {
-        // A retarget withdraws Sentryward's approval (retarget.ts). When the
-        // same update also brought commits, the push is still reviewed below.
+        // A retarget withdraws Sentryward's approval (retarget.ts). The same
+        // update may also have brought commits or taken the MR out of draft, so
+        // it still goes through the trigger checks below; the retarget's own
+        // outcome is returned only when there is no review to queue.
         let retarget: WebhookOutcome | undefined;
         if (attrs.action === "update" && payload.changes?.target_branch && attrs.iid) {
           retarget = await withdrawOnRetarget(adapterFor(repo.connection), repo, attrs.iid);
-          if (!attrs.oldrev) return retarget;
         }
         // An update only matters when it brought new commits (oldrev is set) or
         // took the MR out of draft, GitLab's equivalent of "ready for review".

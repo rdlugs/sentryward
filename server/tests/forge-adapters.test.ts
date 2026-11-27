@@ -163,7 +163,7 @@ describe("GitHubAdapter", () => {
     const { adapter: gh, calls } = adapter([
       { url: /\/pulls\/42$/, body: { title: "t", state: "open", base: { sha: "b", ref: "main" }, head: { sha: "h", ref: "f" } } },
     ]);
-    expect(await gh.getChangeHead("acme/web", 42)).toEqual({ headSha: "h", baseSha: "b", title: "t", state: "open", isDraft: false });
+    expect(await gh.getChangeHead("acme/web", 42)).toEqual({ headSha: "h", baseSha: "b", baseRef: "main", title: "t", state: "open", isDraft: false });
     expect(calls).toHaveLength(1);
   });
 
@@ -681,17 +681,24 @@ describe("GitLabAdapter", () => {
 
   it("reads a merge request's head and base, falling back to its target branch", async () => {
     let refs: unknown = { base_sha: "b", start_sha: "s", head_sha: "h" };
+    let sha = "h";
     const { adapter: gl } = adapter([
       {
         url: /\/merge_requests\/7$/,
         get body() {
-          return { iid: 7, title: "t", state: "opened", sha: "h", target_branch: "main", diff_refs: refs };
+          return { iid: 7, title: "t", state: "opened", sha, target_branch: "main", diff_refs: refs };
         },
       },
     ]);
-    expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", baseSha: "b", state: "open" });
+    const current = await gl.getChangeHead("team/app", 7);
+    expect(current).toMatchObject({ headSha: "h", baseSha: "b", baseRef: "main", state: "open" });
+    expect(current.liveHeadSha).toBeUndefined();
+    // Pushed, but not diffed yet: the diff's head stays, the live one beside it.
+    sha = "h2";
+    expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", liveHeadSha: "h2" });
     // Just opened: GitLab has not computed the diff yet.
     refs = null;
+    sha = "h";
     expect(await gl.getChangeHead("team/app", 7)).toMatchObject({ headSha: "h", baseSha: "main" });
   });
 
@@ -717,6 +724,21 @@ describe("GitLabAdapter", () => {
     expect((await adapter([mr("1000+"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBe(true);
     expect((await adapter([mr("2"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBe(true);
     expect((await adapter([mr("1"), diffs]).adapter.getChange("team/app", 7)).filesTruncated).toBeUndefined();
+  });
+
+  it("carries the MR's live sha beside a diff GitLab has not caught up with", async () => {
+    const mr = (sha: string) => ({
+      url: /\/merge_requests\/7$/,
+      body: { iid: 7, title: "t", state: "opened", sha, source_branch: "f", target_branch: "main", web_url: "w", diff_refs: { base_sha: "b", start_sha: "s", head_sha: "h" } },
+    });
+    const diffs = {
+      url: /\/merge_requests\/7\/diffs\?per_page=100$/,
+      body: [{ old_path: "a.ts", new_path: "a.ts", new_file: false, renamed_file: false, deleted_file: false, diff: PATCH }],
+    };
+    const lagging = await adapter([mr("h2"), diffs]).adapter.getChange("team/app", 7);
+    expect(lagging.forgeRef.headSha).toBe("h");
+    expect(lagging.liveHeadSha).toBe("h2");
+    expect((await adapter([mr("h"), diffs]).adapter.getChange("team/app", 7)).liveHeadSha).toBeUndefined();
   });
 
   it("lists open merge requests by iid", async () => {

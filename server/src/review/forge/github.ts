@@ -392,6 +392,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return {
       headSha: pull.head.sha,
       baseSha: pull.base.sha,
+      baseRef: pull.base.ref,
       title: pull.title,
       state: merged ? "merged" : pull.state,
       isDraft: pull.draft ?? false,

@@ -113,6 +113,19 @@ describe("approvalDecision", () => {
     });
   });
 
+  it("holds the approval back when the forge withheld a diff the review would have read", async () => {
+    const withheld = (path: string, changeType: "modified" | "deleted" = "modified") =>
+      change({ files: makeChangeSet([{ path, changeType, patch: undefined }]).files });
+    expect(approvalDecision(config(), await passing(), withheld("src/huge.ts"))).toEqual({
+      action: "withdraw",
+      reasons: ["The forge withheld the diff of src/huge.ts, so not all of the change was checked"],
+    });
+    // A file the review leaves out anyway holds nothing back.
+    expect(approvalDecision(config(), await passing(), withheld("src/gone.ts", "deleted"))).toEqual({ action: "approve", reasons: [] });
+    const ignoring = resolveConfig({ global: { ignorePaths: ["vendor/**"], output: { approval: { enabled: true } } } }).config;
+    expect(approvalDecision(ignoring, await passing(), withheld("vendor/lib.js"))).toEqual({ action: "approve", reasons: [] });
+  });
+
   it("holds the approval back for a blocked path, on either side of a rename", async () => {
     const policy = config({ blockPaths: ["infra/**"] });
     const touched = change({

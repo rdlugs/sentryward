@@ -16,6 +16,11 @@ export interface ChangeHead {
   // A ref to read the base revision at: GitLab gives only the target branch
   // until it has computed the MR's diff.
   baseSha: string;
+  // The target branch, when the forge says.
+  baseRef?: string;
+  // As ChangeSet.liveHeadSha: set when the source branch has moved past the
+  // diff headSha describes (GitLab only).
+  liveHeadSha?: string;
   title: string;
   state: "open" | "closed" | "merged";
   isDraft: boolean;

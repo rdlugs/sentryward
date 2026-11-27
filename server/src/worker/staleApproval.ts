@@ -1,10 +1,10 @@
 import type { ReviewJob } from "../generated/prisma/client.ts";
-import { prisma } from "../lib/prisma.ts";
 import { skipFilterReason } from "../review/config/filters.ts";
 import type { Config } from "../review/config/schema.ts";
 import { approvalHoldReasons, approvalManaged } from "../review/publish/approve.ts";
 import type { ChangeSet } from "../review/core/models.ts";
 import type { ApprovalOutcome, ForgePublisher } from "../review/forge/types.ts";
+import { decidedAgainst, lastPublishedReview, sameReviewedTarget, settledApproval } from "../services/approvalRecord.ts";
 
 type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 
@@ -30,7 +30,9 @@ type Job = Pick<ReviewJob, "id" | "repositoryId" | "number" | "actor">;
 // to withdraw or request changes (a decision whose write failed is still on
 // record): an approval records its commit, never the target it was given for. Without such a
 // record (retention prunes job rows, the head or target moved, or the row
-// predates the target being stored) every approval is withdrawn.
+// predates the target being stored) every approval is withdrawn. The head
+// compared is the source branch's live one: GitLab can still serve the diff of
+// the previous push, whose head would match the last review.
 // Best effort: a failure is logged and the job is still recorded as skipped.
 export async function withdrawStaleApproval(
   publisher: Pick<ForgePublisher, "setApproval">,
@@ -41,7 +43,7 @@ export async function withdrawStaleApproval(
 ): Promise<ApprovalOutcome | undefined> {
   // A repository veto still withdraws (publish/approve.ts approvalManaged).
   if (!approvalManaged(config)) return undefined;
-  const head = changeSet.forgeRef.headSha;
+  const head = changeSet.liveHeadSha ?? changeSet.forgeRef.headSha;
   const filtered = skip === skipFilterReason(config.triggers, changeSet, job.actor);
   // Vetoed for this run: no earlier approval stands, whatever it covered.
   const vetoed = !config.output.approval.enabled;
@@ -55,20 +57,9 @@ export async function withdrawStaleApproval(
       ? `${held.map((reason) => reason.charAt(0).toLowerCase() + reason.slice(1)).join("; ")} (${skip})`
       : skip;
   if (!filtered && !vetoed && !held.length) {
-    const last = await prisma.reviewJob.findFirst({
-      where: {
-        repositoryId: job.repositoryId,
-        number: job.number,
-        status: { in: ["completed", "partial"] },
-        id: { not: job.id },
-        // A trial never published, so it never approved.
-        trial: false,
-      },
-      orderBy: { finishedAt: "desc" },
-      select: { headSha: true, baseSha: true, result: true, publication: true },
-    });
+    const last = await lastPublishedReview(job.repositoryId, job.number, job.id);
     const sameHead = last?.headSha === head;
-    const sameTarget = last !== null && sameReviewedTarget(last, changeSet);
+    const sameTarget = last !== null && sameReviewedTarget(last, { baseSha: changeSet.forgeRef.baseSha, baseRef: changeSet.baseRef });
     if (sameHead && sameTarget && settledApproval(last.publication)) return undefined;
     // keepAt only stands in for a missing record: when the last review
     // decided against approval (its write failed), an approval at this head
@@ -91,42 +82,4 @@ export async function withdrawStaleApproval(
     console.error(`[worker] could not withdraw the approval for skipped job ${job.id}`, err);
     return undefined;
   }
-}
-
-// Whether a review's publication shows it set the approval at its head: it
-// approved (or found its approval already there), requested changes or
-// withdrew. A refusal leaves whatever stood before, and "unchanged" without
-// the recorded action (rows from before it was stored) could be any of them.
-function settledApproval(publication: unknown): boolean {
-  const approval = (publication as { approval?: { action?: string; state?: string } } | null)?.approval;
-  switch (approval?.state) {
-    case "approved":
-    case "changes_requested":
-    case "withdrawn":
-      return true;
-    case "unchanged":
-      return approval.action !== undefined;
-    default:
-      return false;
-  }
-}
-
-// Whether a review decided against approval (withdraw or request changes),
-// whatever became of the write.
-function decidedAgainst(publication: unknown): boolean {
-  const action = (publication as { approval?: { action?: string } } | null)?.approval?.action;
-  return action === "withdraw" || action === "request_changes";
-}
-
-// Whether the last review saw the base commit and target branch the change has
-// now. Anything missing on either side counts as unverified, never as a match.
-function sameReviewedTarget(last: { baseSha: string | null; result: unknown }, changeSet: ChangeSet): boolean {
-  const baseRef = (last.result as { change?: { baseRef?: unknown } } | null)?.change?.baseRef;
-  return (
-    last.baseSha !== null &&
-    last.baseSha === changeSet.forgeRef.baseSha &&
-    typeof baseRef === "string" &&
-    changeSet.baseRef !== undefined &&
-    baseRef === changeSet.baseRef
-  );
 }

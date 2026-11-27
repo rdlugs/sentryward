@@ -56,12 +56,30 @@ export function approvalPolicyReasons(approval: Config["output"]["approval"], ch
 // an approval these forbid.
 export function approvalHoldReasons(config: Config, change: Change): string[] {
   const narrowed = config.approvalGuard?.narrowed ?? [];
+  const withheld = withheldPatches(change.files, config.ignorePaths);
   return [
     ...(narrowed.length
       ? [`The repository file or trigger narrowed what the review checks (${narrowed.join(", ")}), so it is not approved automatically`]
       : []),
+    ...(withheld.length
+      ? [
+          `The forge withheld the diff of ${withheld[0]}${withheld.length > 1 ? ` (and ${plural(withheld.length - 1, "more file")})` : ""}, so not all of the change was checked`,
+        ]
+      : []),
     ...approvalPolicyReasons(config.output.approval, change),
   ];
+}
+
+// Files the review would have read but whose diff the forge left out (GitLab
+// flags too_large or collapsed entries, GitHub drops the patch of a large
+// file): the same files classifyFiles (context/ignore.ts) omits as
+// patch_unavailable, so a file the review skips anyway (ignored, deleted,
+// binary) holds nothing back.
+function withheldPatches(files: Change["files"], ignorePaths: string[]): string[] {
+  const ignored = ignoreMatcher(ignorePaths);
+  return files
+    .filter((file) => file.patchUnavailable && !file.isBinary && file.changeType !== "deleted" && !ignored(file.path))
+    .map((file) => file.path);
 }
 
 const VETO_LABELS: Record<NonNullable<Config["approvalVeto"]>, string> = {

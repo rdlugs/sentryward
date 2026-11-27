@@ -140,6 +140,9 @@ function deps(
     changeError?: Error;
     // The labels getChange reports.
     labels?: string[];
+    // The source branch's live head getChange reports beside a lagging diff
+    // (GitLab's MR sha before its diff refs catch up).
+    liveHead?: string;
     // A summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
     // Directory listings by "<ref>:<path>"; recorded as "dir:<ref>:<path>".
@@ -162,6 +165,7 @@ function deps(
         title: options.title ?? change.title,
         author: "alice",
         ...(options.labels ? { labels: options.labels } : {}),
+        ...(options.liveHead ? { liveHeadSha: options.liveHead } : {}),
         forgeRef: { ...change.forgeRef, headSha: options.head ?? "newhead", ...(options.base ? { baseSha: options.base } : {}) },
       };
     },
@@ -1686,6 +1690,20 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     await approvingSettings();
     await reviewed("newhead");
     expect(await skippedPush()).toEqual([]);
+  });
+
+  // GitLab moves the MR's sha on a push at once but its diff refs later: the
+  // diff fetched still names the reviewed head, while the branch moved on.
+  it("withdraws when the forge's diff still names the reviewed head but the branch moved on", async () => {
+    await approvingSettings();
+    await reviewed("newhead");
+    expect(await skippedPush({ liveHead: "pushed" })).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        body: expect.stringMatching(/commits since the last review were not reviewed/),
+      },
+    ]);
   });
 
   // The head was reviewed, but that review left no approval behind (approval

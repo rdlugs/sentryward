@@ -101,6 +101,11 @@ export const changeSetSchema = z.object({
   // The forge stopped listing files before the end (GitHub stops at 3000), so
   // `files` is only part of the change. Approval is held back on it.
   filesTruncated: z.boolean().optional(),
+  // The source branch's current commit when the forge has not diffed it yet
+  // (GitLab moves the MR's sha at once but its diff refs later).
+  // forgeRef.headSha stays the commit of the diff that was fetched; this is
+  // what an approval kept without a review must still match.
+  liveHeadSha: z.string().optional(),
 });
 export type ChangeSet = z.infer<typeof changeSetSchema>;
 

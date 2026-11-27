@@ -83,7 +83,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   timed out, dropped or got a server error is checked against the forge, so
   one that landed gets the same freshness checks (a GitLab approval that
   cannot be checked is unapproved). The sidebar shows a request for changes that
-  was already standing as "Changes requested", not "Still approved".
+  was already standing as "Changes requested", not "Still approved". A change
+  is not approved when the forge withheld the diff of a file the review would
+  have read (GitLab's too large or collapsed diffs, GitHub's large files). A
+  retarget webhook keeps an approval the last review settled at the change's
+  current head, base sha and target branch, so a late or redelivered delivery
+  does not revoke an approval given for the new target. A skipped GitLab run
+  compares the MR's current source sha, not the diff refs GitLab may not have
+  updated yet, before keeping an approval. A GitLab update that retargets an MR
+  and marks it ready in one go is still reviewed.
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete

@@ -184,6 +184,13 @@ function toRepo(project: GlProject): ForgeRepo {
   };
 }
 
+// The MR's sha moves on a push at once, its diff refs only once GitLab has
+// diffed the new commits: until then the diff (and the head it names) is the
+// previous one, and the live head is carried beside it.
+function liveHead(mr: Pick<GlMergeRequest, "sha" | "diff_refs">): { liveHeadSha?: string } {
+  return mr.diff_refs && mr.sha && mr.sha !== mr.diff_refs.head_sha ? { liveHeadSha: mr.sha } : {};
+}
+
 // GitLab counts the changed files itself; fewer listed, or a count it gave up
 // on, means the listing is only part of the change.
 function filesTruncated(count: string | null | undefined, listed: number): boolean {
@@ -378,6 +385,7 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       labels: mr.labels ?? [],
       files: diffs.map(toChangedFileFromGl),
       ...(overflow || filesTruncated(mr.changes_count, diffs.length) ? { filesTruncated: true } : {}),
+      ...liveHead(mr),
     };
   }
 
@@ -386,6 +394,8 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     return {
       headSha: mr.diff_refs?.head_sha ?? mr.sha,
       baseSha: mr.diff_refs?.base_sha ?? mr.target_branch,
+      baseRef: mr.target_branch,
+      ...liveHead(mr),
       title: mr.title,
       state: mr.state === "merged" ? "merged" : mr.state === "closed" ? "closed" : "open",
       isDraft: mr.draft ?? mr.work_in_progress ?? false,
