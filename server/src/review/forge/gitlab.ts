@@ -730,10 +730,18 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     });
   }
 
+  // Labels as the forge has them now, for the approval policy.
+  async getLabels(ref: ForgeRef): Promise<string[]> {
+    const mr = await this.http.json<GlMergeRequest>(this.mergeRequest(ref));
+    return mr.labels ?? [];
+  }
+
   // GitLab approvals carry no text and have no "request changes", so a request
   // for changes only withdraws Sentryward's approval; the summary comment says
   // why. The approval is pinned to the head sha, so a push racing the review
-  // fails it rather than approving commits the review never saw.
+  // fails it rather than approving commits the review never saw. Approvals
+  // record no commit, so ApprovalAction.keepAt cannot apply: without history
+  // a withdrawal goes ahead, which errs on the side of no approval.
   async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
     // Without its own login it cannot see its approval, so it would approve
     // again on every run and never withdraw.
@@ -744,7 +752,9 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       };
     }
     const mr = this.mergeRequest(ref);
-    const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[] }>(`${mr}/approvals`);
+    const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[]; user_can_approve?: boolean }>(
+      `${mr}/approvals`,
+    );
     const approved = (approvals.approved_by ?? []).some((entry) => this.isSelfLogin(entry.user.username));
     if (action.action !== "approve") {
       if (!approved) return { state: "unchanged" };
@@ -752,16 +762,15 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       return { state: "withdrawn" };
     }
     if (approved) return { state: "unchanged" };
-    try {
-      await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
-    } catch (err) {
-      // The author may not approve (the project prevents it, or the token
-      // opened the MR), or the token's role cannot approve at all.
-      if (err instanceof ForgeError && (err.status === 401 || err.status === 403)) {
-        return { state: "refused", note: "GitLab did not let this account approve the merge request" };
-      }
-      throw err;
+    // GitLab says outright when this account may not approve this MR (the
+    // project prevents author approval, the token opened it, or its role or
+    // the approval rules leave it out). Only that is an expected refusal: a
+    // 401 or 403 from the approve call itself may be a revoked or
+    // under-scoped token, which has to show as an error.
+    if (approvals.user_can_approve === false) {
+      return { state: "refused", note: "GitLab did not let this account approve the merge request" };
     }
+    await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
     return { state: "approved" };
   }
 

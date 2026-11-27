@@ -187,6 +187,10 @@ export const STATUS_CONTEXT = "sentryward/review";
 export interface ApprovalAction {
   action: "approve" | "request_changes" | "withdraw";
   body: string;
+  // withdraw only: leave an approval of this commit in place where the forge
+  // records which commit an approval covers (GitHub). For callers that have
+  // no record of what Sentryward last reviewed.
+  keepAt?: string;
 }
 
 // "refused": the forge would not let Sentryward approve (its own change, or the
@@ -232,6 +236,8 @@ export interface ForgePublisher {
   // Adds and removes labels; removing one the change does not carry is not an error.
   setLabels(ref: ForgeRef, add: string[], remove: string[]): Promise<void>;
   setCommitStatus(ref: ForgeRef, status: CommitStatus): Promise<void>;
+  // The labels the change carries now, read from the forge.
+  getLabels(ref: ForgeRef): Promise<string[]>;
   // Approves the change at ref.headSha, requests changes, or withdraws what
   // Sentryward said before. Never merges.
   setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome>;

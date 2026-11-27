@@ -150,7 +150,7 @@ function deps(
   const reads: string[] = [];
   const toolReads: string[] = [];
   const published: Published = { inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] };
-  const approvals: { action: string; body: string; headSha: string }[] = [];
+  const approvals: { action: string; body: string; headSha: string; keepAt?: string }[] = [];
   const forge = {
     provider: "github" as const,
     getChange: async (_p: string, _n: number, cache?: ForgeCache) => {
@@ -227,6 +227,8 @@ function deps(
     setLabels: async (_ref: unknown, add: string[]) => {
       published.labels.push(add);
     },
+    // What getChange reported plus what this run added, as the forge would.
+    getLabels: async () => [...(options.labels ?? []), ...published.labels.flat()],
     setCommitStatus: async (_ref: unknown, status: { state: string }) => {
       published.statuses.push(status.state);
     },
@@ -235,7 +237,7 @@ function deps(
       published.threads.push({ fingerprints, resolved });
       return { updated: fingerprints, failed: [] };
     },
-    setApproval: async (ref: { headSha: string }, action: { action: string; body: string }) => {
+    setApproval: async (ref: { headSha: string }, action: { action: string; body: string; keepAt?: string }) => {
       approvals.push({ ...action, headSha: ref.headSha });
       return { state: action.action === "approve" ? "approved" : "withdrawn" };
     },
@@ -1666,11 +1668,24 @@ describe("runJob withdraws a stale approval on a skipped run", () => {
     ]);
   });
 
-  it("leaves it alone when the last review saw this head, or there was none", async () => {
+  it("leaves it alone when the last review saw this head", async () => {
     await approvingSettings();
-    expect(await skippedPush()).toEqual([]);
     await reviewed("newhead");
     expect(await skippedPush()).toEqual([]);
+  });
+
+  // Retention may have pruned the history while the forge approval stands, so
+  // the forge decides, keeping an approval of this very head.
+  it("asks the forge to withdraw, keeping an approval of the head, when no review is on record", async () => {
+    await approvingSettings();
+    expect(await skippedPush()).toEqual([
+      {
+        action: "withdraw",
+        headSha: "newhead",
+        keepAt: "newhead",
+        body: expect.stringMatching(/no review of the current commits is on record/),
+      },
+    ]);
   });
 
   it("withdraws for a skip label even on a head already reviewed", async () => {

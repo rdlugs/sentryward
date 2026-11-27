@@ -102,8 +102,12 @@ function recordingPublisher(
     // Whether a summary comment from an earlier run is on the change.
     summaryOnForge?: boolean;
     approval?: ApprovalOutcome | Error;
+    // The labels on the forge when publishing starts (setLabels updates them),
+    // or an error for getLabels to throw.
+    forgeLabels?: string[] | Error;
   } = {},
 ) {
+  let forgeLabels = options.forgeLabels instanceof Error ? [] : [...(options.forgeLabels ?? [])];
   const calls = {
     inline: [] as InlineComment[],
     summaries: [] as string[],
@@ -145,6 +149,11 @@ function recordingPublisher(
     },
     setLabels: async (_ref, add, remove) => {
       calls.labels.push({ add, remove });
+      forgeLabels = [...forgeLabels.filter((name) => !remove.includes(name)), ...add];
+    },
+    getLabels: async () => {
+      if (options.forgeLabels instanceof Error) throw options.forgeLabels;
+      return forgeLabels;
     },
     setCommitStatus: async (_ref, status) => {
       calls.statuses.push(status);
@@ -694,6 +703,46 @@ describe("publishReview approval", () => {
       postedFingerprints: new Set(),
     });
     expect(small.approval?.state).toBe("approved");
+  });
+
+  it("reads the labels again before approving, and withholds approval when it cannot", async () => {
+    const held = recordingPublisher({ forgeLabels: ["do-not-merge"] });
+    const publication = await publishReview({
+      publisher: held.publisher,
+      changeSet: { ...makeChangeSet(), labels: [] },
+      result: await passing(),
+      config: approving({ blockLabels: ["do-not-merge"] }),
+      postedFingerprints: new Set(),
+    });
+    expect(held.calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
+    expect(publication.approval).toEqual({ state: "withdrawn", reasons: ['The change has the label "do-not-merge"'] });
+
+    const unreadable = recordingPublisher({ forgeLabels: new Error("502 Bad Gateway") });
+    const failed = await publishReview({
+      publisher: unreadable.publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving(),
+      postedFingerprints: new Set(),
+    });
+    expect(unreadable.calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
+    expect(failed.approval?.reasons).toEqual(["The change's current labels could not be read, so the label policy could not be checked"]);
+    expect(failed.errors).toEqual(["Labels could not be re-read for the approval: 502 Bad Gateway"]);
+  });
+
+  it("withdraws instead of requesting changes on GitLab", async () => {
+    const { publisher, calls } = recordingPublisher();
+    const changeSet = makeChangeSet();
+    const publication = await publishReview({
+      publisher,
+      changeSet: { ...changeSet, forgeRef: { ...changeSet.forgeRef, provider: "gitlab", host: "gitlab.com" } },
+      result: await sampleResult(),
+      config: approving({ requestChanges: true }),
+      postedFingerprints: new Set(),
+    });
+    expect(calls.approvals.map((a) => a.action)).toEqual(["withdraw"]);
+    expect(calls.approvals[0]!.body).toContain("no longer approves");
+    expect(publication.approval?.reasons).toEqual(["1 finding at or above critical"]);
   });
 
   it("is not sent once proceed says the job was cancelled", async () => {

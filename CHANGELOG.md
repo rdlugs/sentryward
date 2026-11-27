@@ -27,12 +27,20 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   page's sidebar shows the outcome and the reasons, and the Display preview
   returns what would happen. Safeguards: `.sentryward.yaml` (and the trigger)
   can only tighten approval, never turn it on or drop a block; a GitHub
-  approval is not posted when the head moved during the review; a skipped run
+  approval is not posted when the head moved during the review, and is
+  dismissed again when the head moved while it was being posted; a skipped run
   withdraws the approval when commits arrived since the last review or a skip
-  filter matched; a change whose file list the forge cut short is not
-  approved; `block_labels` sees the labels the review itself sets; and without
-  its own login (`GITHUB_APP_SLUG` for a GitHub App) Sentryward makes no
-  approval decision, since it could not withdraw one later.
+  filter matched, and when no review is on record (pruned history) it asks the
+  forge to withdraw, keeping a GitHub approval of the current head; a change
+  whose file list the forge cut short is not approved; `block_labels` is
+  checked against the labels read from the forge just before approving (so a
+  hold label added mid-review counts, and an unreadable label list withholds
+  the approval); a GitLab refusal is only a note when GitLab reports the
+  account cannot approve the MR, while other 401/403 errors mark the review
+  partial; the preview shows a withdrawal rather than a request for changes on
+  GitLab, as publishing does; and without its own login (`GITHUB_APP_SLUG` for
+  a GitHub App) Sentryward makes no approval decision, since it could not
+  withdraw one later.
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`
   on, the PR summary now splits each linked issue into its concrete

@@ -760,7 +760,9 @@ output:
   pattern in the diff, as for deep review) is not approved. Neither is a change
   whose file list the forge cut short (GitHub lists at most 3000 files), since
   part of it went unchecked. `block_labels` is matched against the labels the
-  change carries after the review sets its own (blast radius, effort). The
+  change carries after the review sets its own (blast radius, effort), read
+  from the forge again just before approving, so a label someone added during
+  the review counts; if they cannot be read, the change is not approved. The
   review page's sidebar lists the reasons.
 - **Repository file**: `.sentryward.yaml` can only tighten approval. It can
   turn approval off, ask for `when: no_findings`, add `block_paths`,
@@ -775,13 +777,22 @@ output:
 - GitHub approvals are tied to the head commit, so a push gets a fresh approval
   once it is reviewed. Before approving, Sentryward checks the pull request's
   head again and does not approve if a push landed mid-review (shown as a
-  note). GitLab approvals are pinned to the head sha, so such a push makes the
-  approval fail rather than approve unseen commits.
+  note); after approving it checks once more and dismisses its approval if the
+  head moved in between. GitHub has no conditional write, so a push in the
+  instant between the approval and that last check can still be covered until
+  the push's own review decides. If this approval gates merges, turn on
+  "Dismiss stale pull request approvals when new commits are pushed" in branch
+  protection, or also require the `sentryward/review` status check, which is
+  set per commit. GitLab approvals are pinned to the head sha, so such a push
+  makes the approval fail rather than approve unseen commits.
 - **Skipped runs**: when a run is skipped (automatic reviews off for pushes, a
   draft, a burst pause, a skip filter), Sentryward withdraws its approval if
   commits arrived since the last review, or if the skip came from a skip
-  label, author, title or branch filter. An approval never covers commits
-  Sentryward did not review.
+  label, author, title or branch filter. When no earlier review is on record
+  (its history was pruned), it still asks the forge to withdraw; on GitHub an
+  approval of the current head is kept, while on GitLab, where approvals record
+  no commit, it is withdrawn. An approval never covers commits Sentryward did
+  not review.
 - **Its own account**: Sentryward has to know the login it acts as to find and
   withdraw its approval. For a GitHub App that means setting
   `GITHUB_APP_SLUG`; without it (or without a GitLab username on the
@@ -791,7 +802,9 @@ output:
   above, and an approval rule that includes the account where rules apply).
   The forge refuses an approval of the account's own change (GitHub always,
   GitLab when the project prevents author approval); that is shown as a note,
-  not a failure.
+  not a failure. On GitLab only an account GitLab reports as unable to approve
+  the MR counts as a refusal; any other 401 or 403 (a revoked or under-scoped
+  token, say) marks the review partial with the error.
 - Whether an approval from Sentryward counts toward required approvals depends
   on the forge's branch protection or approval rules, not on Sentryward.
 - Turning the setting off leaves any approval already given in place.

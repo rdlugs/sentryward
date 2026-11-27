@@ -1,5 +1,7 @@
 import type { Config } from "../config/schema.ts";
 import type { ChangeSet, ReviewResult } from "../core/models.ts";
+import type { ForgeProvider } from "../core/models.ts";
+import { FORGE_INFO } from "../forge/providers.ts";
 import type { ApprovalAction } from "../forge/types.ts";
 import { plural } from "../core/plural.ts";
 import { ignoreMatcher } from "../context/ignore.ts";
@@ -68,6 +70,14 @@ export function approvalDecision(config: Config, result: ReviewResult, change: C
   }
   const reasons = approvalPolicyReasons(approval, change);
   return { action: reasons.length ? "withdraw" : "approve", reasons };
+}
+
+// The decision as the forge can carry it out: where there is no "request
+// changes", a request for changes withdraws. Shared by publishing and the
+// preview so the preview never promises what publishing will not do.
+export function forgeApprovalDecision(provider: ForgeProvider, decision: ApprovalDecision): ApprovalDecision {
+  if (decision.action === "request_changes" && !FORGE_INFO[provider].requestChanges) return { ...decision, action: "withdraw" };
+  return decision;
 }
 
 // The review body that goes with the approval or request for changes, and the

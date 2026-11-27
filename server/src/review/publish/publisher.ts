@@ -4,7 +4,7 @@ import type { ApprovalState, ForgePublisher, PostedComment } from "../forge/type
 import { inlineLimits, inlineSelection } from "../core/buckets.ts";
 import { WALKTHROUGH_MARKER, withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummaryBlock, toMarkdown, walkthroughMarkdown, walkthroughOptions } from "../render/markdown.ts";
-import { approvalBody, approvalDecision } from "./approve.ts";
+import { approvalBody, approvalDecision, forgeApprovalDecision, type ApprovalDecision } from "./approve.ts";
 import { inlineComments } from "./inline.ts";
 import { labelChanges, labelsAfter } from "./labels.ts";
 import { commitStatus } from "./status.ts";
@@ -210,9 +210,25 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
 
   // Last, so the summary and status already explain the decision when it
   // lands. A refusal (the forge's own rules) is a note, not a failure.
-  const decision = approvalDecision(config, result, { ...changeSet, labels });
+  let decision = approvalDecision(config, result, { ...changeSet, labels });
   if (decision) {
     if (await halted()) return publication;
+    // The labels above were read before the review: someone may have added a
+    // hold label since. An approval is only given against the labels the
+    // forge has now, and not at all when they cannot be read.
+    if (decision.action === "approve") {
+      try {
+        const current = await publisher.getLabels(ref);
+        decision = approvalDecision(config, result, { ...changeSet, labels: current })!;
+      } catch (err) {
+        publication.errors.push(`Labels could not be re-read for the approval: ${message(err)}`);
+        decision = {
+          action: "withdraw",
+          reasons: ["The change's current labels could not be read, so the label policy could not be checked"],
+        } satisfies ApprovalDecision;
+      }
+    }
+    decision = forgeApprovalDecision(ref.provider, decision);
     try {
       const outcome = await publisher.setApproval(ref, {
         action: decision.action,

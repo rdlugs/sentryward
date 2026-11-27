@@ -275,6 +275,11 @@ function reviewComment(comment: InlineComment) {
   };
 }
 
+const MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The pull request moved to a newer commit during the review; the next review decides",
+};
+
 export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, ForgeThreads {
   readonly provider = "github" as const;
   readonly host: string;
@@ -717,6 +722,15 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     });
   }
 
+  // Labels as the forge has them now, for the approval policy.
+  async getLabels(ref: ForgeRef): Promise<string[]> {
+    const labels = await this.http.paginate<{ name: string }>(
+      `${repoApiPath(ref.project)}/issues/${ref.number}/labels?per_page=100`,
+      linkHeaderNext,
+    );
+    return labels.map((label) => label.name);
+  }
+
   // Sentryward's approval is its latest APPROVED or CHANGES_REQUESTED review:
   // a later COMMENT review does not change it, and a dismissed one shows as
   // DISMISSED. Without its own login it cannot tell its reviews apart, so an
@@ -735,6 +749,11 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     const current = own.at(-1);
     if (action.action === "withdraw") {
       if (!own.length) return { state: "unchanged" };
+      // The caller has no record of what was reviewed (job history pruned), so
+      // the approval's own commit decides: one at the current head stands.
+      if (action.keepAt && current?.state === "APPROVED" && current.commit_id === action.keepAt) {
+        return { state: "unchanged" };
+      }
       for (const review of own) {
         await this.http.request(`${pulls}/reviews/${review.id}/dismissals`, {
           method: "PUT",
@@ -755,15 +774,17 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     // GitHub accepts an approval of an older commit and counts it for the
     // newer ones unless branch protection dismisses stale approvals, so a push
     // that raced the review must not inherit it. The push queues its own
-    // review, which decides.
-    if (action.action === "approve") {
-      const pull = await this.http.json<GhPull>(pulls);
-      if (pull.head.sha !== ref.headSha) {
-        return { state: "refused", note: "The pull request moved to a newer commit during the review; the next review decides" };
-      }
-    }
+    // review, which decides. GitHub has no conditional write, so the head is
+    // checked before posting (cheap, catches most races) and again after,
+    // dismissing the approval if it moved in between. A push in the moment
+    // between the post and that second read can still slip through; teams
+    // that gate merges on this approval should dismiss stale approvals on push
+    // or also require the commit-specific sentryward/review status.
+    const pull = action.action === "approve" ? await this.http.json<GhPull>(pulls) : undefined;
+    if (pull && pull.head.sha !== ref.headSha) return MOVED;
+    let posted: { id: number };
     try {
-      await this.http.request(`${pulls}/reviews`, {
+      posted = await this.http.json<{ id: number }>(`${pulls}/reviews`, {
         method: "POST",
         body: JSON.stringify({
           commit_id: ref.headSha,
@@ -777,6 +798,18 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         return { state: "refused", note: "GitHub does not allow a review decision on a pull request opened by the same account" };
       }
       throw err;
+    }
+    if (action.action === "approve") {
+      const after = await this.http.json<GhPull>(pulls);
+      if (after.head.sha !== ref.headSha) {
+        // A failed dismissal throws: the approval stands on unseen commits, so
+        // the review must show an error rather than a note.
+        await this.http.request(`${pulls}/reviews/${posted.id}/dismissals`, {
+          method: "PUT",
+          body: JSON.stringify({ message: "Sentryward withdrew this approval: the pull request moved on during the review.", event: "DISMISS" }),
+        });
+        return MOVED;
+      }
     }
     return { state: action.action === "approve" ? "approved" : "changes_requested" };
   }

@@ -35,7 +35,7 @@ const gitlab = (routes: StubRoute[]) => {
   return { ...stub, gl: new GitLabAdapter({ host: "gitlab.com", token: async () => "t", selfLogin: "sentryward-bot", fetch: stub.fetch }) };
 };
 const body = (call: { body?: string }) => JSON.parse(call.body ?? "{}");
-// The pull request as setApproval re-reads it just before approving.
+// The pull request as setApproval re-reads it just before and after approving.
 const pullAt = (sha: string): StubRoute => ({ url: /\/pulls\/42$/, body: { head: { sha } } });
 
 describe("GitHub publishing", () => {
@@ -285,6 +285,37 @@ describe("GitHub publishing", () => {
     const moved = github([{ url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }, pullAt("newer")]);
     expect(await moved.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
     expect(moved.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("dismisses its new approval when the pull request moved while it was posted", async () => {
+    const { gh, calls } = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] },
+      { ...pullAt("head"), times: 1 },
+      pullAt("newer"),
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "PUT"]);
+    expect(body(calls[4]!)).toMatchObject({ event: "DISMISS" });
+  });
+
+  it("keeps an approval of the given commit when withdrawing without history", async () => {
+    const reviews = (commit: string) => ({
+      url: /\/pulls\/42\/reviews\?per_page=100$/,
+      body: [{ id: 2, state: "APPROVED", commit_id: commit, user: { login: "sentryward[bot]" } }],
+    });
+    const current = github([reviews("head")]);
+    expect(await current.gh.setApproval(ghRef, { action: "withdraw", body: "x", keepAt: "head" })).toEqual({ state: "unchanged" });
+    expect(current.calls).toHaveLength(1);
+
+    const stale = github([reviews("old"), { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} }]);
+    expect(await stale.gh.setApproval(ghRef, { action: "withdraw", body: "x", keepAt: "head" })).toEqual({ state: "withdrawn" });
+  });
+
+  it("reads the pull request's current labels", async () => {
+    const { gh } = github([{ url: /\/issues\/42\/labels\?per_page=100$/, body: [{ name: "do-not-merge" }, { name: "bug" }] }]);
+    expect(await gh.getLabels(ghRef)).toEqual(["do-not-merge", "bug"]);
   });
 
   it("refuses every decision when it does not know its own login", async () => {
@@ -568,12 +599,22 @@ describe("GitLab publishing", () => {
     expect(others.calls).toHaveLength(1);
   });
 
-  it("reports an approval GitLab does not allow as refused", async () => {
-    const { gl } = gitlab([
-      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [] } },
+  it("refuses only when GitLab says the account cannot approve, and reports other failures", async () => {
+    const ineligible = gitlab([{ url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: false } }]);
+    expect(await ineligible.gl.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(ineligible.calls.some((c) => c.method === "POST")).toBe(false);
+
+    // A 401 from the approve call itself may be a revoked token: an error, not a note.
+    const unauthorized = gitlab([
+      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: true } },
       { method: "POST", url: /\/merge_requests\/42\/approve$/, status: 401, body: { message: "401 Unauthorized" } },
     ]);
-    expect(await gl.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    await expect(unauthorized.gl.setApproval(glRef, { action: "approve", body: "ok" })).rejects.toThrow(/401/);
+  });
+
+  it("reads the merge request's current labels", async () => {
+    const { gl } = gitlab([{ url: /\/merge_requests\/42$/, body: { labels: ["do-not-merge"] } }]);
+    expect(await gl.getLabels(glRef)).toEqual(["do-not-merge"]);
   });
 
   it("refuses every decision when it does not know its own username", async () => {

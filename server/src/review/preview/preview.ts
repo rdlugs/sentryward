@@ -7,7 +7,7 @@ import { labelChanges, labelsAfter } from "../publish/labels.ts";
 import { withDescriptionSummary } from "../core/markers.ts";
 import { descriptionSummary, summaryPlacement, withInlineSelection } from "../publish/publisher.ts";
 import { commitStatus } from "../publish/status.ts";
-import { approvalDecision, type ApprovalDecision } from "../publish/approve.ts";
+import { approvalDecision, forgeApprovalDecision, type ApprovalDecision } from "../publish/approve.ts";
 import { SAMPLE_NOW, sampleChange, sampleGenerate, sampleIssues } from "./sample.ts";
 
 export interface DiffLine {
@@ -101,7 +101,7 @@ export async function previewPublication(config: Config, provider: ForgeProvider
     },
     status: output.postCheck ? commitStatus(result) : null,
     // Judged on the labels after this run's own, as publishing does.
-    approval: approvalDecision(config, result, { ...change, labels: labelsAfter(change.labels, labels) }),
+    approval: previewApproval(provider, approvalDecision(config, result, { ...change, labels: labelsAfter(change.labels, labels) })),
     // The sample change has no earlier summary to update.
     summaryComment: placement.summaryCreate ? placement.summary : null,
     walkthroughComment: placement.walkthroughComment,
@@ -119,4 +119,9 @@ export async function previewPublication(config: Config, provider: ForgeProvider
         }))
       : [],
   };
+}
+
+// As the forge would carry it out (GitLab has no request for changes).
+function previewApproval(provider: ForgeProvider, decision: ApprovalDecision | null): ApprovalDecision | null {
+  return decision && forgeApprovalDecision(provider, decision);
 }
