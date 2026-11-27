@@ -2,7 +2,7 @@ import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
 import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
-import { ForgeError, ForgeHttp, isNotFound, linkHeaderNext, type FetchLike } from "./http.ts";
+import { ForgeError, ForgeHttp, isAmbiguousWriteError, isNotFound, linkHeaderNext, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
 import { githubApiBase } from "./githubApp.ts";
 import { closingIssueNumbers, MAX_CANDIDATE_ISSUES } from "./issues.ts";
@@ -280,8 +280,9 @@ const MOVED: ApprovalOutcome = {
   note: "The pull request moved to a newer commit during the review; the next review decides",
 };
 
-// A moved base queues no review (only new commits and reopening do), so the
-// note says a rerun is needed rather than leaving it to a next review.
+// A moved base queues no review (only new commits and reopening do; a
+// retarget webhook only withdraws), so the note says a rerun is needed rather
+// than leaving it to a next review.
 const BASE_MOVED: ApprovalOutcome = {
   state: "refused",
   note: "The pull request's target branch moved or was changed during the review; rerun the review to decide on an approval",
@@ -773,63 +774,74 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     );
     const current = own.at(-1);
     if (action.action === "withdraw") {
-      if (!own.length) return { state: "unchanged" };
+      // A retarget withdraws approvals only: a request for changes is no less
+      // right on another target.
+      const targets = action.approvalsOnly ? own.filter((review) => review.state === "APPROVED") : own;
+      if (!targets.length) return { state: "unchanged" };
       // The caller has no record of what was reviewed (job history pruned), so
       // the approval's own commit decides: one at the current head stands.
       if (action.keepAt && current?.state === "APPROVED" && current.commit_id === action.keepAt) {
         return { state: "unchanged" };
       }
-      await this.dismissReviews(pulls, own, action.body);
+      await this.dismissReviews(pulls, targets, action.body);
       return { state: "withdrawn" };
     }
-    // GitHub accepts an approval of an older commit and counts it for the
-    // newer ones unless branch protection dismisses stale approvals, so a push
-    // (or a retarget) that raced the review must not inherit it. A push queues
-    // its own review, which decides. GitHub has no conditional write, so the
-    // head and base are checked before posting (cheap, catches most races) and
-    // again after, dismissing the approval if they moved in between or cannot
-    // be confirmed. A push in the moment between the post and that second read
-    // can still slip through; teams that gate merges on this approval should
-    // dismiss stale approvals on push or also require the commit-specific
-    // sentryward/review status.
-    if (action.action === "approve") {
-      const pull = await this.http.json<GhPull>(pulls);
+    const approve = action.action === "approve";
+    const approvals = own.filter((review) => review.state === "APPROVED");
+    // GitHub accepts a review of an older commit and counts an approval for
+    // the newer ones unless branch protection dismisses stale approvals, so a
+    // push (or a retarget) that raced the review must not inherit it, and a
+    // request for changes must not land on commits the review never saw.
+    // GitHub has no conditional write, so the head and base are checked before
+    // posting (cheap, catches most races) and again after, dismissing the
+    // review if they moved in between or cannot be confirmed. A push in the
+    // moment between the post and that second read can still slip through;
+    // teams that gate merges on this approval should dismiss stale approvals
+    // on push or also require the commit-specific sentryward/review status.
+    const pull = await this.http.json<GhPull>(pulls);
+    if (approve) {
       // A hold label added since the publisher's own label read: this is the
       // last read before the write, so it decides. An approval already given
       // is withdrawn with it, as the label policy would on a fresh review.
       const label = heldLabel(pull, action.holdLabels);
       if (label !== undefined) {
-        const approvals = own.filter((review) => review.state === "APPROVED");
         if (approvals.length) {
           await this.dismissReviews(pulls, approvals, `Sentryward no longer approves this change: it has the label "${label}".`);
         }
         return { state: approvals.length ? "withdrawn" : "unchanged", heldLabel: label };
       }
-      const moved = movedFrom(pull, ref, action.baseRef);
-      // A moved base queues no review, so an earlier approval would go on
-      // counting for a target no review checked: it is withdrawn here. A push
-      // queues its own review, which decides about the approvals it finds.
-      const stale = own.filter((review) => review.state === "APPROVED");
-      if (moved === BASE_MOVED && stale.length) {
-        try {
-          await this.dismissReviews(pulls, stale, "Sentryward withdrew this approval: the pull request's target branch moved or was changed since it was given.");
-        } catch (err) {
-          throw new Error(`The pull request's target branch moved during the review, and withdrawing the earlier approval failed, so it still stands: ${errorText(err)}`);
-        }
-        return { ...BASE_MOVED, state: "withdrawn" };
-      }
-      if (moved) return moved;
     }
+    const moved = movedFrom(pull, ref, action.baseRef);
+    // A moved base queues no review, so an earlier approval would go on
+    // counting for a target no review checked: it is withdrawn here. A push
+    // queues its own review, which decides about the approvals it finds, but a
+    // review that decided to request changes has already decided against them:
+    // with its request not posted, an earlier approval must not stand in its place.
+    if (moved && approvals.length && (moved === BASE_MOVED || !approve)) {
+      try {
+        await this.dismissReviews(
+          pulls,
+          approvals,
+          moved === BASE_MOVED
+            ? "Sentryward withdrew this approval: the pull request's target branch moved or was changed since it was given."
+            : "Sentryward withdrew this approval: a later review asked for changes, and the pull request moved on before they could be requested.",
+        );
+      } catch (err) {
+        throw new Error(`The pull request moved during the review, and withdrawing the earlier approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { ...moved, state: "withdrawn" };
+    }
+    if (moved) return moved;
     // An approval follows the head, so a push gets a fresh one (branch
     // protection may dismiss stale approvals). One already at the head is
     // reused only once the check above showed the pull request is still at
     // the head and base this review saw, so this review vouches for it. A
     // request for changes stands until it is withdrawn; the summary comment
     // already says what is wrong.
-    if (action.action === "approve" && current?.state === "APPROVED" && current.commit_id === ref.headSha) {
+    if (approve && current?.state === "APPROVED" && current.commit_id === ref.headSha) {
       return { state: "unchanged" };
     }
-    if (action.action === "request_changes" && current?.state === "CHANGES_REQUESTED") {
+    if (!approve && current?.state === "CHANGES_REQUESTED") {
       return { state: "unchanged" };
     }
     let posted: { id: number };
@@ -838,7 +850,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
         method: "POST",
         body: JSON.stringify({
           commit_id: ref.headSha,
-          event: action.action === "approve" ? "APPROVE" : "REQUEST_CHANGES",
+          event: approve ? "APPROVE" : "REQUEST_CHANGES",
           body: action.body,
         }),
       });
@@ -847,60 +859,91 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       if (err instanceof ForgeError && err.status === 422 && /own pull request/i.test(err.message)) {
         return { state: "refused", note: "GitHub does not allow a review decision on a pull request opened by the same account" };
       }
-      throw err;
+      if (!isAmbiguousWriteError(err)) throw err;
+      // A timeout or a server error does not show the review was not posted;
+      // one that landed gets the same checks as one whose answer arrived.
+      const landed = await this.landedReview(pulls, own, ref.headSha, approve ? "APPROVED" : "CHANGES_REQUESTED", err);
+      if (!landed) throw err;
+      posted = landed;
     }
-    if (action.action === "approve") {
-      let moved: ApprovalOutcome | undefined;
-      let unconfirmed: unknown;
-      let label: string | undefined;
+    let after: ApprovalOutcome | undefined;
+    let unconfirmed: unknown;
+    let label: string | undefined;
+    try {
+      const reread = await this.http.json<GhPull>(pulls);
+      after = movedFrom(reread, ref, action.baseRef);
+      if (approve) label = heldLabel(reread, action.holdLabels);
+    } catch (err) {
+      unconfirmed = err;
+    }
+    const earlier = approvals.filter((review) => review.id !== posted.id);
+    // A hold label that landed between the read above and the write. Earlier
+    // approvals (of older commits, which GitHub still counts) go with this
+    // one, as the label check before the write withdraws them too. It
+    // decides even when the head moved as well: the label holds the change
+    // back whatever a push's review would decide, as it does before the write.
+    if (unconfirmed === undefined && label !== undefined) {
       try {
-        const pull = await this.http.json<GhPull>(pulls);
-        moved = movedFrom(pull, ref, action.baseRef);
-        label = heldLabel(pull, action.holdLabels);
+        await this.dismissReviews(pulls, [posted, ...earlier], `Sentryward withdrew this approval: the pull request has the label "${label}".`);
       } catch (err) {
-        unconfirmed = err;
+        throw new Error(`The pull request got the label "${label}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
       }
-      // A hold label that landed between the read above and the write. Earlier
-      // approvals (of older commits, which GitHub still counts) go with this
-      // one, as the label check before the write withdraws them too. It
-      // decides even when the head moved as well: the label holds the change
-      // back whatever a push's review would decide, as it does before the write.
-      if (unconfirmed === undefined && label !== undefined) {
-        const earlier = own.filter((review) => review.state === "APPROVED" && review.id !== posted.id);
-        try {
-          await this.dismissReviews(pulls, [posted, ...earlier], `Sentryward withdrew this approval: the pull request has the label "${label}".`);
-        } catch (err) {
-          throw new Error(`The pull request got the label "${label}" while it was being approved, and withdrawing the approval failed, so it still stands: ${errorText(err)}`);
-        }
-        return { state: "withdrawn", heldLabel: label };
-      }
-      if (moved || unconfirmed !== undefined) {
-        // The approval is withdrawn whenever its freshness is not confirmed. A
-        // failure here throws rather than returning a note, so the review
-        // shows an error: either the check failed, or the approval stands on
-        // commits the review never saw.
-        const why = unconfirmed !== undefined ? `the pull request could not be re-read (${errorText(unconfirmed)})` : "the pull request moved on during the review";
-        // A moved base queues no review, so earlier approvals are withdrawn
-        // with this one, as before the write. A push queues its own review,
-        // which decides about them.
-        const baseMoved = moved === BASE_MOVED;
-        const earlier = baseMoved ? own.filter((review) => review.state === "APPROVED" && review.id !== posted.id) : [];
-        try {
-          await this.dismissReviews(
-            pulls,
-            [posted, ...earlier],
-            "Sentryward withdrew this approval: the pull request moved on during the review, or could not be checked.",
-          );
-        } catch (err) {
-          throw new Error(`The approval could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
-        }
-        if (unconfirmed !== undefined) {
-          throw new Error(`Could not confirm the pull request was still at the reviewed commits, so the approval was withdrawn: ${errorText(unconfirmed)}`);
-        }
-        return earlier.length ? { ...BASE_MOVED, state: "withdrawn" } : moved!;
-      }
+      return { state: "withdrawn", heldLabel: label };
     }
-    return { state: action.action === "approve" ? "approved" : "changes_requested" };
+    if (after || unconfirmed !== undefined) {
+      // The review is withdrawn whenever its freshness is not confirmed. A
+      // failure here throws rather than returning a note, so the review
+      // shows an error: either the check failed, or the review stands on
+      // commits it never saw.
+      const why = unconfirmed !== undefined ? `the pull request could not be re-read (${errorText(unconfirmed)})` : "the pull request moved on during the review";
+      // A moved base queues no review, so earlier approvals are withdrawn
+      // with this one, as before the write. A push queues its own review,
+      // which decides about them. A request for changes always takes them
+      // along: it superseded them, and dismissing it must not bring them back.
+      const withEarlier = after === BASE_MOVED || !approve ? earlier : [];
+      const noun = approve ? "approval" : "request for changes";
+      try {
+        await this.dismissReviews(
+          pulls,
+          [posted, ...withEarlier],
+          approve
+            ? "Sentryward withdrew this approval: the pull request moved on during the review, or could not be checked."
+            : "Sentryward withdrew this review: the pull request moved on during the review, or could not be checked.",
+        );
+      } catch (err) {
+        throw new Error(`The ${noun} could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
+      }
+      if (unconfirmed !== undefined) {
+        throw new Error(`Could not confirm the pull request was still at the reviewed commits, so the ${noun} was withdrawn: ${errorText(unconfirmed)}`);
+      }
+      if (!approve) return { ...after!, state: "withdrawn" };
+      return withEarlier.length ? { ...BASE_MOVED, state: "withdrawn" } : after!;
+    }
+    return { state: approve ? "approved" : "changes_requested" };
+  }
+
+  // After a write with no clear answer: Sentryward's review of this kind at
+  // the head that was not there before the write, if one landed. A failed
+  // listing leaves the write's outcome unknown, which is an error of its own.
+  private async landedReview(
+    pulls: string,
+    before: GhReview[],
+    headSha: string,
+    state: "APPROVED" | "CHANGES_REQUESTED",
+    writeError: unknown,
+  ): Promise<{ id: number } | undefined> {
+    const known = new Set(before.map((review) => review.id));
+    let reviews: GhReview[];
+    try {
+      reviews = await this.http.paginate<GhReview>(`${pulls}/reviews?per_page=100`, linkHeaderNext);
+    } catch (err) {
+      throw new Error(
+        `Posting the review decision gave no clear answer (${errorText(writeError)}), and checking whether it landed failed, so it may stand unchecked: ${errorText(err)}`,
+      );
+    }
+    return reviews
+      .filter((review) => this.isSelfLogin(review.user?.login) && review.state === state && review.commit_id === headSha && !known.has(review.id))
+      .at(-1);
   }
 
   private async dismissReviews(pulls: string, reviews: Pick<GhReview, "id">[], message: string): Promise<void> {

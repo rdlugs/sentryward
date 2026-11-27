@@ -2,7 +2,7 @@ import type { DirListing } from "../context/gather.ts";
 import { markersIn, SUMMARY_MARKER, withoutDescriptionBlock } from "../core/markers.ts";
 import type { ChangedFile, ChangeSet, ChangeType, ForgeRef, IssueContext } from "../core/models.ts";
 import { toChangedFile } from "../diff/parse.ts";
-import { ForgeError, ForgeHttp, isNotFound, type FetchLike } from "./http.ts";
+import { ForgeError, ForgeHttp, isAmbiguousWriteError, isNotFound, type FetchLike } from "./http.ts";
 import { cacheKey, cached, type ForgeCache } from "./cache.ts";
 import { MAX_CANDIDATE_ISSUES, MAX_LINKED_ISSUES } from "./issues.ts";
 import {
@@ -198,8 +198,9 @@ const GL_MOVED: ApprovalOutcome = {
   note: "The merge request moved to a newer commit during the review; the next review decides",
 };
 
-// A retarget queues no review (only new commits and reopening do), so the note
-// says a rerun is needed rather than leaving it to a next review.
+// A retarget or a moved base queues no review (only new commits and reopening
+// do; a retarget webhook only withdraws), so the note says a rerun is needed
+// rather than leaving it to a next review.
 const GL_BASE_MOVED: ApprovalOutcome = {
   state: "refused",
   note: "The merge request's target branch moved or was changed during the review; rerun the review to decide on an approval",
@@ -843,7 +844,14 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     if (approvals.user_can_approve === false) {
       return { state: "refused", note: "GitLab did not let this account approve the merge request" };
     }
-    await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
+    try {
+      await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
+    } catch (err) {
+      if (!isAmbiguousWriteError(err)) throw err;
+      // A timeout or a server error does not show the approval was not given;
+      // one that landed gets the same checks as one whose answer arrived.
+      await this.reconcileApproval(mr, err);
+    }
     let after: ApprovalOutcome | undefined;
     let unconfirmed: unknown;
     let afterLabel: string | undefined;
@@ -878,6 +886,28 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       return after!;
     }
     return { state: "approved" };
+  }
+
+  // After an approve call with no clear answer: returns when Sentryward's
+  // approval is there (the checks after the write then decide about it), and
+  // rethrows when it is not. When that cannot be read, the approval is
+  // withdrawn blind, erring on the side of no approval.
+  private async reconcileApproval(mr: string, writeError: unknown): Promise<void> {
+    let approved: boolean;
+    try {
+      const approvals = await this.http.json<{ approved_by?: { user: { username: string } }[] }>(`${mr}/approvals`);
+      approved = (approvals.approved_by ?? []).some((entry) => this.isSelfLogin(entry.user.username));
+    } catch (readError) {
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (unapproveError) {
+        throw new Error(
+          `Approving gave no clear answer (${errorText(writeError)}), checking whether it landed failed (${errorText(readError)}), and withdrawing it failed too, so it may stand unchecked: ${errorText(unapproveError)}`,
+        );
+      }
+      throw new Error(`Approving gave no clear answer (${errorText(writeError)}) and checking whether it landed failed, so any approval was withdrawn: ${errorText(readError)}`);
+    }
+    if (!approved) throw writeError;
   }
 
   // Project hooks need Maintainer access; callers treat a failure as "automatic

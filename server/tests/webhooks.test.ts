@@ -435,6 +435,58 @@ describe("POST /api/webhooks/github", () => {
     expect(await prisma.reviewJob.count()).toBe(0);
   });
 
+  it("withdraws its approval, and queues nothing, when the pull request is retargeted", async () => {
+    await githubRepo();
+    const token = {
+      method: "POST",
+      url: /\/app\/installations\/55\/access_tokens$/,
+      body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+    };
+    const reviews = {
+      url: /\/repos\/acme\/web\/pulls\/42\/reviews\?per_page=100$/,
+      body: [
+        { id: 2, state: "APPROVED", commit_id: "sha1", user: { login: "sentryward-test[bot]" } },
+        { id: 3, state: "CHANGES_REQUESTED", commit_id: "sha1", user: { login: "sentryward-test[bot]" } },
+        { id: 4, state: "APPROVED", commit_id: "sha1", user: { login: "alice" } },
+      ],
+    };
+    const stub = fetchStub([token, reviews, { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} }]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const retarget = { ...prEvent("edited"), changes: { base: { ref: { from: "main" }, sha: { from: "old" } } } };
+
+    const res = await sendGithub("pull_request", retarget);
+
+    expect(res.body.outcome).toBe("approval_withdrawn");
+    // Only its own approval: its request for changes and alice's approval stay.
+    expect(stub.calls.filter((c) => c.method === "PUT").map((c) => c.url)).toEqual([expect.stringMatching(/reviews\/2\/dismissals$/)]);
+    expect(await prisma.reviewJob.count()).toBe(0);
+
+    // An edit that leaves the target alone (a title, say) is not a retarget.
+    expect((await sendGithub("pull_request", { ...prEvent("edited"), changes: { title: { from: "x" } } })).body.outcome).toBe("ignored");
+  });
+
+  it("fails the delivery when withdrawing on a retarget fails, so it can be redelivered", async () => {
+    await githubRepo();
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([
+        {
+          method: "POST",
+          url: /\/app\/installations\/55\/access_tokens$/,
+          body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        },
+        { url: /\/pulls\/42\/reviews\?per_page=100$/, status: 502, body: { message: "Bad Gateway" } },
+      ]).fetch,
+    );
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await sendGithub("pull_request", { ...prEvent("edited"), changes: { base: { ref: { from: "main" } } } });
+    quiet.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(res.body.outcome).toBe("failed");
+  });
+
   it("detaches an uninstalled installation but keeps its review history", async () => {
     const repo = await githubRepo();
     await prisma.reviewJob.create({ data: { repositoryId: repo.id, number: 42, headSha: "sha1", trigger: "manual" } });
@@ -638,6 +690,30 @@ describe("POST /api/webhooks/gitlab/:repoId", () => {
         .outcome,
     ).toBe("queued");
     expect(await prisma.reviewJob.count({ where: { status: { not: "superseded" } } })).toBe(1);
+  });
+
+  it("unapproves when the merge request is retargeted, and still reviews commits pushed with it", async () => {
+    const repo = await gitlabRepo();
+    const stub = fetchStub([
+      { url: /\/api\/v4\/user$/, body: { username: "bot", bot: true } },
+      { url: /\/projects\/team%2Fapp\/merge_requests\/7\/approvals$/, body: { approved_by: [{ user: { username: "bot" } }] } },
+      { method: "POST", url: /\/projects\/team%2Fapp\/merge_requests\/7\/unapprove$/, body: {} },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const changes = { target_branch: { previous: "main", current: "release" } };
+
+    const res = await sendGitlab(repo.id, "Merge Request Hook", { ...mrEvent("update"), changes });
+
+    expect(res.body.outcome).toBe("approval_withdrawn");
+    expect(stub.calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual([expect.stringMatching(/\/unapprove$/)]);
+    expect(await prisma.reviewJob.count()).toBe(0);
+
+    const pushed = await sendGitlab(repo.id, "Merge Request Hook", {
+      ...mrEvent("update", { oldrev: "x", last_commit: { id: "next" } }),
+      changes,
+    });
+    expect(pushed.body.outcome).toBe("queued");
+    expect(stub.calls.filter((c) => c.url.endsWith("/unapprove"))).toHaveLength(2);
   });
 
   it("stores the merge request's author with the queued job", async () => {

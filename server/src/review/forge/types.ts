@@ -193,6 +193,10 @@ export interface ApprovalAction {
   // settled the approval; it says nothing about the target the approval
   // was given for.
   keepAt?: string;
+  // withdraw only: dismiss Sentryward's approvals and keep a request for
+  // changes (GitHub; GitLab has none). For a retarget, which leaves no review
+  // vouching for an approval but does not make a request for changes wrong.
+  approvalsOnly?: boolean;
   // approve only: the target branch the review saw, so an approval is not
   // posted on a change retargeted mid-review (both forges check it).
   baseRef?: string;

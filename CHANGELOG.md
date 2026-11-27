@@ -72,7 +72,17 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   after posting dismisses Sentryward's earlier approvals along with the new
   one; and a repository file or trigger that turns approval off while the
   dashboard has it on withdraws an earlier approval (on skipped runs too)
-  instead of leaving it in place. The sidebar shows a request for changes that
+  instead of leaving it in place; retargeting a PR/MR withdraws Sentryward's
+  approval from the webhook, even when automatic reviews are off (a GitHub
+  request for changes stays, and a failed withdrawal fails the delivery so it
+  can be redelivered); a GitHub request for changes gets the same head and
+  base checks before and after it is posted as an approval, withdrawing
+  Sentryward's earlier approvals rather than posting on commits the review
+  never saw, and dismissing the new request along with them when the PR moved
+  while it was posted; and an approval (or request for changes) write that
+  timed out, dropped or got a server error is checked against the forge, so
+  one that landed gets the same freshness checks (a GitLab approval that
+  cannot be checked is unapproved). The sidebar shows a request for changes that
   was already standing as "Changes requested", not "Still approved".
 
 - Requirement checks for linked issues. With `output.assess_linked_issues`

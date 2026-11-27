@@ -15,6 +15,14 @@ export class ForgeError extends Error {
   }
 }
 
+// Whether a failed write may still have landed: the request timed out, the
+// connection dropped, or the forge answered with a server error, none of which
+// says it did nothing. A 4xx is the forge refusing the write.
+export function isAmbiguousWriteError(err: unknown): boolean {
+  if (!(err instanceof ForgeError)) return true;
+  return err.status === 0 || err.status >= 500;
+}
+
 export interface ForgeHttpOptions {
   baseUrl: string;
   headers: () => Promise<Record<string, string>>;

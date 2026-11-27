@@ -526,13 +526,103 @@ describe("GitHub publishing", () => {
     const reviews = (list: unknown[]) => ({ url: /\/pulls\/42\/reviews\?per_page=100$/, body: list });
     const first = github([
       reviews([{ id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } }]),
+      pullAt("head"),
       { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 3 } },
     ]);
     expect(await first.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).toEqual({ state: "changes_requested" });
-    expect(body(first.calls[1]!)).toMatchObject({ event: "REQUEST_CHANGES", body: "fix" });
+    expect(body(first.calls[2]!)).toMatchObject({ commit_id: "head", event: "REQUEST_CHANGES", body: "fix" });
 
-    const again = github([reviews([{ id: 3, state: "CHANGES_REQUESTED", commit_id: "old", user: { login: "sentryward[bot]" } }])]);
+    const again = github([reviews([{ id: 3, state: "CHANGES_REQUESTED", commit_id: "old", user: { login: "sentryward[bot]" } }]), pullAt("head")]);
     expect(await again.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).toEqual({ state: "unchanged" });
+  });
+
+  it("does not request changes on commits the review never saw, and withdraws its earlier approval instead", async () => {
+    const earlier = { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } }] };
+    for (const [moved, note] of [
+      [pullAt("newer"), /next review/],
+      [pullAt("head", { ref: "release" }), /rerun/],
+    ] as const) {
+      const { gh, calls } = github([earlier, moved, { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} }]);
+      expect(await gh.setApproval(ghRef, { action: "request_changes", body: "fix", baseRef: "main" })).toMatchObject({
+        state: "withdrawn",
+        note: expect.stringMatching(note),
+      });
+      expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "PUT"]);
+    }
+
+    const none = github([{ url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }, pullAt("newer")]);
+    expect(await none.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).toMatchObject({ state: "refused" });
+    expect(none.calls.some((c) => c.method !== "GET")).toBe(false);
+  });
+
+  it("dismisses its new request for changes, and its earlier approvals, when the pull request moved while it was posted", async () => {
+    const routes = (after: StubRoute) => [
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } }] },
+      { ...pullAt("head"), times: 1 },
+      after,
+      { method: "POST", url: /\/pulls\/42\/reviews$/, body: { id: 9 } },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/(9|2)\/dismissals$/, body: {} },
+    ];
+    const pushed = github(routes(pullAt("newer")));
+    expect(await pushed.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).toMatchObject({ state: "withdrawn" });
+    // Dismissing the request alone would leave the older approval counting.
+    expect(pushed.calls.filter((c) => c.method === "PUT").map((c) => c.url.match(/reviews\/(\d+)\//)![1])).toEqual(["9", "2"]);
+
+    const unreadable = github(routes({ url: /\/pulls\/42$/, status: 404, body: { message: "Not Found" } }));
+    await expect(unreadable.gh.setApproval(ghRef, { action: "request_changes", body: "fix" })).rejects.toThrow(/request for changes was withdrawn/);
+  });
+
+  it("checks whether an approval landed when posting it gave no clear answer", async () => {
+    const noReviews = { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [], times: 1 };
+    const failedPost = { method: "POST", url: /\/pulls\/42\/reviews$/, status: 502, body: { message: "Bad Gateway" } };
+    const landed = { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 9, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } }] };
+
+    // It landed, and the pull request moved meanwhile: dismissed like any other.
+    const moved = github([noReviews, { ...pullAt("head"), times: 1 }, pullAt("newer"), failedPost, landed, { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} }]);
+    expect(await moved.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(moved.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "GET", "PUT"]);
+
+    // It landed and still holds.
+    const holds = github([noReviews, pullAt("head"), failedPost, landed]);
+    expect(await holds.gh.setApproval(ghRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
+
+    // It did not land: the write's own error.
+    const lost = github([noReviews, pullAt("head"), failedPost, { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [] }]);
+    await expect(lost.gh.setApproval(ghRef, { action: "approve", body: "ok" })).rejects.toThrow(/502/);
+
+    // It could not be checked.
+    const unknown = github([noReviews, pullAt("head"), failedPost, { url: /\/pulls\/42\/reviews\?per_page=100$/, status: 500, body: {} }]);
+    await expect(unknown.gh.setApproval(ghRef, { action: "approve", body: "ok" })).rejects.toThrow(/may stand unchecked/);
+
+    // A dropped connection (no response at all) is checked the same way.
+    const stub = fetchStub([noReviews, { ...pullAt("head"), times: 1 }, pullAt("newer"), landed, { method: "PUT", url: /\/pulls\/42\/reviews\/9\/dismissals$/, body: {} }]);
+    const fetch = async (url: string | URL | Request, init: RequestInit = {}) => {
+      if (init.method === "POST") throw new TypeError("fetch failed");
+      return stub.fetch(url, init);
+    };
+    const dropped = new GitHubAdapter({ host: "github.com", token: async () => "t", selfLogin: "sentryward[bot]", fetch });
+    expect(await dropped.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
+    expect(stub.calls.at(-1)!.method).toBe("PUT");
+  });
+
+  it("withdraws only its approvals, keeping a request for changes, when asked to", async () => {
+    const { gh, calls } = github([
+      {
+        url: /\/pulls\/42\/reviews\?per_page=100$/,
+        body: [
+          { id: 2, state: "APPROVED", commit_id: "old", user: { login: "sentryward[bot]" } },
+          { id: 3, state: "CHANGES_REQUESTED", commit_id: "head", user: { login: "sentryward[bot]" } },
+        ],
+      },
+      { method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} },
+    ]);
+    expect(await gh.setApproval(ghRef, { action: "withdraw", body: "retargeted", approvalsOnly: true })).toEqual({ state: "withdrawn" });
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1);
+
+    const onlyRequest = github([
+      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 3, state: "CHANGES_REQUESTED", commit_id: "head", user: { login: "sentryward[bot]" } }] },
+    ]);
+    expect(await onlyRequest.gh.setApproval(ghRef, { action: "withdraw", body: "retargeted", approvalsOnly: true })).toEqual({ state: "unchanged" });
   });
 
   it("dismisses only its own standing reviews when withdrawing", async () => {
@@ -869,6 +959,34 @@ describe("GitLab publishing", () => {
       routes(mrAt({ target_branch: "release" }), { method: "POST", url: /\/merge_requests\/42\/unapprove$/, status: 403, body: { message: "403 Forbidden" } }),
     );
     await expect(stands.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/still stands/);
+  });
+
+  it("checks whether an approval landed when approving gave no clear answer", async () => {
+    const approvals = (users: string[], extra: Partial<StubRoute> = {}) => ({
+      url: /\/merge_requests\/42\/approvals$/,
+      body: { approved_by: users.map((username) => ({ user: { username } })) },
+      ...extra,
+    });
+    const failedApprove = { method: "POST", url: /\/merge_requests\/42\/approve$/, status: 502, body: { message: "502 Bad Gateway" } };
+    const unapprove = { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} };
+
+    // It landed, and the merge request moved meanwhile: unapproved.
+    const moved = gitlab([approvals([], { times: 1 }), approvals(["sentryward-bot"]), { ...mrAt(), times: 1 }, mrAt({ target_branch: "release" }), failedApprove, unapprove]);
+    expect(await moved.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "refused" });
+    expect(moved.calls.at(-1)!.url).toMatch(/\/unapprove$/);
+
+    // It landed and still holds.
+    const holds = gitlab([approvals([], { times: 1 }), approvals(["sentryward-bot"]), mrAt(), failedApprove]);
+    expect(await holds.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toEqual({ state: "approved" });
+
+    // It did not land: the write's own error.
+    const lost = gitlab([approvals([]), mrAt(), failedApprove]);
+    await expect(lost.gl.setApproval(glRef, { action: "approve", body: "ok" })).rejects.toThrow(/502/);
+
+    // It could not be checked: withdrawn blind.
+    const unknown = gitlab([approvals([], { times: 1 }), approvals([], { status: 500 }), mrAt(), failedApprove, unapprove]);
+    await expect(unknown.gl.setApproval(glRef, { action: "approve", body: "ok" })).rejects.toThrow(/any approval was withdrawn/);
+    expect(unknown.calls.at(-1)!.url).toMatch(/\/unapprove$/);
   });
 
   it("refuses only when GitLab says the account cannot approve, and reports other failures", async () => {
