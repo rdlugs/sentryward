@@ -40,6 +40,20 @@ const pullAt = (sha: string, base: { sha?: string; ref?: string } = {}): StubRou
   url: /\/pulls\/42$/,
   body: { head: { sha }, base: { sha: base.sha ?? "base", ref: base.ref ?? "main" } },
 });
+// The merge request as GitLab's setApproval re-reads it around approving;
+// matches glRef unless told otherwise.
+const mrAt = (
+  moved: { head_sha?: string; base_sha?: string; start_sha?: string; target_branch?: string; diff_refs?: null } = {},
+): StubRoute => ({
+  url: /\/merge_requests\/42$/,
+  body: {
+    target_branch: moved.target_branch ?? "main",
+    diff_refs:
+      moved.diff_refs === null
+        ? null
+        : { head_sha: moved.head_sha ?? "head", base_sha: moved.base_sha ?? "base", start_sha: moved.start_sha ?? "start" },
+  },
+});
 
 describe("GitHub publishing", () => {
   it("posts one COMMENT review at the head commit with right-side line anchors", async () => {
@@ -318,13 +332,29 @@ describe("GitHub publishing", () => {
     expect(retargeted.calls.some((c) => c.method === "POST")).toBe(false);
   });
 
-  it("does not reuse an approval of the head once the base has moved", async () => {
-    const { gh, calls } = github([
-      { url: /\/pulls\/42\/reviews\?per_page=100$/, body: [{ id: 2, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } }] },
-      pullAt("head", { sha: "newbase" }),
-    ]);
-    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
-    expect(calls.map((c) => c.method)).toEqual(["GET", "GET"]);
+  it("withdraws its earlier approval, rather than reusing it, once the base has moved", async () => {
+    const routes = (dismissal: StubRoute) => [
+      {
+        url: /\/pulls\/42\/reviews\?per_page=100$/,
+        body: [
+          { id: 2, state: "APPROVED", commit_id: "head", user: { login: "sentryward[bot]" } },
+          { id: 3, state: "APPROVED", commit_id: "head", user: { login: "alice" } },
+        ],
+      },
+      pullAt("head", { ref: "release" }),
+      dismissal,
+    ];
+    const { gh, calls } = github(routes({ method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, body: {} }));
+    expect(await gh.setApproval(ghRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+      state: "withdrawn",
+      note: expect.stringMatching(/rerun/),
+    });
+    // Only its own approval is dismissed, and nothing is posted.
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "PUT"]);
+    expect(body(calls[2]!)).toMatchObject({ event: "DISMISS" });
+
+    const stands = github(routes({ method: "PUT", url: /\/pulls\/42\/reviews\/2\/dismissals$/, status: 403, body: { message: "Forbidden" } }));
+    await expect(stands.gh.setApproval(ghRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/still stands/);
   });
 
   it("dismisses its new approval when the base moved while it was posted", async () => {
@@ -638,11 +668,12 @@ describe("GitLab publishing", () => {
       url: /\/merge_requests\/42\/approvals$/,
       body: { approved_by: users.map((username) => ({ user: { username } })) },
     });
-    const fresh = gitlab([approvals(["alice"]), { method: "POST", url: /\/merge_requests\/42\/approve$/, body: {} }]);
-    expect(await fresh.gl.setApproval(glRef, { action: "approve", body: "ok" })).toEqual({ state: "approved" });
-    expect(body(fresh.calls[1]!)).toEqual({ sha: "head" });
+    const fresh = gitlab([approvals(["alice"]), mrAt(), { method: "POST", url: /\/merge_requests\/42\/approve$/, body: {} }]);
+    expect(await fresh.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toEqual({ state: "approved" });
+    expect(fresh.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET"]);
+    expect(body(fresh.calls[2]!)).toEqual({ sha: "head" });
 
-    const done = gitlab([approvals(["sentryward-bot"])]);
+    const done = gitlab([approvals(["sentryward-bot"]), mrAt()]);
     expect(await done.gl.setApproval(glRef, { action: "approve", body: "ok" })).toEqual({ state: "unchanged" });
 
     const withdraw = gitlab([approvals(["sentryward-bot"]), { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} }]);
@@ -654,14 +685,74 @@ describe("GitLab publishing", () => {
     expect(others.calls).toHaveLength(1);
   });
 
+  it("does not approve, or reuse its approval, once the merge request was retargeted or its diff refs moved", async () => {
+    const approvals = (users: string[]) => ({
+      url: /\/merge_requests\/42\/approvals$/,
+      body: { approved_by: users.map((username) => ({ user: { username } })) },
+    });
+    const unapprove = { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} };
+
+    for (const moved of [mrAt({ target_branch: "release" }), mrAt({ base_sha: "newbase" }), mrAt({ start_sha: "newstart" }), mrAt({ diff_refs: null })]) {
+      const fresh = gitlab([approvals([]), moved]);
+      expect(await fresh.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+        state: "refused",
+        note: expect.stringMatching(/rerun/),
+      });
+      expect(fresh.calls.some((c) => c.method === "POST")).toBe(false);
+    }
+
+    // Its earlier approval no longer covers the target, so it is withdrawn.
+    const stale = gitlab([approvals(["sentryward-bot"]), mrAt({ target_branch: "release" }), unapprove]);
+    expect(await stale.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "withdrawn" });
+    expect(stale.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST"]);
+
+    const stands = gitlab([
+      approvals(["sentryward-bot"]),
+      mrAt({ target_branch: "release" }),
+      { method: "POST", url: /\/merge_requests\/42\/unapprove$/, status: 403, body: { message: "403 Forbidden" } },
+    ]);
+    await expect(stands.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/still stands/);
+
+    // A newer head leaves the decision to the review that push queued.
+    const pushed = gitlab([approvals(["sentryward-bot"]), mrAt({ head_sha: "newer" })]);
+    expect(await pushed.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({
+      state: "refused",
+      note: expect.stringMatching(/next review/),
+    });
+    expect(pushed.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("withdraws its new approval when the merge request moved while it was posted, or cannot be re-read", async () => {
+    const routes = (after: StubRoute, unapprove: StubRoute = { method: "POST", url: /\/merge_requests\/42\/unapprove$/, body: {} }) => [
+      { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [] } },
+      { ...mrAt(), times: 1 },
+      after,
+      { method: "POST", url: /\/merge_requests\/42\/approve$/, body: {} },
+      unapprove,
+    ];
+    const retargeted = gitlab(routes(mrAt({ target_branch: "release" })));
+    expect(await retargeted.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).toMatchObject({ state: "refused" });
+    expect(retargeted.calls.map((c) => c.method)).toEqual(["GET", "GET", "POST", "GET", "POST"]);
+    expect(retargeted.calls[4]!.url).toMatch(/\/unapprove$/);
+
+    const unreadable = gitlab(routes({ url: /\/merge_requests\/42$/, status: 404, body: { message: "404 Not Found" } }));
+    await expect(unreadable.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/approval was withdrawn/);
+
+    const stands = gitlab(
+      routes(mrAt({ target_branch: "release" }), { method: "POST", url: /\/merge_requests\/42\/unapprove$/, status: 403, body: { message: "403 Forbidden" } }),
+    );
+    await expect(stands.gl.setApproval(glRef, { action: "approve", body: "ok", baseRef: "main" })).rejects.toThrow(/still stands/);
+  });
+
   it("refuses only when GitLab says the account cannot approve, and reports other failures", async () => {
-    const ineligible = gitlab([{ url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: false } }]);
+    const ineligible = gitlab([{ url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: false } }, mrAt()]);
     expect(await ineligible.gl.setApproval(glRef, { action: "approve", body: "ok" })).toMatchObject({ state: "refused" });
     expect(ineligible.calls.some((c) => c.method === "POST")).toBe(false);
 
     // A 401 from the approve call itself may be a revoked token: an error, not a note.
     const unauthorized = gitlab([
       { url: /\/merge_requests\/42\/approvals$/, body: { approved_by: [], user_can_approve: true } },
+      mrAt(),
       { method: "POST", url: /\/merge_requests\/42\/approve$/, status: 401, body: { message: "401 Unauthorized" } },
     ]);
     await expect(unauthorized.gl.setApproval(glRef, { action: "approve", body: "ok" })).rejects.toThrow(/401/);

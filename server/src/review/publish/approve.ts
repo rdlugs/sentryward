@@ -4,6 +4,7 @@ import type { ForgeProvider } from "../core/models.ts";
 import { FORGE_INFO } from "../forge/providers.ts";
 import type { ApprovalAction } from "../forge/types.ts";
 import { plural } from "../core/plural.ts";
+import { blockingFindings } from "../core/verdict.ts";
 import { ignoreMatcher } from "../context/ignore.ts";
 import { diffAreas, RISK_KIND_TEXT } from "../context/risk.ts";
 
@@ -65,6 +66,14 @@ export function approvalDecision(config: Config, result: ReviewResult, change: C
     };
   }
   if (result.status !== "completed") return { action: "withdraw", reasons: ["The review did not complete"] };
+  // The verdict passed under a threshold a repository file or trigger loosened;
+  // the dashboard's still holds the approval (config/resolve.ts). Withdraw
+  // rather than request changes: the verdict and the commit status say pass.
+  const guard = config.approvalGuard;
+  if (guard) {
+    const held = blockingFindings(result.findings, guard.blockOn, guard.toolFindingsBlock);
+    if (held.length) return { action: "withdraw", reasons: [`${plural(held.length, "finding")} at or above ${guard.blockOn}`] };
+  }
   if (approval.when === "no_findings" && result.findings.length) {
     return { action: "withdraw", reasons: [`${plural(result.findings.length, "finding")} still open`] };
   }

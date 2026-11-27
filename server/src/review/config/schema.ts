@@ -479,6 +479,16 @@ const ruleGuardSchema = z.strictObject({
 });
 export type RuleGuard = z.infer<typeof ruleGuardSchema>;
 
+// Set by resolution only, like ruleGuard. The verdict follows the merged
+// review.blockOn, which a repository file or trigger may loosen for the review
+// itself; an approval still answers to the dashboard's blocking threshold
+// (publish/approve.ts). Present only when the dashboard is the stricter one.
+const approvalGuardSchema = z.strictObject({
+  blockOn: severitySchema,
+  toolFindingsBlock: z.boolean(),
+});
+export type ApprovalGuard = z.infer<typeof approvalGuardSchema>;
+
 const topLevelShape = {
   version: z.literal(1),
   profile: profileNameSchema,
@@ -498,6 +508,7 @@ const topLevelShape = {
 export const configSchema = z.strictObject({
   ...topLevelShape,
   ruleGuard: ruleGuardSchema.optional(),
+  approvalGuard: approvalGuardSchema.optional(),
   llm: z.strictObject(dashboardLlmShape),
   review: z.strictObject(reviewShape),
   output: z.strictObject(outputShape),

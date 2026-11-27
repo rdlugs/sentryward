@@ -773,12 +773,7 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       if (action.keepAt && current?.state === "APPROVED" && current.commit_id === action.keepAt) {
         return { state: "unchanged" };
       }
-      for (const review of own) {
-        await this.http.request(`${pulls}/reviews/${review.id}/dismissals`, {
-          method: "PUT",
-          body: JSON.stringify({ message: action.body.slice(0, 1000), event: "DISMISS" }),
-        });
-      }
+      await this.dismissReviews(pulls, own, action.body);
       return { state: "withdrawn" };
     }
     // GitHub accepts an approval of an older commit and counts it for the
@@ -793,6 +788,18 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
     // sentryward/review status.
     if (action.action === "approve") {
       const moved = movedFrom(await this.http.json<GhPull>(pulls), ref, action.baseRef);
+      // A moved base queues no review, so an earlier approval would go on
+      // counting for a target no review checked: it is withdrawn here. A push
+      // queues its own review, which decides about the approvals it finds.
+      const stale = own.filter((review) => review.state === "APPROVED");
+      if (moved === BASE_MOVED && stale.length) {
+        try {
+          await this.dismissReviews(pulls, stale, "Sentryward withdrew this approval: the pull request's target branch moved or was changed since it was given.");
+        } catch (err) {
+          throw new Error(`The pull request's target branch moved during the review, and withdrawing the earlier approval failed, so it still stands: ${errorText(err)}`);
+        }
+        return { ...BASE_MOVED, state: "withdrawn" };
+      }
       if (moved) return moved;
     }
     // An approval follows the head, so a push gets a fresh one (branch
@@ -853,6 +860,15 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       }
     }
     return { state: action.action === "approve" ? "approved" : "changes_requested" };
+  }
+
+  private async dismissReviews(pulls: string, reviews: GhReview[], message: string): Promise<void> {
+    for (const review of reviews) {
+      await this.http.request(`${pulls}/reviews/${review.id}/dismissals`, {
+        method: "PUT",
+        body: JSON.stringify({ message: message.slice(0, 1000), event: "DISMISS" }),
+      });
+    }
   }
 
   // Threads can only be resolved through GraphQL. GitHub Enterprise serves it

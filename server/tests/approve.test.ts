@@ -61,6 +61,17 @@ describe("approvalDecision", () => {
     expect(approvalDecision(config({ requestChanges: true }), blocked, change())?.action).toBe("request_changes");
   });
 
+  it("holds the approval to the dashboard's threshold when the verdict passed under a looser one", async () => {
+    const held = { ...config({ requestChanges: true }), approvalGuard: { blockOn: "info" as const, toolFindingsBlock: true } };
+    // Withdraws, never requests changes: the verdict and the status say pass.
+    expect(approvalDecision(held, await passing(), change())).toEqual({
+      action: "withdraw",
+      reasons: [expect.stringMatching(/^\d+ findings? at or above info$/)],
+    });
+    expect(approvalDecision(held, await passing(false), change())).toEqual({ action: "approve", reasons: [] });
+    expect(approvalDecision(config(), await passing(), change())).toEqual({ action: "approve", reasons: [] });
+  });
+
   it("names the blocking findings of a partial review rather than calling it incomplete", async () => {
     const blocked = { ...(await sampleResult()), status: "partial" as const };
     expect(approvalDecision(config({ requestChanges: true }), blocked, change())).toEqual({

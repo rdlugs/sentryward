@@ -192,7 +192,7 @@ export interface ApprovalAction {
   // no record of what Sentryward last reviewed.
   keepAt?: string;
   // approve only: the target branch the review saw, so an approval is not
-  // posted on a change retargeted mid-review (GitHub checks it).
+  // posted on a change retargeted mid-review (both forges check it).
   baseRef?: string;
 }
 

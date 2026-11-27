@@ -469,6 +469,22 @@ describe("parseRepoFile", () => {
     expect(repeated.sources["output.approval.blockLabels"]).toBe("repoFile");
   });
 
+  it("holds the dashboard's blocking threshold for approval when a file loosens the review's", () => {
+    const global: ConfigOverride = { review: { blockOn: "major", toolFindingsBlock: true } };
+    const loosened = resolveConfig({ global, repoFile: { review: { blockOn: "critical", toolFindingsBlock: false } } }).config;
+    // The review itself follows the file; the approval does not.
+    expect(loosened.review).toMatchObject({ blockOn: "critical", toolFindingsBlock: false });
+    expect(loosened.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true });
+    expect(resolveConfig({ global, trigger: { review: { blockOn: "critical" } } }).config.approvalGuard).toEqual({ blockOn: "major", toolFindingsBlock: true });
+
+    // Tightening, or no layer above the dashboard, needs no guard.
+    expect(resolveConfig({ global, repoFile: { review: { blockOn: "minor" } } }).config.approvalGuard).toBeUndefined();
+    expect(resolveConfig({ global: { review: { blockOn: "critical" } } }).config.approvalGuard).toBeUndefined();
+
+    expect(configOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false } }).success).toBe(false);
+    expect(dashboardOverrideSchema.safeParse({ approvalGuard: { blockOn: "info", toolFindingsBlock: false } }).success).toBe(false);
+  });
+
   it("reads review.verify and rejects an unknown mode", () => {
     expect(parseRepoFile(".sentryward.yaml", "review:\n  verify: all\n")).toEqual({
       override: { review: { verify: "all" } },

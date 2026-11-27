@@ -775,4 +775,25 @@ describe("publishReview approval", () => {
     expect(publication.stopped).toBe(true);
     expect(calls.approvals).toEqual([]);
   });
+
+  it("is not sent when the job was cancelled while the labels were re-read", async () => {
+    const { publisher, calls } = recordingPublisher();
+    let reread = false;
+    const getLabels = publisher.getLabels.bind(publisher);
+    publisher.getLabels = async (ref) => {
+      reread = true;
+      return getLabels(ref);
+    };
+    const publication = await publishReview({
+      publisher,
+      changeSet: makeChangeSet(),
+      result: await passing(),
+      config: approving({ blockLabels: ["do-not-merge"] }),
+      postedFingerprints: new Set(),
+      proceed: async () => !reread,
+    });
+    expect(reread).toBe(true);
+    expect(publication.stopped).toBe(true);
+    expect(calls.approvals).toEqual([]);
+  });
 });

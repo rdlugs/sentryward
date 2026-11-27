@@ -11,6 +11,7 @@ import {
   type DashboardOverride,
   type ProfileName,
   type RuleGuard,
+  type ApprovalGuard,
 } from "./schema.ts";
 import { atLeast } from "../core/severity.ts";
 
@@ -211,6 +212,8 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   const config = configSchema.parse(merged);
   const ruleGuard = guardFor(layers, config, sources);
   if (ruleGuard) config.ruleGuard = ruleGuard;
+  const approvalGuard = approvalGuardFor(layers, config);
+  if (approvalGuard) config.approvalGuard = approvalGuard;
   const approvalWarnings = holdApproval(layers, config, sources);
 
   return { config, sources, warnings: [...combinedIssues.map((issue) => issue.message), ...approvalWarnings], combinedIssues };
@@ -289,6 +292,22 @@ function holdApproval(layers: ConfigLayers, config: Config, sources: Record<stri
   return warnings;
 }
 
+// The verdict is the review's own, so a repository file or trigger may loosen
+// review.blockOn (or stop tool findings blocking) for it. An automatic
+// approval is a security control like the approval policy above: it still
+// answers to the threshold the dashboard layers resolve to, or the effective
+// one where that is stricter. Only set when the dashboard is the stricter one.
+function approvalGuardFor(layers: ConfigLayers, config: Config): ApprovalGuard | undefined {
+  if (!layers.repoFile && !layers.trigger) return undefined;
+  const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings, directory: layers.directory }).config;
+  const { blockOn, toolFindingsBlock } = config.review;
+  const held: ApprovalGuard = {
+    // The lower severity is the stricter threshold.
+    blockOn: atLeast(blockOn, dashboard.review.blockOn) ? dashboard.review.blockOn : blockOn,
+    toolFindingsBlock: toolFindingsBlock || dashboard.review.toolFindingsBlock,
+  };
+  return held.blockOn !== blockOn || held.toolFindingsBlock !== toolFindingsBlock ? held : undefined;
+}
 
 // Dashboard rules are held to the thresholds the dashboard layers resolve to
 // on their own, profile included, or to the effective ones where those are

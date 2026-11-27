@@ -193,6 +193,34 @@ function filesTruncated(count: string | null | undefined, listed: number): boole
   return Number.isFinite(total) && listed < total;
 }
 
+const GL_MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The merge request moved to a newer commit during the review; the next review decides",
+};
+
+// A retarget queues no review (only new commits and reopening do), so the note
+// says a rerun is needed rather than leaving it to a next review.
+const GL_BASE_MOVED: ApprovalOutcome = {
+  state: "refused",
+  note: "The merge request's target branch moved or was changed during the review; rerun the review to decide on an approval",
+};
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Whether the merge request still is what the review saw: its head, the diff
+// refs its diff was read against, and its target branch. Without diff refs it
+// cannot be confirmed, which counts as moved.
+function glMovedFrom(mr: GlMergeRequest, ref: ForgeRef, baseRef: string | undefined): ApprovalOutcome | undefined {
+  const refs = mr.diff_refs;
+  if (refs && refs.head_sha !== ref.headSha) return GL_MOVED;
+  if (!refs || refs.base_sha !== ref.baseSha || refs.start_sha !== ref.startSha || (baseRef !== undefined && mr.target_branch !== baseRef)) {
+    return GL_BASE_MOVED;
+  }
+  return undefined;
+}
+
 function nextPage(res: Response, current: string): string | null {
   const next = res.headers.get("x-next-page");
   if (!next) {
@@ -739,7 +767,8 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
   // GitLab approvals carry no text and have no "request changes", so a request
   // for changes only withdraws Sentryward's approval; the summary comment says
   // why. The approval is pinned to the head sha, so a push racing the review
-  // fails it rather than approving commits the review never saw. Approvals
+  // fails it rather than approving commits the review never saw; the target
+  // branch and diff refs are compared around the write (below). Approvals
   // record no commit, so ApprovalAction.keepAt cannot apply: without history
   // a withdrawal goes ahead, which errs on the side of no approval.
   async setApproval(ref: ForgeRef, action: ApprovalAction): Promise<ApprovalOutcome> {
@@ -761,6 +790,22 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       await this.http.request(`${mr}/unapprove`, { method: "POST" });
       return { state: "withdrawn" };
     }
+    // The sha pin covers the head only: a retarget or a recomputed diff would
+    // let an approval stand on a target the review never saw. The merge request
+    // is checked before an approval is reused or posted, and again after.
+    const moved = glMovedFrom(await this.http.json<GlMergeRequest>(mr), ref, action.baseRef);
+    // A retarget queues no review, so an earlier approval would go on counting
+    // for a target no review checked: it is withdrawn here. A push queues its
+    // own review, which decides about the approval it finds.
+    if (moved === GL_BASE_MOVED && approved) {
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (err) {
+        throw new Error(`The merge request's target branch moved during the review, and withdrawing the earlier approval failed, so it still stands: ${errorText(err)}`);
+      }
+      return { ...GL_BASE_MOVED, state: "withdrawn" };
+    }
+    if (moved) return moved;
     if (approved) return { state: "unchanged" };
     // GitLab says outright when this account may not approve this MR (the
     // project prevents author approval, the token opened it, or its role or
@@ -771,6 +816,27 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       return { state: "refused", note: "GitLab did not let this account approve the merge request" };
     }
     await this.http.request(`${mr}/approve`, { method: "POST", body: JSON.stringify({ sha: ref.headSha }) });
+    let after: ApprovalOutcome | undefined;
+    let unconfirmed: unknown;
+    try {
+      after = glMovedFrom(await this.http.json<GlMergeRequest>(mr), ref, action.baseRef);
+    } catch (err) {
+      unconfirmed = err;
+    }
+    if (after || unconfirmed !== undefined) {
+      // Withdrawn whenever its freshness is not confirmed; a failure throws so
+      // the review shows an error, as on GitHub.
+      const why = unconfirmed !== undefined ? `the merge request could not be re-read (${errorText(unconfirmed)})` : "the merge request moved on during the review";
+      try {
+        await this.http.request(`${mr}/unapprove`, { method: "POST" });
+      } catch (err) {
+        throw new Error(`The approval could not be confirmed because ${why}, and withdrawing it failed, so it still stands: ${errorText(err)}`);
+      }
+      if (unconfirmed !== undefined) {
+        throw new Error(`Could not confirm the merge request was still at the reviewed commits, so the approval was withdrawn: ${errorText(unconfirmed)}`);
+      }
+      return after!;
+    }
     return { state: "approved" };
   }
 

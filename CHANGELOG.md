@@ -27,11 +27,20 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   page's sidebar shows the outcome and the reasons, and the Display preview
   returns what would happen. Safeguards: `.sentryward.yaml` (and the trigger)
   can only tighten approval, never turn it on or drop a block (even when a
-  dashboard list repeats an entry); a GitHub approval is not posted (and an
+  dashboard list repeats an entry), and an approval still answers to the
+  dashboard's `block_on` (and tool findings blocking) when the repository file
+  or trigger loosens them for the review itself, withdrawing rather than
+  approving; a GitHub approval is not posted (and an
   existing one is not reused) when the head, the base sha or the target branch
   moved during the review, and is dismissed again when they moved while it was
   being posted or could not be re-read afterwards (a failed dismissal is an
-  error saying the approval still stands); a skipped run keeps the approval
+  error saying the approval still stands); when the base sha or target branch
+  moved, Sentryward's earlier approval is withdrawn too, since a retarget
+  queues no new review (a failed withdrawal is an error); a GitLab approval
+  gets the same checks, comparing the MR's target branch and diff refs before
+  an approval is reused or posted and again after, unapproving when they moved
+  or cannot be re-read; a cancellation that lands while the labels are re-read
+  stops the approval; a skipped run keeps the approval
   only when the last review published an approval decision for the current
   head, and otherwise asks the forge to withdraw, keeping a GitHub approval of
   the current head (filter skips always withdraw); a change whose file list

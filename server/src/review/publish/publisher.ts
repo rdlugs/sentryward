@@ -230,6 +230,9 @@ export async function publishReview(input: PublishInput): Promise<Publication> {
           reasons: ["The change's current labels could not be read, so the label policy could not be checked"],
         } satisfies ApprovalDecision;
       }
+      // The re-read takes a round trip: a cancellation that landed during it
+      // must still stop the approval.
+      if (await halted()) return publication;
     }
     decision = forgeApprovalDecision(ref.provider, decision);
     try {
